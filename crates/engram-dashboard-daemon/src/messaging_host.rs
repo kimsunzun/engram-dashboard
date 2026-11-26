@@ -938,8 +938,7 @@ mod tests {
     /// on the whole module would let that regression pass green elsewhere.
     mod roster_predicate {
         use super::*;
-        use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-        use engram_dashboard_agent::preset::PresetRegistry;
+        use engram_dashboard_agent::persistence::FileProfileStore;
         #[cfg(windows)]
         use engram_dashboard_agent::profile::SpawnMode;
         use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry};
@@ -966,9 +965,6 @@ mod tests {
                 sink,
                 Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(dir(
                     "prof",
-                ))))),
-                Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(dir(
-                    "preset",
                 ))))),
                 Arc::new(SessionTracker::new(
                     TrackerConfig {
@@ -1069,7 +1065,7 @@ mod tests {
             let manager = manager("dormant-dup");
             let port = ManagerDeliveryPort::new(manager.clone());
             // Plant it via the harness seam (ADR-0120): the normal path (`try_create_agent`) enforces registry-wide name uniqueness and cannot create two
-            //   same names; before uniqueness applied to all data (an existing agents.json) this state can really exist.
+            //   same names; a hand-edited profile file can hold this state (loading does not check uniqueness).
             let twin_a = profile("raw-twin-a", "twin");
             let twin_b = profile("raw-twin-b", "twin");
             let mut expected = vec![

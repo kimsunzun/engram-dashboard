@@ -2,29 +2,34 @@
 //!
 //! The transport (PtyTransport) does not know claude/codex; only the `backend/<name>/` folder knows which program is which.
 //!
-//! ★This file calls no backend's items by name★: backend names appear only in the **registry** (`pub mod`·`pub use`·static singletons ·
-//!   the usage prober table [`usage_probes`]) and **the two dispatch tables** (`backend_for` ·
-//! `backend_for_encoder`); all per-backend knowledge comes out through [`AgentBackend`] methods and [`UsageProbe`] implementations. The
-//!   gate is in the `backend/claude/mod.rs` header.
+//! ★This file names no backend's item★: a backend name is written only in the **registry** (`pub mod` · `pub use` ·
+//! static singletons · the usage-probe table [`usage_probes`] · the settings-check table [`settings_checks`]) and the
+//! **two dispatch tables** (`backend_for` · `backend_for_encoder`). Every piece of backend knowledge comes out only
+//! through [`AgentBackend`] methods and the [`UsageProbe`] · [`SettingsCheck`] implementations. The gate is in the
+//! `backend/claude/mod.rs` header.
 //!
 //! tauri import 0.
 
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod hooks;
+pub mod settings_check;
 pub mod shell;
 
 pub use claude::ClaudeBackend;
 pub use codex::CodexBackend;
 pub use gemini::GeminiBackend;
+pub use settings_check::SettingsCheck;
 pub use shell::ShellBackend;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
+use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit};
 use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
@@ -161,17 +166,25 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
 // ADR-0185
 pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// A **one-verb** port telling the assembly point 「a turn actually happened in this incarnation's conversation」 — the assembly point plugs
-///   the session id first-submission latch's submit input in here.
+/// The one-verb port that tells the assembly point "this incarnation's conversation really has a turn now" — the
+/// assembly point plugs the submission input of the session-id first-submission latch in here.
 ///
-/// ★The only caller is the link of a backend whose link owns the turn (`MidTurnPolicy::TransportOwned`)★ — that mode's session does not
-///   count submissions, and the link calls this on the other side's **echo of the first user message**. Other backends have the session
-///   count before sending and ignore it. ★The two are a pair★: `TransportOwned` without plugging this port into the link means no
-///   incarnation can persist its id (every resume a new conversation, no error).
-/// May be called several times — the receiver (the latch) counts only the first.
+/// ★Only the transport of a backend whose transport carries the turn (`MidTurnPolicy::TransportOwned`) calls it★ —
+///   that mode's session does not count submissions, and the transport calls this at the peer's **first user-message
+///   echo**. Every other backend's session counts before sending, so it ignores this port. ★The two are a pair★: a
+///   backend that declares `TransportOwned` without plugging this port into its transport never persists an id (no
+///   error — every resume becomes a new conversation).
+/// The argument = whether the instructions reached the model: `true` when the echoed turn carried this incarnation's
+///   instructions-change context, or when there was none to deliver; `false` when a context was due and its delivery is
+///   not confirmed (the retry bound dropped it, or the first echo was not of a carrying turn — a carrying turn's late
+///   echo that arrives while idle also reports `false`). Session-id persistence does
+///   not depend on it.
+/// It may be called many times — the receiver (the latch) counts only the first call and keeps that call's argument;
+///   the manager records the applied instructions hash only when that first argument is `true`.
 // ADR-0226
 // ADR-0231
-pub type FirstTurnSink = Arc<dyn Fn() + Send + Sync>;
+// ADR-0337
+pub type FirstTurnSink = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// Implemented as a unit struct and used as &'static — stateless.
 pub trait AgentBackend: Send + Sync {
@@ -212,12 +225,14 @@ pub trait AgentBackend: Send + Sync {
     ///   (combination table below); 「does it consume a file」 is a separate field★.
     /// ★Backend knowledge (ADR-0004)★: "which program consumes MCP how" is declared here — the manager does not branch with `matches!`.
     ///
-    /// This flag drives provision's grants, **whether priming is loaded** and **mail availability** (invariant: the mail channel the
-    ///   priming teaches **=** the one that spawn can use; teaching an unusable channel brings the send freeze back, not teaching a usable
-    ///   one leaves an
-    /// uncontrolled bypass). If true, `DaemonControlChannel::provision` carries the MCP bits on the endpoint and picks the MCP-only
-    ///   priming (`eg_send` only — ADR-0126 decision 1) and no CLI mail; if false, **no priming** + CLI mail possible (ADR-0133).
-    /// The control CLI wiring goes to everyone regardless of this axis.
+    /// This flag drives the provision's grants and **mail permission** (`mail_allowed`). True →
+    /// `DaemonControlChannel::provision` puts the MCP bits on the endpoint (with the MCP send grant when the backend
+    /// uses mail) and refuses CLI mail;
+    /// false → no MCP bits, and CLI mail is allowed when the backend uses mail (ADR-0133). It does not decide priming —
+    /// the priming comes only from the launch materials (ADR-0370). Consistency invariant: the mail channel the priming
+    /// teaches **=** the mail channel the spawn can use — teaching a channel it cannot use brings back the send freeze,
+    /// and not teaching one it can use leaves an uncontrolled bypass surface. The control-CLI wiring goes to every spawn
+    /// regardless of this axis.
     ///
     /// ★**This field no longer decides the mcp-config file write — do not revert**★ (ADR-0209 · the `writes_mcp_config_file` gate of
     ///   `control/mod.rs`): 「does it read the file we wrote」 is [`AgentBackend::writes_mcp_config_file`], and the write and its
@@ -235,11 +250,12 @@ pub trait AgentBackend: Send + Sync {
     ///   `--mcp-config` injection runs not one
     /// line, and the symptom is the silence of 「no tools」. A new backend must **answer both together**.
     ///
-    /// ★The false side picks 「no priming」, not 「other priming」 — do not bring the variant axis back★: the CLI-only copy
-    ///   (`prompts/agent-priming-cli.md`) was deleted in `2ef6902`; the formula is `wants_priming = uses_mail && accepts_mcp_config`
-    ///   (`control/mod.rs`). A non-MCP spawn gets
-    /// not one character of instructions and the invariant holds by **teaching nothing** (a document on nonexistent tools would be a lie —
-    ///   ADR-0209 decision 3).
+    /// ★false picks 「no priming」, not 「another priming」 — do not revive a variant axis★: the CLI-only copy
+    ///   (`prompts/agent-priming-cli.md`) was deleted in commit `2ef6902`. A non-MCP spawn gets no instructions, and the
+    ///   consistency invariant above holds by **teaching nothing** (a document that describes a missing tool is a lie;
+    ///   silence is not — ADR-0209 decision 3). The priming comes only from the launch materials, and the tripwire
+    ///   `tests::every_backend_with_a_settings_check_has_what_the_priming_teaches` keeps every backend that can take it
+    ///   MCP- and mail-capable (ADR-0370).
     ///
     /// ★Relation to `supports_control_channel`★: that is "does it **call** provision"; this is "among the channels provision attaches,
     ///   **can it plug in MCP**" — orthogonal. Claude and codex are both true here (codex's attachment is not a file — table above), shell
@@ -270,6 +286,28 @@ pub trait AgentBackend: Send + Sync {
         false
     }
 
+    /// Places this incarnation's materials `kit` in the shape this backend carries — disk writes only through `fs`, only inside the
+    /// volatile folder (never in the working folder). The returned value goes as `artifacts` to the same incarnation's
+    /// [`AgentBackend::build_spec`] · [`AgentBackend::open_spawn`].
+    ///
+    /// `cwd` = the same normalized working folder [`AgentBackend::build_spec`] receives.
+    /// `Err(reason)` = the spawn is aborted — what was written meanwhile is reclaimed with the volatile folder by [`crate::launch::LaunchKitSource::release`].
+    /// ★Default = nothing to carry · no writes★ — only `real` is `kit.plan.real` as is; the rest is
+    ///   `LaunchArtifacts::default()`. A backend that does not translate materials carries nothing even when given real ones.
+    // ADR-0334
+    fn materialize(
+        &self,
+        _command: &AgentCommand,
+        kit: &LaunchKit,
+        _cwd: &Path,
+        _fs: &dyn LaunchFs,
+    ) -> Result<LaunchArtifacts, String> {
+        Ok(LaunchArtifacts {
+            real: kit.plan.real,
+            ..LaunchArtifacts::default()
+        })
+    }
+
     /// cwd and env are passed as values the manager normalized.
     ///
     /// `control` (ADR-0086): the control channel endpoint the daemon issued (an abstract descriptor). If present the backend injects it
@@ -288,8 +326,12 @@ pub trait AgentBackend: Send + Sync {
     ///   first request there.
     /// ★Looking at the mode together is legitimate here, unlike `open_spawn`★: this place receives `mode`, and **Fresh and Resume argv
     ///   differ anyway** (claude's `--session-id` ↔ `--resume`); the assembly point passes this field empty on Fresh.
+    ///
+    /// `artifacts` = this incarnation's [`AgentBackend::materialize`] result. With nothing to carry (the default) the argv is
+    ///   byte-identical to the golden `tests/launch_argv_golden.rs`.
     // ADR-0185
     // ADR-0208
+    // ADR-0334
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -299,6 +341,7 @@ pub trait AgentBackend: Send + Sync {
         cwd: PathBuf,
         env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> CommandSpec;
 
     /// Whether this spawn **can be set up** with the control endpoint the daemon issued. `Err(reason)` = fail-closed (spawn aborted).
@@ -345,6 +388,13 @@ pub trait AgentBackend: Send + Sync {
         TransportShape::Pty
     }
 
+    /// Whether this backend's link must set up a connection (the doc of the public wrapper [`declares_link`] is canonical).
+    /// ★Default = `false`★ — a backend that declares nothing gets no delivery port and takes the old decision path.
+    // ADR-0004
+    fn declares_link(&self, _command: &AgentCommand) -> bool {
+        false
+    }
+
     /// This backend **builds the physical link itself** to launch `command` and hands it out at once with the other values session
     ///   assembly needs.
     ///
@@ -379,21 +429,20 @@ pub trait AgentBackend: Send + Sync {
     ///   terminal, and the declaration-table tripwire (`tests::expected_codec_axis`) measures only the reported value, so it cannot see
     ///   that mismatch.
     ///
-    /// `control` = **the same endpoint** [`AgentBackend::build_spec`] received, for backends carrying control-plane data **through the
-    ///   link handshake** instead of the command line (codex app-server puts the priming content in `developerInstructions` of `thread/start`).
-    /// ★Do not write it again here because it was written there★ — one spawn sending the same value by two means leaves the other side
-    ///   depending on how it merges them; one assembling place per mode (as `resume_session_id` splits between argv and handshake).
-    /// ★Most backends ignore it★ — one finishing by translating into the command line has done everything in `build_spec`.
+    /// `control` = the **same endpoint** [`AgentBackend::build_spec`] received — for a backend whose channel needs
+    ///   control-plane data when it opens (claude's leftover cleaner reads the agent id from it).
+    /// ★Do not send again here what `build_spec` already put on the command line★ — when one spawn sends the same
+    ///   value by two means, our behavior hangs on how the other side merges them. Each mode has one assembly point
+    ///   (the same rule that splits `resume_session_id` between argv and the handshake).
+    /// ★Most backends ignore this field★ — a backend that translates everything into the command line is done in
+    ///   `build_spec`.
+    ///
+    /// `artifacts` = the **same** [`AgentBackend::materialize`] result [`AgentBackend::build_spec`] received — for a backend
+    ///   with materials to carry over its channel. A backend that puts everything on the command line ignores it.
     // ADR-0004
     // ADR-0191
     // ADR-0215
-    /// Whether this backend's link must set up a connection (the doc of the public wrapper [`declares_link`] is canonical).
-    /// ★Default = `false`★ — a backend that declares nothing gets no delivery port and takes the old decision path.
-    // ADR-0004
-    fn declares_link(&self, _command: &AgentCommand) -> bool {
-        false
-    }
-
+    // ADR-0334
     fn open_spawn(
         &self,
         command: &AgentCommand,
@@ -406,10 +455,17 @@ pub trait AgentBackend: Send + Sync {
         // Where the connection's outcome is delivered — comes only to backends whose `declares_link()` is true.
         _link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
-        // This default fetches no session id, has no link-owned turn, no link resume, and no handshake control data — dropped explicitly
-        //   instead of underscore names (names must match the doc above: rustdoc renders the signature).
-        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
+        // This default fetches no session id, has no link-owned turn, no link resume, and no handshake control data or materials —
+        //   dropped explicitly instead of underscore names (names must match the doc above: rustdoc renders the signature).
+        let _ = (
+            sid_sink,
+            first_turn_sink,
+            resume_session_id,
+            control,
+            artifacts,
+        );
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -618,8 +674,9 @@ fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
 ///   the tag, not the command, so it is traced back here.
 ///
 /// `None` = that tag has no backend knowledge (bytes pass through).
-/// ★Backend names are written only in this table, `backend_for` above, [`usage_probes`] below and the singleton declarations★ — a name
-///   elsewhere means the `backend/<name>/` isolation leaked (ADR-0004).
+/// ★A backend name is written only in this table, `backend_for` right above, [`usage_probes`] ·
+///   [`settings_checks`] below and the singleton declarations★ — a backend name outside them means the
+///   `backend/<name>/` folder isolation leaked (ADR-0004).
 fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
     match e {
         InputEncoder::Raw => None,
@@ -650,6 +707,23 @@ pub fn usage_probe_for(word: &str) -> Option<&'static dyn UsageProbe> {
     usage_probes()
         .into_iter()
         .find(|probe| probe.key().as_str().eq_ignore_ascii_case(word))
+}
+
+// ── Settings-check registry ────────────────────────────────────────────────────
+
+/// Every backend settings check — the caller (asset-library) gets each backend's settings knowledge only from here.
+/// A word with no entry gets no settings check — today claude and codex have one.
+// ADR-0334
+pub fn settings_checks() -> [&'static dyn SettingsCheck; 2] {
+    [&claude::CLAUDE_SETTINGS_CHECK, &codex::CODEX_SETTINGS_CHECK]
+}
+
+/// Backend word → its settings check, ASCII case-insensitive (the same entrances as [`usage_probe_for`]).
+/// `None` = that word has no settings check.
+pub fn settings_check_for(word: &str) -> Option<&'static dyn SettingsCheck> {
+    settings_checks()
+        .into_iter()
+        .find(|check| check.backend().eq_ignore_ascii_case(word))
 }
 
 // ── Free-function dispatch ─────────────────────────────────────────────────────────
@@ -688,6 +762,23 @@ pub fn uses_mail(c: &AgentCommand) -> bool {
     backend_for(c).uses_mail()
 }
 
+/// Canonical doc = [`AgentBackend::materialize`]. ★This call may write to disk★ (through `fs`, only inside the volatile folder).
+///
+/// ★The backend is never handed `fs` as is★ — it gets a port confined to `kit.volatile_dir`. A write anywhere else (the working
+///   folder included) fails the placement (`place_in_volatile`).
+// ADR-0334
+// TRD S25 §1-5 (na) 6
+pub fn materialize(
+    c: &AgentCommand,
+    kit: &LaunchKit,
+    cwd: &Path,
+    fs: &dyn LaunchFs,
+) -> Result<LaunchArtifacts, String> {
+    crate::launch::place_in_volatile(kit, fs, |confined| {
+        backend_for(c).materialize(c, kit, cwd, confined)
+    })
+}
+
 pub fn build_command_spec(
     c: &AgentCommand,
     mode: SpawnMode,
@@ -696,8 +787,18 @@ pub fn build_command_spec(
     cwd: PathBuf,
     env: Vec<(String, String)>,
     control: Option<ControlEndpoint>,
+    artifacts: &LaunchArtifacts,
 ) -> CommandSpec {
-    backend_for(c).build_spec(c, mode, session_id, resume_session_id, cwd, env, control)
+    backend_for(c).build_spec(
+        c,
+        mode,
+        session_id,
+        resume_session_id,
+        cwd,
+        env,
+        control,
+        artifacts,
+    )
 }
 
 /// The fail-closed gate **right before** assembly (canonical doc = [`AgentBackend::precheck_control_endpoint`]).
@@ -728,6 +829,7 @@ pub fn open_spawn(
     resume_session_id: Option<Uuid>,
     link_sink: Option<LinkSink>,
     control: Option<&ControlEndpoint>,
+    artifacts: &LaunchArtifacts,
 ) -> Result<SpawnParts, PtyError> {
     backend_for(c).open_spawn(
         c,
@@ -739,6 +841,7 @@ pub fn open_spawn(
         resume_session_id,
         link_sink,
         control,
+        artifacts,
     )
 }
 
@@ -957,9 +1060,11 @@ mod tests {
     // Checklist when wiring a new variant:
     //   ① Do not copy-paste the stub for the new backend's two capabilities — fill them with values measured in a CLI spike.
     //   ② supports_control_channel=false makes a standalone agent without messaging (check that it is intended).
-    //   ③ If non-MCP (accepts_mcp_config=false), provision picks the [Cli] grant and **loads no priming** (the CLI copy was deleted in
-    //   `2ef6902` and the `roundtrip-smoke --cli-only` knob with it — do not bring them back); that branch has no means of measurement
-    //   today — ADR-0209.
+    //   ③ Non-MCP (accepts_mcp_config=false): provision picks the [Cli] grant on its own (when the backend uses
+    //      mail), and the spawn gets **no priming at all** — only a backend with a settings check gets real launch
+    //      materials, and Noop kits carry none (ADR-0370). The CLI copy was deleted in commit `2ef6902` together
+    //      with the `roundtrip-smoke --cli-only` knob — do not revive it. That branch has no measuring tool
+    //      today — ADR-0209.
     //   ④ If MCP-capable, measure with the default roundtrip.
     //   ⑤ **Do not derive** the third field (writes_mcp_config_file) **from the second** — 「mail through MCP」 and 「reads the mcp-config
     //   file we wrote」 are separate; true only when that program has a flag pointing at that file (claude's `--mcp-config`). True writes a
@@ -1022,6 +1127,68 @@ mod tests {
                 "variant {:?}: writes_mcp_config_file mismatch — if this field is true, a plaintext token JSON is written to disk on every spawn and a failure of that write cuts the spawn. Declare it consciously following checklist ⑤ above (ADR-0209)",
                 c
             );
+        }
+    }
+
+    /// ★Tripwire — every backend with a settings check is MCP-capable and uses mail★. Real launch materials add the
+    /// built-in priming whenever 「Default」 is attached, and that priming teaches the Engram MCP tools and mail — what
+    /// priming teaches must be what the spawn has. A backend that gains a settings check without both must decide how
+    /// its agents get (or skip) the priming first.
+    // ADR-0126
+    // ADR-0133
+    #[test]
+    fn every_backend_with_a_settings_check_has_what_the_priming_teaches() {
+        let variants = [
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+        ];
+        for check in settings_checks() {
+            let command = variants
+                .iter()
+                .find(|c| crate::launch::backend_word(c).eq_ignore_ascii_case(check.backend()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "settings check `{}` has no command variant here — add it to this list",
+                        check.backend()
+                    )
+                });
+            assert!(
+                accepts_mcp_config(command) && uses_mail(command),
+                "`{}` has a settings check, so its agents get the built-in priming, but it lacks MCP or mail",
+                check.backend()
+            );
+        }
+    }
+
+    /// ★Tripwire — a mode that does not load hook components names them★: every backend · mode whose
+    /// `loads().hooks` is `false` has a non-empty `hooks_omitted` code, so the launch check can name the hooks it
+    /// leaves out. `NoticeCodes` derives `Default`, so a backend built with `..NoticeCodes::default()` would
+    /// otherwise get `None` without anyone choosing it.
+    // ADR-0420
+    #[test]
+    fn every_mode_that_loads_no_hooks_names_them() {
+        for check in settings_checks() {
+            for mode in [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson] {
+                if check.loads(mode).hooks {
+                    continue;
+                }
+                let code = check.notice_codes(mode).hooks_omitted;
+                assert!(
+                    code.is_some_and(|code| !code.is_empty()),
+                    "`{}` {mode:?} loads no hooks but names no hooks_omitted code: {code:?}",
+                    check.backend()
+                );
+            }
         }
     }
 
@@ -1493,8 +1660,19 @@ mod tests {
                 //   tells PTY (false · ADR-0245) from pipes.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts =
-                open_spawn(c, &probe, 80, 24, None, None, None, None, None).expect("open_spawn");
+            let parts = open_spawn(
+                c,
+                &probe,
+                80,
+                24,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &LaunchArtifacts::default(),
+            )
+            .expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();
@@ -1788,5 +1966,181 @@ mod tests {
                 "{word}"
             );
         }
+    }
+
+    // ── settings-check registry (ADR-0334) ──
+
+    #[test]
+    fn each_settings_check_key_is_the_backend_word_of_its_backend() {
+        let claude_word = crate::launch::backend_word(&AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::Terminal,
+        });
+        let codex_word = crate::launch::backend_word(&AgentCommand::Codex {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::Terminal,
+        });
+        let keys: Vec<&str> = settings_checks().iter().map(|c| c.backend()).collect();
+        assert_eq!(keys, [claude_word.as_str(), codex_word.as_str()]);
+        assert!(std::ptr::addr_eq(
+            settings_checks()[0],
+            &claude::CLAUDE_SETTINGS_CHECK as &dyn SettingsCheck,
+        ));
+        assert!(std::ptr::addr_eq(
+            settings_checks()[1],
+            &codex::CODEX_SETTINGS_CHECK as &dyn SettingsCheck,
+        ));
+    }
+
+    #[test]
+    fn settings_check_keys_are_unique() {
+        let checks = settings_checks();
+        for (i, a) in checks.iter().enumerate() {
+            for b in &checks[i + 1..] {
+                assert!(
+                    !a.backend().eq_ignore_ascii_case(b.backend()),
+                    "{}",
+                    a.backend()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_check_for_ignores_ascii_case_and_refuses_unknown_words() {
+        for (word, backend) in [
+            ("claude", "claude"),
+            ("Claude", "claude"),
+            ("CLAUDE", "claude"),
+            ("codex", "codex"),
+            ("Codex", "codex"),
+            ("CODEX", "codex"),
+        ] {
+            let check = settings_check_for(word).unwrap_or_else(|| panic!("{word}"));
+            assert_eq!(check.backend(), backend, "{word}");
+        }
+        for unknown in [
+            "",
+            "shell",
+            "gemini",
+            " claude",
+            "claude ",
+            "claud",
+            "codex-cli",
+        ] {
+            assert!(settings_check_for(unknown).is_none(), "{unknown:?}");
+        }
+    }
+
+    // ── launch-material placement (ADR-0334) ──
+
+    /// A fake that records every spot a write through the placement port tried — measures 「no writes」.
+    #[derive(Default)]
+    struct RecordingFs {
+        writes: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl LaunchFs for RecordingFs {
+        fn write_file(&self, path: &Path, _bytes: &[u8]) -> std::io::Result<()> {
+            self.writes.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn link_dir(&self, link: &Path, _target: &Path) -> std::io::Result<()> {
+            self.writes.lock().unwrap().push(link.to_path_buf());
+            Ok(())
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            false
+        }
+
+        fn is_link(&self, _path: &Path) -> std::io::Result<bool> {
+            Err(std::io::ErrorKind::NotFound.into())
+        }
+    }
+
+    fn noop_kit_for(command: &AgentCommand, cwd: &Path) -> LaunchKit {
+        use crate::launch::{LaunchKitSource, NoopLaunchKits};
+
+        let profile = AgentProfile::new(
+            "materialize".to_string(),
+            command.clone(),
+            cwd.to_path_buf(),
+            Vec::new(),
+            false,
+        );
+        let plan = NoopLaunchKits.check(&profile).expect("Noop never blocks");
+        NoopLaunchKits
+            .prepare(plan, profile.id, 1)
+            .expect("Noop prepare")
+    }
+
+    /// Noop materials are placed as nothing to carry · no writes on every backend — the premise that the argv the golden
+    /// (`tests/launch_argv_golden.rs`) measures with the default `artifacts` is the argv of a production Noop spawn.
+    #[test]
+    fn a_noop_kit_materializes_to_nothing_on_every_backend() {
+        let cwd = std::env::temp_dir();
+        for command in mail_eligibility_samples() {
+            let fs = RecordingFs::default();
+            assert_eq!(
+                materialize(&command, &noop_kit_for(&command, &cwd), &cwd, &fs),
+                Ok(LaunchArtifacts::default()),
+                "{command:?}"
+            );
+            assert_eq!(
+                *fs.writes.lock().unwrap(),
+                Vec::<PathBuf>::new(),
+                "{command:?}"
+            );
+        }
+
+        // gemini is not wired into dispatch (its file header), so its implementation is called directly — the default implementation does not read the command.
+        let stand_in = mail_eligibility_samples().remove(0);
+        let fs = RecordingFs::default();
+        assert_eq!(
+            GeminiBackend.materialize(&stand_in, &noop_kit_for(&stand_in, &cwd), &cwd, &fs),
+            Ok(LaunchArtifacts::default())
+        );
+        assert_eq!(*fs.writes.lock().unwrap(), Vec::<PathBuf>::new());
+    }
+
+    /// An empty real kit places nothing and writes nothing on every backend, but `real` is carried as planned — the
+    /// default `materialize` and the claude and codex overrides (which have nothing to place from an empty kit) alike.
+    #[test]
+    fn the_default_materialize_carries_real_and_nothing_else() {
+        // A fixed cmd-safe absolute path: the codex terminal override guards the working folder, and the temp folder
+        //   may hold `&` or `%`. An empty kit touches no disk.
+        let cwd = std::path::absolute("/engram-fake/default-materialize").unwrap();
+        let real_kit = |command: &AgentCommand| {
+            let mut kit = noop_kit_for(command, &cwd);
+            kit.plan.real = true;
+            kit
+        };
+        let carried = LaunchArtifacts {
+            real: true,
+            ..LaunchArtifacts::default()
+        };
+        for command in mail_eligibility_samples() {
+            let fs = RecordingFs::default();
+            assert_eq!(
+                materialize(&command, &real_kit(&command), &cwd, &fs),
+                Ok(carried.clone()),
+                "{command:?}"
+            );
+            assert_eq!(
+                *fs.writes.lock().unwrap(),
+                Vec::<PathBuf>::new(),
+                "{command:?}"
+            );
+        }
+
+        let stand_in = mail_eligibility_samples().remove(0);
+        let fs = RecordingFs::default();
+        assert_eq!(
+            GeminiBackend.materialize(&stand_in, &real_kit(&stand_in), &cwd, &fs),
+            Ok(carried)
+        );
+        assert_eq!(*fs.writes.lock().unwrap(), Vec::<PathBuf>::new());
     }
 }

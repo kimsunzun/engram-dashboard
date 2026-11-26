@@ -341,6 +341,11 @@ pub struct MessagingService {
     /// ★Contract★: reads only the ledger handed to it — does not re-take the service lock (non-reentrant std Mutex). ★`OnceLock`★: reads need no lock.
     #[cfg(any(test, feature = "test-harness"))]
     accept_hook: std::sync::OnceLock<Arc<dyn Fn(&Ledger) + Send + Sync>>,
+    /// Calls of `flush_for` that have **returned**, per recipient id (test only) — including those reached through
+    ///   `flush_for_agent`; a send's own `drain_queue` is not counted.
+    /// A leaf lock, taken only after `drain_queue` has returned — never held with `state`.
+    #[cfg(any(test, feature = "test-harness"))]
+    async_drains_done: Mutex<HashMap<PeerId, usize>>,
 }
 
 impl MessagingService {
@@ -369,6 +374,8 @@ impl MessagingService {
             trigger: None,
             #[cfg(any(test, feature = "test-harness"))]
             accept_hook: std::sync::OnceLock::new(),
+            #[cfg(any(test, feature = "test-harness"))]
+            async_drains_done: Mutex::new(HashMap::new()),
         }
     }
 
@@ -973,6 +980,15 @@ impl MessagingService {
     /// `recipient` = agent id = the queue key (ADR-0309).
     pub fn flush_for(&self, recipient: PeerId) {
         let _ = self.drain_queue(recipient, None);
+        #[cfg(any(test, feature = "test-harness"))]
+        {
+            *self
+                .async_drains_done
+                .lock()
+                .expect("async drain counter poisoned")
+                .entry(recipient)
+                .or_default() += 1;
+        }
     }
 
     /// ★The one injection code (ADR-0125 §Impact, load-bearing)★: injects the parked items addressed to a recipient id in bulk, oldest first. A send-only injection code
@@ -1468,6 +1484,17 @@ impl MessagingService {
             msg_id = %msg_id,
             "messaging inject failed — switching to parking (lossless): {err}"
         );
+    }
+
+    /// How many async drains (`flush_for`) for this recipient have returned — see the `async_drains_done` field.
+    #[cfg(any(test, feature = "test-harness"))]
+    pub fn async_drains_done_for_test(&self, recipient: PeerId) -> usize {
+        self.async_drains_done
+            .lock()
+            .expect("async drain counter poisoned")
+            .get(&recipient)
+            .copied()
+            .unwrap_or(0)
     }
 
     #[cfg(any(test, feature = "test-harness"))]

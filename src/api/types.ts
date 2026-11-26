@@ -112,13 +112,13 @@ export type AgentFailureKind =
   | 'EarlyExitAfterResume'
   | 'Other'
 
-/** Persistent profile — the agents.json unit. No credentials in env (stored in plain text) */
+/** Persistent profile — the daemon profile file unit. No credentials in env (stored in plain text) */
 export interface AgentProfile {
   id: string
   name: string
-  /** User display-name override (ADR-0061, tree rename): Some → shown as is, null → cwd basename. Preferred over `name` (the CreateProfile name / ad-hoc cwd string). Mirror of wire `AgentProfile.display_name` (#[serde(default)] — old agents.json is null). */
+  /** User display-name override (ADR-0061, tree rename): Some → shown as is, null → cwd basename. Preferred over `name` (the CreateProfile name / ad-hoc cwd string). Mirror of wire `AgentProfile.display_name` (#[serde(default)] — null when the key is absent). */
   display_name: string | null
-  /** Parent profile id of the tree hierarchy (ADR-0072): Some(pid) → child of pid, null → root. One level only (the parent must be a root) — validated by backend ProfileRegistry::try_reparent + write boundary normalization. Mirror of wire `AgentProfile.parent_id` (#[serde(default)]). */
+  /** Parent profile id of the tree hierarchy (ADR-0072): Some(pid) → child of pid, null → root. One level only (the parent must be a root) — validated by backend ProfileRegistry::try_reparent + write boundary normalization. Mirror of wire `AgentProfile.parent_id` (#[serde(default)] — null when the key is absent). */
   parent_id: string | null
   command: AgentCommand
   cwd: string
@@ -132,23 +132,12 @@ export interface AgentProfile {
   restart_count: number
   /** Reason for Failed (auto-restore suspend) — persists across cold boots (ADR-0016). Behaviour TODO */
   failed_reason: string | null
-  /** Kind of this entry's last activation failure (ADR-0172); null = none. Lives only in daemon memory — not in agents.json, lost on daemon restart (survives an app window restart). Mirror of wire `AgentProfile.last_failure` (#[serde(default)]). Kind→{retryable · text · action} table = `src/components/agent/failureKinds.ts`. */
+  /** Kind of this entry's last activation failure (ADR-0172); null = none. Lives only in daemon memory — not in the profile file, lost on daemon restart (survives an app window restart). Mirror of wire `AgentProfile.last_failure` (#[serde(default)]). Kind→{retryable · text · action} table = `src/components/agent/failureKinds.ts`. */
   last_failure: AgentFailureKind | null
   created_at: number
   last_active: number
   /** Last process launch time (for records/debugging, not used for reset decisions) */
   last_start_at: number | null
-}
-
-// ── presets (ADR-0061) ────────────────────────────────────────────────────────────
-
-/** Persistent preset — presets.json unit (daemon-owned, ADR-0061), mirror of wire `Preset`. A separate axis from profiles: preset = frequently used cwd bookmark (no spawn); profile = the real agent storage unit. */
-export interface Preset {
-  id: string
-  /** Normalized cwd (the JSON representation of PathBuf = a string). Without a name override, derived from this value's basename. */
-  cwd: string
-  /** Display-name override (ADR-0061): Some → shown as is, null → cwd basename. Mirror of wire `Preset.name` (#[serde(default)]). The rename command sets/clears it. */
-  name: string | null
 }
 
 /** Restore outcome — restore-result event, #[serde(tag="type")] */

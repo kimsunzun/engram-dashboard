@@ -737,15 +737,12 @@ pub(crate) fn emit_broadcast(
         AgentEvent::ProfileListUpdated { profiles } => {
             events.profile_list_updated(profiles);
         }
-        // ADR-0061: every webview mirrors the preset list, so the broadcast is wired through before any frontend listener consumes it.
-        AgentEvent::PresetListUpdated { presets } => {
-            events.preset_list_updated(presets);
-        }
         // A failure outside every round trip — a reply-tagged `Error` never gets here (the reply path takes it first),
         //   so `request_id` is always `None`. Not emitted: no field says which view it belongs to.
         AgentEvent::Error {
             request_id: None,
             message,
+            ..
         } => {
             tracing::warn!(%message, "daemon error event (outside a command round trip)");
         }
@@ -761,8 +758,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use engram_dashboard_protocol::{
-        AgentBackendKind, AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RequestId,
-        RestoreReport, SubscribeAction, UsageLimitSnapshot, UsageVendorState,
+        AgentBackendKind, AgentId, AgentInfo, AgentProfile, AgentStatus, RequestId, RestoreReport,
+        SubscribeAction, UsageLimitSnapshot, UsageVendorState,
     };
     use engram_dashboard_transport::testing::{
         settle, settle_until, ImmediateHandshake, ManualClock, MemoryNetwork,
@@ -1882,6 +1879,8 @@ mod tests {
             AgentEvent::Error {
                 request_id: None,
                 message: "x".into(),
+                launch_blocked: None,
+                created_agent_id: None,
             },
         ] {
             let out = route(&mut st, &key(), token, event(4, ev));
@@ -1940,9 +1939,6 @@ mod tests {
         }
         fn profile_list_updated(&self, _profiles: &[AgentProfile]) {
             self.push("profiles".into());
-        }
-        fn preset_list_updated(&self, _presets: &[Preset]) {
-            self.push("presets".into());
         }
         fn usage_limits_updated(
             &self,

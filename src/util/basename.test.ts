@@ -1,4 +1,4 @@
-// ADR-0061: the cwd basename derivation rule. The single source of PresetPalette · AgentList display names.
+// ADR-0061: the cwd basename derivation rule — the single source of path display names.
 
 import { describe, expect, it } from 'vitest'
 

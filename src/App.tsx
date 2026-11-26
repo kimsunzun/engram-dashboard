@@ -58,13 +58,10 @@ function App() {
       void initEventBus()
       // ADR-0102: the boot pull is wrapped in retries — the same pattern as bootstrapDaemonIfNeeded.
       // Right after the daemon connects, IPC can be momentarily not ready, so a one-shot failure would turn straight into a blank.
-      // ★Profiles and presets are retried too★: the tree and preset areas stay empty until they receive the first list (AgentList · PresetPalette),
-      //   so a single failure means a stuck empty area.
+      // ★Profiles are retried too★: the tree stays empty until it receives the first list (AgentList), so a single failure means a stuck empty area.
       bootPull('getAgents', () => agentClient.getAgents(), agents => useAgentStore.getState().setAgents(agents))
       // ADR-0018: needed for the tree to draw reserved (empty-shell) nodes.
       bootPull('listProfiles', () => agentClient.listProfiles(), p => useAgentStore.getState().setProfiles(p))
-      // ADR-0061: needed for PresetPalette to draw the list.
-      bootPull('listPresets', () => agentClient.listPresets(), p => useAgentStore.getState().setPresets(p))
     })()
   }, [])
 

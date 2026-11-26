@@ -107,7 +107,9 @@ fn sane_secs(value: f64, fallback: f64) -> f64 {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
-    /// Upper limit on waiting for a reply; one value for every command kind (ADR-0181 decision 1). ★Unverified★ — real agent spawn time never measured (the ADR's only real risk, 8 s).
+    /// Upper limit on waiting for a reply, for every request that does not carry its own ([`crate::Peer::request_in`]'s
+    /// `reply_deadline` — ADR-0369 amends ADR-0181 decision 1 for launch requests only). ★Unverified★ — real agent spawn time never
+    /// measured (the ADR's only real risk, 8 s).
     pub request_timeout: Duration,
     /// The limit wrapping the dial and the handshake **together** (as the old `HANDSHAKE_TIMEOUT`). ★For an accepted peer ([`crate::Registry::attach`]) it is the auth deadline★, measured from the end of the
     /// upgrade ([`crate::Accepted::upgraded_at`], TRD 3 §5 3); an accepted peer does not redial, so it ignores [`Policy::reconnect`] · [`Policy::live_dwell`].

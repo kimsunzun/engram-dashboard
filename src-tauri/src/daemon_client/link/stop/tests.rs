@@ -177,6 +177,8 @@ fn an_error_frame_is_a_terminal_refusal_and_its_token_echo_is_not_logged() {
     let echo = text(&AgentEvent::Error {
         request_id: None,
         message: format!("bad token {TOKEN}"),
+        launch_blocked: None,
+        created_agent_id: None,
     });
     let step = super::super::test_log::capture(lines.clone(), || {
         StopHandshake::new(&target(PROTOCOL_VERSION)).on_frame(&echo)
@@ -390,6 +392,8 @@ async fn a_refused_dial_a_reset_or_an_error_frame_sends_nothing() {
     daemon.push(text(&AgentEvent::Error {
         request_id: None,
         message: "protocol_version mismatch".into(),
+        launch_blocked: None,
+        created_agent_id: None,
     }));
     daemon.close();
     assert_eq!(joined("error frame", task).await, StopSend::NothingSent);

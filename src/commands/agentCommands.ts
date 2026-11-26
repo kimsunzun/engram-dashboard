@@ -8,7 +8,6 @@ import { t } from '../i18n'
 import type { AgentProfile, AgentOutputFormat } from '../api/types'
 import { agentClient } from '../api/clientFactory'
 import { INPUT_LOCKED_REFUSAL } from '../api/agentClient'
-import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
 import { pendingInterrupt, useInterruptStore } from '../store/interruptStore'
 import { matchDeclaredSpelling } from './enumArg'
@@ -68,38 +67,22 @@ register({
   id: 'agent.spawn',
   title: () => t('agent.spawn'),
   category: 'agent',
-  //   - when preset(id) is given, cwd is resolved from store.presets (preset = cwd bookmark, ADR-0061). In the end it
-  //     flows to agentClient.spawnAgent(cwd) (daemon SpawnByCwd).
   //   - parent is SIGNATURE-ONLY: nesting (spawning under a parent) is not supported yet — when set, an explicit throw (no silent
   //     ignoring, for LLM/cdp debugging). Wire it here when tree nesting is introduced.
   run: (args) => {
-    const preset = args?.preset as string | undefined
-    const rawCwd = args?.cwd as string | undefined
+    const cwd = args?.cwd as string | undefined
     const parent = args?.parent as string | undefined
 
     if (parent !== undefined && parent !== null) {
       throw new Error('agent.spawn: parent nesting not supported')
     }
 
-    let cwd: string | undefined
-    if (preset) {
-      const found = useAgentStore.getState().presets.find(p => p.id === preset)
-      if (!found) {
-        throw new Error(`agent.spawn: unknown preset id: '${preset}'`)
-      }
-      cwd = found.cwd
-    } else {
-      cwd = rawCwd
-    }
-
     if (!cwd || !cwd.trim()) {
       throw new Error(`agent.spawn: cwd is empty: ${String(cwd)}`)
     }
-    // ★This door emits only claude — on 2026-09-22 **the reason changed**★. The old reason (「codex shows a trust confirmation modal
-    //   and the LLM cannot get past it」) died by measurement (where that rationale lives = this file's head comment). The one
-    //   remaining reason is **not widening the argument surface**: exposing a backend argument on this command would
+    // ★This door emits only claude★. The one reason is **not widening the argument surface**: exposing a backend argument on this command would
     //   split its vocabulary from the backend door with the same id (`agent.spawn` in `engram-dashboard-agent`) — that one is also pinned
-    //   to claude for the same reason (`create_and_start` in `commands.rs`).
+    //   to claude for the same reason (the cwd arm of `verb_spawn` in `commands.rs`). The old reason (codex's trust modal blocks the LLM) died by measurement (this file's head comment).
     // ★The LLM path that makes codex is `agent.new`★ — backend and output_format are picked there together.
     return agentClient.spawnAgent(cwd.trim(), 'claude')
   },

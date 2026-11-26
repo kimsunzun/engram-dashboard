@@ -1,4 +1,4 @@
-// ★Control-slot focus excluded★: the tree (agent_list) and palette (preset_palette) are not "work slots" and are not focus targets (LayoutLeaf's click-to-focus gate no longer focuses them). Even in existing/edge backend states (a control slot already focused, or focus=null) this function guards so "open" never overwrites the tree/palette with an agent terminal.
+// ★Control-slot focus excluded★: the tree (agent_list) and usage (usage) slots are not "work slots" and are not focus targets (LayoutLeaf's click-to-focus gate no longer focuses them). Even in existing/edge backend states (a control slot already focused, or focus=null) this function guards so "open" never overwrites a control slot with an agent terminal.
 
 import type { LayoutNode, SlotContent } from '../../api/layoutTypes'
 

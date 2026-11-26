@@ -11,7 +11,7 @@
  * and that spot was already written as `"claude"` (the same reason as sibling `EnvelopeFormat`).
  * ★The accepted spelling is case-insensitive · **the emitted spelling is lowercase only**★: what fills this field
  * is a word typed by hand by a person·LLM (`backend` of `agent.spawnInto`, the frontend's `SpawnByCwd`), and there
- * `Claude` is not a typo but the same meaning. Conversely, widening the emitting side would make `agents.json` and the ts-rs union
+ * `Claude` is not a typo but the same meaning. Conversely, widening the emitting side would make the profile file and the ts-rs union
  * diverge, so [`Serialize`](serde::Serialize) stays as the derive.
  */
 export type AgentBackendKind = "claude" | "codex";

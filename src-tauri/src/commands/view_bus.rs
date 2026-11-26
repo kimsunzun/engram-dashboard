@@ -97,7 +97,7 @@ async fn push_delta(
             tracing::info!(window = %label, "webview command diff registered");
             None
         }
-        Err(CommandFailure::Daemon { message }) => {
+        Err(CommandFailure::Daemon { message, .. }) => {
             tracing::warn!(
                 window = %label,
                 "webview command diff registration refused (the shell still holds that name, so unless the declaration is fixed the next reconnect's full registration may be refused too): {message}"

@@ -97,6 +97,7 @@ pub enum PersistedNode {
 /// - What is kept is the JSON value, not the bytes: rewriting sorts the keys, and integers over 64 bits and non-round-tripping floats may change (serde_json `Map` is a sorted map and `arbitrary_precision` is not enabled).
 /// - Unknown fields attached to a known kind are read as `Known` and vanish when written again (the serde of `SlotContent` ignores unknown fields).
 /// - A non-object value is neither — a read failure, and the tab holding that slot cannot be read.
+/// - A retired kind ([`RETIRED_KINDS`]) is read as `Known(Empty)` without holding the raw object — it is content this version dropped, not content a newer version wrote, so it is written back as an empty slot.
 // ADR-0060
 #[derive(Debug, Clone, PartialEq)]
 pub enum PersistedContent {
@@ -116,6 +117,9 @@ impl Serialize for PersistedContent {
 impl<'de> Deserialize<'de> for PersistedContent {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = Value::deserialize(deserializer)?;
+        if is_retired(&raw) {
+            return Ok(PersistedContent::Known(SlotContent::Empty));
+        }
         match SlotContent::deserialize(&raw) {
             Ok(known) if raw.is_object() => Ok(PersistedContent::Known(known)),
             _ => match raw {
@@ -124,6 +128,17 @@ impl<'de> Deserialize<'de> for PersistedContent {
             },
         }
     }
+}
+
+/// The `type` strings of retired slot kinds.
+// ADR-0314: old data is dropped without asking — held as unknown content, the raw object would survive every save and
+//   that slot would stay as "unknown content" with a restore warning.
+const RETIRED_KINDS: [&str; 1] = ["preset_palette"];
+
+fn is_retired(raw: &Value) -> bool {
+    raw.get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| RETIRED_KINDS.contains(&kind))
 }
 
 fn lenient_bool<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
@@ -184,7 +199,6 @@ mod tests {
                     SlotContent::Empty => "empty",
                     SlotContent::Agent { agent_id: _ } => "agent",
                     SlotContent::AgentList => "agent_list",
-                    SlotContent::PresetPalette => "preset_palette",
                     SlotContent::Usage {
                         show_claude: _,
                         show_codex: _,
@@ -226,14 +240,10 @@ mod tests {
                     split(
                         SplitDir::TopBottom,
                         slot(SlotContent::AgentList),
-                        split(
-                            SplitDir::LeftRight,
-                            slot(SlotContent::PresetPalette),
-                            slot(SlotContent::Usage {
-                                show_claude: false,
-                                show_codex: true,
-                            }),
-                        ),
+                        slot(SlotContent::Usage {
+                            show_claude: false,
+                            show_codex: true,
+                        }),
                     ),
                 ),
                 focused_slot_id: Some(Uuid::new_v4()),
@@ -270,7 +280,6 @@ mod tests {
                 "empty",
                 "agent",
                 "agent_list",
-                "preset_palette",
                 "usage",
                 "left_right",
                 "top_bottom",

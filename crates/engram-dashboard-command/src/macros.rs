@@ -43,6 +43,13 @@
 /// | `Option<T>`·`Option<Vec<T>>` | a value or `null` | allowed (optional) |
 /// | `Option<Option<T>>` | a value or `null` — ★**tells apart absent·`null`·value**★ | **not allowed** (required) |
 /// | a struct/enum declared in this block | an inline-expanded object / string enumeration | **not allowed** (required) |
+/// | `Json` | any JSON value (`serde_json::Value` · schema `{}` · TS `unknown`) | **not allowed** (required) |
+///
+/// `Json` is a free-form slot for a payload whose keys the declaration does not fix (e.g. a notice row's
+/// `args`, whose keys depend on its `code`). Write it bare only — `Option<Json>` / `Vec<Json>` are outside the
+/// alphabet and fail to compile (`cannot find type Json`). `Json` is a reserved word of the alphabet: a block
+/// that declares a struct/enum by that name fails with `compile_error!` (checked by hand — this crate has no
+/// compile-fail harness).
 ///
 /// ## Agent reference field — `#[agent_ref]` (ADR-0308)
 ///
@@ -60,6 +67,21 @@
 ///   relaying someone else's command the daemon turns that field's string
 /// into an agent id with its own resolver, so the receiving handler sees **only the id**. Putting it on another type or a type declared in
 ///   the block is a compile error. Schema · TS bindings ignore the mark.
+///
+/// ## Deadline class — `#[deadline(Launch)]` (ADR-0369)
+///
+/// Written after `#[since(...)]` on a command that creates and starts an agent or starts / resumes one, or on a library
+/// file command that can outlast the ordinary wait (ADR-0419):
+///
+/// ```ignore
+///     #[effect(Write)]
+///     #[since(1)]
+///     #[deadline(Launch)]
+///     "agent.spawn" => args AgentSpawnArgs { … } -> ok AgentSpawnOk { … } errors [NOT_FOUND];
+/// ```
+///
+/// It lands in [`crate::CommandSpec::deadline`] → the registration's `deadline` and the schema entry's `"deadline"`;
+/// the daemon sizes the seat by it and the CLI its wait. Leaving it out = `Ordinary`.
 ///
 /// ★Why `Option<Option<T>>` exists★: where `null` is an **active instruction** (e.g. detach the parent), plain `Option<T>` folds "not
 ///   given" and "given null" — one typo'd field silently runs as that instruction.
@@ -106,6 +128,14 @@ macro_rules! declare_commands {
 #[macro_export]
 macro_rules! __engram_declare {
     // ── Step 1: collect the type declarations inside the block first (stamping the dictionary needs all of them) ──────────────
+    // `Json` is the alphabet's word: a block type by that name would win the schema dictionary while the
+    //   struct arms still emit `serde_json::Value`, so the schema and the Rust/TS type would disagree (ADR-0156).
+    (@types [$($seen:tt)*] $(#[doc = $doc:literal])* struct Json $($rest:tt)*) => {
+        compile_error!("declare_commands!: `Json` is the alphabet's free-form JSON type — declare the struct under another name.");
+    };
+    (@types [$($seen:tt)*] $(#[doc = $doc:literal])* enum Json $($rest:tt)*) => {
+        compile_error!("declare_commands!: `Json` is the alphabet's free-form JSON type — declare the enum under another name.");
+    };
     (@types [$($seen:tt)*] $(#[doc = $doc:literal])* struct $name:ident { $($fields:tt)* } $($rest:tt)*) => {
         $crate::__engram_declare!(@types [$($seen)* (struct $name [$($fields)*] [$($doc)*])] $($rest)*);
     };
@@ -160,11 +190,12 @@ macro_rules! __engram_declare {
             };
             ($d:tt f32) => { "{\"type\":\"number\"}" };
             ($d:tt f64) => { "{\"type\":\"number\"}" };
+            ($d:tt Json) => { "{}" };
             ($d:tt $other:ident) => {
                 compile_error!(concat!(
-                    "declare_commands!: field type outside the allowed types `", stringify!($other),
-                    "` — use only String·bool·integers·floats·Option<T>·Vec<T>·Option<Option<T>>·",
-                    "struct/enum declared in this block."
+                    "declare_commands!: field type `", stringify!($other),
+                    "` is outside the alphabet — use String, bool, integers, floats, Json, Option<T>, Vec<T>, ",
+                    "Option<Option<T>>, or a struct/enum declared in this block."
                 ))
             };
         }
@@ -226,6 +257,14 @@ macro_rules! __engram_declare {
         $(#[doc = $fdoc:literal])* $field:ident : Vec < $ty:ident > , $($rest:tt)*) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*]
             [$($out)* $(#[doc = $fdoc])* pub $field : Vec<$ty>,] $($rest)*);
+    };
+    // ts-rs has no impl for `serde_json::Value` without a feature the declaring crates do not enable, so the TS
+    //   type is spelled out. No `serde(default)`: the field is required, as its schema advertises.
+    (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
+        $(#[doc = $fdoc:literal])* $field:ident : Json , $($rest:tt)*) => {
+        $crate::__engram_declare!(@struct_def $name [$($doc)*]
+            [$($out)* $(#[doc = $fdoc])* #[ts(type = "unknown")]
+             pub $field : $crate::serde_json::Value,] $($rest)*);
     };
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
         $(#[doc = $fdoc:literal])* $field:ident : $ty:ident , $($rest:tt)*) => {
@@ -301,6 +340,23 @@ macro_rules! __engram_declare {
         /// Everything this block declared — the 「own crate's declaration set」 `CommandTable::new` receives.
         pub const COMMAND_SPECS: &[&$crate::CommandSpec] = &[ $( &$declared::SPEC, )* ];
     };
+    // A deadline class is declared after `#[since]`; without it the command is `Ordinary` (next arm).
+    (@commands [$($declared:ident)*]
+        $(#[doc = $summary:literal])*
+        #[effect($effect:ident)]
+        #[since($since:literal)]
+        #[deadline($deadline:ident)]
+        $name:literal => args $args:ident { $($afields:tt)* }
+                      -> ok  $ok:ident   { $($ofields:tt)* }
+                      errors [ $($code:ident),* $(,)? ] ;
+        $($rest:tt)*
+    ) => {
+        $crate::__engram_declare!(@agent_refs
+            [ [$($summary)*] $effect $since $deadline $name $args $ok [$($ofields)*] [$($code)*] ]
+            [] [] $($afields)* ,);
+
+        $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
+    };
     (@commands [$($declared:ident)*]
         $(#[doc = $summary:literal])*
         #[effect($effect:ident)]
@@ -313,7 +369,7 @@ macro_rules! __engram_declare {
         // Strip the `#[agent_ref]` marks of the argument fields first — the list of stripped fields and the remaining declaration go to
         //   `@command`.
         $crate::__engram_declare!(@agent_refs
-            [ [$($summary)*] $effect $since $name $args $ok [$($ofields)*] [$($code)*] ]
+            [ [$($summary)*] $effect $since Ordinary $name $args $ok [$($ofields)*] [$($code)*] ]
             [] [] $($afields)* ,);
 
         $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
@@ -375,8 +431,8 @@ macro_rules! __engram_declare {
     };
 
     // One command — receives the argument fields with marks stripped and the stripped field names.
-    (@command [ [$($summary:literal)*] $effect:ident $since:literal $name:literal $args:ident $ok:ident
-                [$($ofields:tt)*] [$($code:ident)*] ]
+    (@command [ [$($summary:literal)*] $effect:ident $since:literal $deadline:ident $name:literal $args:ident
+                $ok:ident [$($ofields:tt)*] [$($code:ident)*] ]
         [$($afields:tt)*] [$($refs:ident)*]) => {
         $crate::__engram_declare!(@struct_def $args [] [] $($afields)* ,);
         $crate::__engram_declare!(@struct_def $ok [] [] $($ofields)* ,);
@@ -396,6 +452,8 @@ macro_rules! __engram_declare {
                 args_type: stringify!($args),
                 ok_type: stringify!($ok),
                 agent_args: &[ $( stringify!($refs) ),* ],
+                // A word outside `DeadlineClass` fails to compile here.
+                deadline: $crate::DeadlineClass::$deadline,
             };
         }
 

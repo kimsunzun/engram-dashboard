@@ -29,7 +29,8 @@
 //!
 //! A slow receiver is never discarded on; this crate stops reading that peer (backpressure).
 //!
-//! 1. ★Do not await [`Peer::request`] on the task that drains the [`Inbox`]★ — backpressure blocks the reply too, so it hangs until [`Policy::request_timeout`].
+//! 1. ★Do not await [`Peer::request`] on the task that drains the [`Inbox`]★ — backpressure blocks the reply too, so it hangs until
+//!    [`Policy::request_timeout`] (or the request's own `reply_deadline`).
 //! 2. ★While held by backpressure, that peer's silence decision and the resume window's deadline stop★ (we blocked it); the window may close later than the
 //!    held time, never earlier (`Supervisor::track_pause`). ★Exception★: a window deadline passing during a write can close it before a replay already in the
 //!    read-ahead queue (「known limits」). Our ping still goes out.
@@ -51,7 +52,7 @@
 //! ★Do not replace this with grep on the manifest text, nor shrink the flags★ — rename · `[dependencies.<name>]` · `[build-dependencies]` · inactive target ·
 //! `optional` all slip through. ★Two holes★ (members are identified by the `engram-dashboard` **name prefix** — ADR-0151 「the rename trap」): a member without
 //! the prefix passes untouched; and if this crate drops the prefix, other crates' cap gates and messaging name regex can no longer see edges to it (list in
-//! CLAUDE.md 「build and verification commands」).
+//! `ci.yml` — the messaging isolation step — and `docs/testing-strategy.md`; not copied here).
 //!
 //! **② Tauri import 0** (ADR-0003): `rg "^\s*use tauri" crates/engram-dashboard-transport/src/` → **0 lines**. ① does not cover third-party `tauri`.
 //!

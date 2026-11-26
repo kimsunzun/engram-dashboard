@@ -215,6 +215,7 @@ mod tests {
         args_type: "AgentListArgs",
         ok_type: "AgentListOk",
         agent_args: &[],
+        deadline: crate::DeadlineClass::Ordinary,
     };
     static DECLARED: &[&CommandSpec] = &[&AGENT_LIST];
 
@@ -287,6 +288,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("one name is within the cap");
@@ -324,6 +326,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("one name is within the cap");
@@ -465,6 +468,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("one name is within the cap");
@@ -519,6 +523,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("one name is within the cap");
@@ -570,6 +575,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("one name is within the cap");

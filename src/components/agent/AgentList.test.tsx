@@ -119,12 +119,12 @@ beforeEach(() => {
   currentViewIdMock.mockReturnValue('main-view')
   // Default is 「roster and profiles both received」 — a test for the not-received span lowers the flag itself.
   useAgentStore.setState({
-    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, presets: [], selectedAgentId: null,
+    agents: [], agentsLoaded: true, profiles: [], profilesLoaded: true, selectedAgentId: null,
   })
 })
 afterEach(() => {
   cleanup()
-  useAgentStore.setState({ agents: [], profiles: [], presets: [], selectedAgentId: null })
+  useAgentStore.setState({ agents: [], profiles: [], selectedAgentId: null })
 })
 
 // ── statusGlyphIcon: every branch (pure, ADR-0062) ─────────────────────────────────
@@ -775,7 +775,7 @@ describe('activation progress/refusal drives the row glyph (green-lie regression
 
 // ── ★"open" safety net: control-slot focus excluded (selectOpenTarget integration, ADR-0066 refinement)★ ──────────────
 //   The click-to-focus gate will no longer seat focus on a control slot, but even in existing/edge backend states (the tree
-//   slot already focused or focus=null) "open" must not overwrite the tree/palette and must fall back to an empty slot.
+//   slot already focused or focus=null) "open" must not overwrite a control slot and must fall back to an empty slot.
 //   With no empty slot either, nothing is assigned (inline failure, no clobbering).
 describe('open safety net — control-slot focus excluded (selectOpenTarget)', () => {
   function openRow(agentId: string): void {
@@ -816,14 +816,14 @@ describe('open safety net — control-slot focus excluded (selectOpenTarget)', (
     expect(assignAgentMock).toHaveBeenCalledWith('main-view', 'empty', 'a1')
   })
 
-  it('focus on the palette (preset_palette) + no empty slot → assignAgent not called + failure inline badge', () => {
+  it('focus on the usage slot (usage) + no empty slot → assignAgent not called + failure inline badge', () => {
     selectViewMock.mockReturnValue({
       layout: {
         type: 'split', id: 'root', dir: 'left_right', ratio: 0.5,
-        a: { type: 'slot', id: 'palette', content: { type: 'preset_palette' } },
+        a: { type: 'slot', id: 'usage', content: { type: 'usage', show_claude: true, show_codex: true } },
         b: { type: 'slot', id: 'busy', content: { type: 'agent', agent_id: 'other' } },
       },
-      focusedSlotId: 'palette',
+      focusedSlotId: 'usage',
       foreignSlots: [],
     })
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
@@ -846,7 +846,7 @@ describe('open safety net — control-slot focus excluded (selectOpenTarget)', (
 })
 
 // ── FIX#3: reserved row "delete" → deleteProfile (regression restored) ────────────────────────
-//   The menu label is 'delete' (rowCancelReserved — vocabulary unified with preset.deleteBtn). The behavior is deleteProfile as is.
+//   The menu label is 'delete' (rowCancelReserved). The behavior is deleteProfile as is.
 describe('delete (deleteProfile, FIX#3)', () => {
   it('reserved row right-click → "delete" → calls deleteProfile(id)', () => {
     useAgentStore.setState({ profiles: [profile('p1', 'C:/r')] })

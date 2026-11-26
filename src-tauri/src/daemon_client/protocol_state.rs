@@ -8,7 +8,7 @@
 use std::fmt;
 
 use engram_dashboard_command::CommandEnvelope;
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, RequestId};
 use serde_json::value::RawValue;
 
 // ── Command field edge · request_id extraction (request/reply correlation) ──────────────────────────────
@@ -116,12 +116,6 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         // ADR-0072
         | AgentCommand::ReparentProfile { request_id, .. }
         | AgentCommand::GetSnapshot { request_id, .. }
-        // ADR-0061
-        | AgentCommand::ListPresets { request_id }
-        | AgentCommand::CreatePreset { request_id, .. }
-        | AgentCommand::DeletePreset { request_id, .. }
-        // ADR-0061
-        | AgentCommand::RenamePreset { request_id, .. }
         // ADR-0096
         | AgentCommand::SetEnvelopeFormat { request_id, .. }
         // Command bus registration wire (ADR-0155/0156) — all three wait for a reply (Ack for registration and diff, the dedicated `CommandList` for the query; `event_reply_request_id` below is its pair).
@@ -153,11 +147,9 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         AgentEvent::Ack { request_id }
         | AgentEvent::AgentList { request_id, .. }
         | AgentEvent::ProfileList { request_id, .. }
-        // ADR-0061
-        | AgentEvent::PresetList { request_id, .. }
         | AgentEvent::Snapshot { request_id, .. }
         | AgentEvent::Created { request_id, .. }
-        // `CommandList` is a correlation target (ADR-0155) — the dedicated reply of `ListCommands`, like AgentList/ProfileList/PresetList. `None` would hang the shell: `command_request_id` returns `Some` for `ListCommands`, creating a slot with nothing to wake it until the connection drops. The two functions move together per pair; the tests below pin it.
+        // `CommandList` is a correlation target (ADR-0155) — the dedicated reply of `ListCommands`, like AgentList/ProfileList. `None` would hang the shell: `command_request_id` returns `Some` for `ListCommands`, creating a slot with nothing to wake it until the connection drops. The two functions move together per pair; the tests below pin it.
         | AgentEvent::CommandList { request_id, .. }
         // ADR-0231
         | AgentEvent::QueuedInputs { request_id, .. }
@@ -179,8 +171,6 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::RestoreResult { .. }
         | AgentEvent::InputLeaseChanged { .. }
         | AgentEvent::ProfileListUpdated { .. }
-        // ADR-0061
-        | AgentEvent::PresetListUpdated { .. }
         | AgentEvent::UsageLimitsUpdated { .. }
         // `CommandRequest` is an incoming request, so `None` (load-bearing): its envelope's request_id is the daemon's key, not mine — `Some` makes the receiving side read it as the reply it was waiting for and swallow the envelope, so the command is not executed and the sender hangs until the deadline.
         | AgentEvent::CommandRequest { .. } => None,
@@ -193,14 +183,21 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
 /// `Display` emits the held text undecorated — `DaemonClient::send_command` builds its `String` from this, so a caller ignoring the source gets the original text byte for byte.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandFailure {
-    Daemon { message: String },
+    /// `launch_blocked` · `created_agent_id` = the `AgentEvent::Error` fields of the same names, copied as received
+    /// (absent = the daemon sent none). `Display` shows `message` only.
+    // ADR-0348
+    Daemon {
+        message: String,
+        launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+        created_agent_id: Option<AgentId>,
+    },
     Local(String),
 }
 
 impl fmt::Display for CommandFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CommandFailure::Daemon { message } | CommandFailure::Local(message) => {
+            CommandFailure::Daemon { message, .. } | CommandFailure::Local(message) => {
                 f.write_str(message)
             }
         }
@@ -211,7 +208,16 @@ impl fmt::Display for CommandFailure {
 /// It does not read the text: a daemon answer without a prefix or with an unknown code is still `Daemon` (adding codes is allowed — `engram_dashboard_command::ErrorCode` doc).
 pub fn classify_reply(slot: Result<AgentEvent, String>) -> Result<AgentEvent, CommandFailure> {
     match slot {
-        Ok(AgentEvent::Error { message, .. }) => Err(CommandFailure::Daemon { message }),
+        Ok(AgentEvent::Error {
+            message,
+            launch_blocked,
+            created_agent_id,
+            ..
+        }) => Err(CommandFailure::Daemon {
+            message,
+            launch_blocked,
+            created_agent_id,
+        }),
         Ok(other) => Ok(other),
         Err(local) => Err(CommandFailure::Local(local)),
     }
@@ -413,7 +419,9 @@ mod tests {
         assert_eq!(
             event_reply_request_id(&AgentEvent::Error {
                 request_id: Some(r),
-                message: "x".into()
+                message: "x".into(),
+                launch_blocked: None,
+                created_agent_id: None,
             }),
             Some(r),
             "Error{{Some}} is a specific command failure — matched"
@@ -421,7 +429,9 @@ mod tests {
         assert_eq!(
             event_reply_request_id(&AgentEvent::Error {
                 request_id: None,
-                message: "x".into()
+                message: "x".into(),
+                launch_blocked: None,
+                created_agent_id: None,
             }),
             None,
             "Error{{None}} is unrelated to a command — not matched"
@@ -460,6 +470,8 @@ mod tests {
             let classified = classify_reply(Ok(AgentEvent::Error {
                 request_id: Some(r),
                 message: message.into(),
+                launch_blocked: None,
+                created_agent_id: None,
             }));
             match classified {
                 Err(failure @ CommandFailure::Daemon { .. }) => {
@@ -485,6 +497,30 @@ mod tests {
             Ok(AgentEvent::Ack { request_id }) => assert_eq!(request_id, r),
             other => panic!("Ack must stay Ok: {other:?}"),
         }
+    }
+
+    /// The structured fields of a daemon `Error` survive the sort — the shell bus `agent.spawnInto` answers with them
+    /// (`args.reasons` · `args.agent_id`) and has nothing else to read them from.
+    // ADR-0348
+    #[test]
+    fn classify_reply_keeps_the_launch_block_and_the_created_agent() {
+        let blocked = serde_json::json!({ "reasons": [{ "kind": "missing", "item": "C:/gone" }] });
+        let blocked = blocked.as_object().cloned();
+        let created = uuid::Uuid::new_v4();
+        let classified = classify_reply(Ok(AgentEvent::Error {
+            request_id: Some(RequestId::new()),
+            message: "INTERNAL: agent 'a' was created but did not start".into(),
+            launch_blocked: blocked.clone(),
+            created_agent_id: Some(created),
+        }));
+        assert_eq!(
+            classified.expect_err("a daemon Error"),
+            CommandFailure::Daemon {
+                message: "INTERNAL: agent 'a' was created but did not start".into(),
+                launch_blocked: blocked,
+                created_agent_id: Some(created),
+            }
+        );
     }
 
     // ── Command field edge · command↔reply pair (ADR-0272 decision 4) ──────────────────────────────────
@@ -746,11 +782,13 @@ mod tests {
                 name: "slot.focus".into(),
                 help: "{}".into(),
                 agent_args: vec!["agent".into(), "after_tab".into()],
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             },
             engram_dashboard_command::CommandDecl {
                 name: "tab.focus".into(),
                 help: "{}".into(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             },
         ]
     }
@@ -763,7 +801,7 @@ mod tests {
         use std::collections::{BTreeMap, BTreeSet};
         use ts_rs::TS;
 
-        const DECLS_TS: &str = "Array<{ name: string, help: string, agent_args?: Array<string> }>";
+        const DECLS_TS: &str = r#"Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: "Ordinary" | "Launch" }>"#;
 
         let inlined = <AgentCommand as TS>::inline();
         assert!(
@@ -776,9 +814,12 @@ mod tests {
             name: "agent.spawn".into(),
             help: r#"{"name":"agent.spawn"}"#.into(),
             agent_args: vec!["target".into()],
+            deadline: engram_dashboard_command::DeadlineClass::Launch,
         };
         let ts_type_of = |key: &str, value: &serde_json::Value| -> &'static str {
             match value {
+                // The deadline class is a closed word set — the TS text spells its words.
+                serde_json::Value::String(_) if key == "deadline" => r#""Ordinary" | "Launch""#,
                 serde_json::Value::String(_) => "string",
                 serde_json::Value::Array(items) if items.iter().all(|item| item.is_string()) => {
                     "Array<string>"
@@ -800,6 +841,7 @@ mod tests {
         // Fields dropped from serialization when empty must be optional (`?`) on the TS side.
         let sparse = object_of(&CommandDecl {
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             ..decl.clone()
         });
         let skipped_when_empty: BTreeSet<String> = rust_fields

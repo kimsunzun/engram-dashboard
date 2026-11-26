@@ -7,7 +7,7 @@
 
 use ts_rs::TS;
 
-use crate::ids::{AgentId, PresetId, ProfileId};
+use crate::ids::{AgentId, ProfileId};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "type")]
@@ -204,7 +204,7 @@ pub enum AgentSpawnCommand {
 /// and that spot was already written as `"claude"` (the same reason as sibling `EnvelopeFormat`).
 /// ★The accepted spelling is case-insensitive · **the emitted spelling is lowercase only**★: what fills this field
 /// is a word typed by hand by a person·LLM (`backend` of `agent.spawnInto`, the frontend's `SpawnByCwd`), and there
-/// `Claude` is not a typo but the same meaning. Conversely, widening the emitting side would make `agents.json` and the ts-rs union
+/// `Claude` is not a typo but the same meaning. Conversely, widening the emitting side would make the profile file and the ts-rs union
 /// diverge, so [`Serialize`](serde::Serialize) stays as the derive.
 // `Ord` = declaration order — no meaning, used only as the key of an ordered set (the shell's usage interest `BTreeSet`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, TS)]
@@ -376,7 +376,7 @@ pub struct AgentProfile {
     pub failed_reason: Option<String>,
     /// The kind of this item's last activation failure (ADR-0172). `null` = no failure record.
     ///
-    /// ★Lives only in daemon memory★ — the agent-side original is `#[serde(skip)]`, so it is not in `agents.json`, and it disappears
+    /// ★Lives only in daemon memory★ — the agent-side original is `#[serde(skip)]`, so it is not in the profile file, and it disappears
     ///   when the daemon restarts (it survives an app window restart).
     /// `#[serde(default)]`, so old wire without this field → None (PROTOCOL_VERSION kept — the same additive shape as display_name·
     /// parent_id). An unknown **value** is absorbed into `Other` (the `Deserialize` impl of `AgentFailureKind` — that doc is
@@ -388,22 +388,6 @@ pub struct AgentProfile {
     /// Last process start time (for records·debugging, not used for the reset decision).
     #[ts(type = "number | null")]
     pub last_start_at: Option<i64>,
-}
-
-// ── Preset wire mirror (ADR-0061) ──────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
-#[ts(export)]
-pub struct Preset {
-    #[ts(type = "string")]
-    pub id: PresetId,
-    /// Normalized cwd.
-    pub cwd: String,
-    /// User-specified display name override (ADR-0061 enrichment). `Some` → shown as is, `None` → derived from the cwd basename
-    /// (existing behavior unchanged).
-    #[serde(default)]
-    #[ts(type = "string | null")]
-    pub name: Option<String>,
 }
 
 /// Matches agent `types::OutputChunk`.
@@ -614,7 +598,7 @@ mod tests {
         assert!(text.contains("claude") && text.contains("codex"), "{text}");
     }
 
-    /// The emitted spelling does not change — `agents.json` and the ts-rs union read this value.
+    /// The emitted spelling does not change — the profile file and the ts-rs union read this value.
     #[test]
     fn backend_kind_serializes_exactly_the_declared_words() {
         for (kind, word) in AgentBackendKind::ALL {

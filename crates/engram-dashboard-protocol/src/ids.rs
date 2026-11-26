@@ -6,9 +6,6 @@ pub type AgentId = uuid::Uuid;
 /// Same as the profile id in the current agent crate.
 pub type ProfileId = uuid::Uuid;
 
-/// Same representation as agent `preset::PresetId` (ADR-0061).
-pub type PresetId = uuid::Uuid;
-
 /// Idempotency key of a side-effect command (design §3). The daemon absorbs duplicates with a short-TTL dedup table.
 /// No automatic retry (duplicate writeStdin = duplicate input) — on disconnect, query the result after reconnecting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, TS)]

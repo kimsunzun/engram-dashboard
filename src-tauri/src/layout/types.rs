@@ -19,7 +19,7 @@ pub enum SplitDir {
 
 /// Slot occupant = typed union (ADR-0060).
 ///
-/// Later content kinds (FileTree/ControlPanel) are added as variants, and user customization (a preset button set) is expressed not as a new
+/// Later content kinds (FileTree/ControlPanel) are added as variants, and user customization is expressed not as a new
 /// variant but as config data inside a variant (prevents enum explosion — the key insight of ADR-0060).
 ///
 /// ★Invariant (ADR-0060)★: the `Agent` variant holds **only the binding (the agent_id reference string)** of a daemon agent —
@@ -36,9 +36,6 @@ pub enum SlotContent {
     Agent { agent_id: String },
     /// MVP = a unit with no fields — only names the render target, and the data is held by agentStore (expresses only the content kind, ADR-0060).
     AgentList,
-    /// Preset palette (a button set of registered cwd presets) view. MVP = a unit with no fields — the preset list data is
-    /// owned by the daemon (presets.json, ADR-0061), so it is not held here and flows separately over the PresetRegistry wire.
-    PresetPalette,
     /// Usage limit view. The two fields = the companies this slot switched on — the shell computes the daemon usage subscription (interest) from them
     /// (`daemon_client::usage_interest`). The values themselves are not held here.
     /// An input missing a field is read as `true` — a bare `{"type":"usage"}` is a slot with both companies on.
@@ -62,10 +59,7 @@ impl SlotContent {
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             SlotContent::Agent { agent_id } => Some(agent_id),
-            SlotContent::Empty
-            | SlotContent::AgentList
-            | SlotContent::PresetPalette
-            | SlotContent::Usage { .. } => None,
+            SlotContent::Empty | SlotContent::AgentList | SlotContent::Usage { .. } => None,
         }
     }
 }

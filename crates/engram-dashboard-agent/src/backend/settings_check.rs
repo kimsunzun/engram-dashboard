@@ -1,0 +1,548 @@
+//! Backend settings-check port — the settings knowledge that differs per backend (what a mode loads · folder-entry
+//! path guard · working-folder guard · launch notice codes · folder load set · skill format · command-line guard and
+//! budget, with the notices of the line and the subject of a refusal · whether its instructions append or replace ·
+//! the backend's own skill folders), in one trait. The
+//! registry is [`super::settings_checks`] / [`super::settings_check_for`].
+//!
+//! ★No schema check★: a settings value is handed to the CLI as it is and the CLI judges it by its own rules — the
+//!   port answers only what Engram's own assembly of the launch materials needs.
+//!
+//! ★Pure — an implementation never touches the disk, the network or a process★: a folder's file text and its YAML
+//!   front matter reach the port only through the reader closure and the [`FrontMatterParser`] the caller passes
+//!   (agent has no YAML dependency — the front-matter types are defined here and the caller only deserializes into
+//!   them).
+//!
+//! Callers reach it without an agent (checking a settings asset, previewing a folder), so it is not an
+//! [`super::AgentBackend`] method — the same reason as [`super::usage_probes`].
+// ADR-0359
+// ADR-0334
+// ADR-0004
+
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
+
+use engram_dashboard_platform::fs::same_path;
+use serde::Deserialize;
+use serde_json::{Map, Value};
+
+use crate::backend::hooks::HookRef;
+use crate::launch::{Notice, Reason};
+use crate::profile::AgentOutputFormat;
+
+/// One backend's settings knowledge. Implementations are stateless singletons.
+pub trait SettingsCheck: Send + Sync {
+    /// The backend word this check belongs to — the same spelling as [`crate::launch::backend_word`] (lowercase).
+    fn backend(&self) -> &'static str;
+
+    /// What an agent of this backend in `mode` loads from its launch materials.
+    fn loads(&self, mode: AgentOutputFormat) -> ModeLoads;
+
+    /// Whether this backend accepts a skill named `name` in `mode`. `false` = the name is an error for this backend.
+    fn accepts_skill_name(&self, name: &str, mode: AgentOutputFormat) -> bool;
+
+    /// Whether a folder entry at `folder` (absolute) blocks this backend's agent (problem ②) because the path cannot
+    /// be passed on its command line. A backend that never puts folder paths on its command line returns `false`.
+    fn folder_entry_blocks(&self, folder: &Path) -> bool;
+
+    /// Whether the agent's working folder blocks this backend in `mode` (problem ②) — `cwd` = the folder the spawn
+    /// runs in ([`crate::launch::LaunchKitSource::working_folder`]). The rule is the one the backend's launch
+    /// translation applies to the same folder, so a folder refused here is also refused there. `None` = no block.
+    // ADR-0353
+    fn working_folder_blocks(&self, cwd: &Path, mode: AgentOutputFormat) -> Option<Reason>;
+
+    /// The notice codes this backend's launch check emits in `mode`.
+    fn notice_codes(&self, mode: AgentOutputFormat) -> NoticeCodes;
+
+    /// Whether a launch in `mode` needs a listing of each folder entry — to carry rows from it
+    /// ([`FolderLoadSet::carried`]) or to name what it omits ([`FolderLoadSet::omitted`]). `false` = the backend
+    /// reads the folder itself at launch; only the preview lists it.
+    // ADR-0341
+    fn folder_listing_at_launch(&self, mode: AgentOutputFormat) -> bool;
+
+    /// What this backend loads by itself from a folder entry, predicted from a listing of that folder.
+    ///
+    /// - `entries` = the folder's listing ([`FolderEntry`]). Order is kept in the result.
+    /// - `read` = the text of one listed file (the same relative path).
+    /// - `parser` = parses front-matter text (without the `---` lines) into the types below.
+    ///
+    /// The prediction assumes the backend's default loading conditions: an agent's pass-through arguments can make
+    /// the backend load less than this.
+    fn folder_load_set(
+        &self,
+        entries: &[FolderEntry],
+        read: &dyn Fn(&Path) -> std::io::Result<String>,
+        parser: &dyn FrontMatterParser,
+        mode: AgentOutputFormat,
+    ) -> FolderLoadSet;
+
+    /// The format check this backend runs on one library skill in `mode` — the same rules the CLI uses to load or
+    /// skip a skill. `file_name` = the file's own name (the check requires exactly `SKILL.md` where the backend
+    /// does), `folder_name` = the skill folder's name (the fallback name), `text` = the whole file.
+    /// A backend or mode that loads skills without a format check answers [`SkillFormat::NotChecked`].
+    fn skill_format(
+        &self,
+        file_name: &str,
+        folder_name: &str,
+        text: &str,
+        parser: &dyn FrontMatterParser,
+        mode: AgentOutputFormat,
+    ) -> SkillFormat;
+
+    /// The command-line arguments one raw settings value of this backend adds, exactly as they go on the line
+    /// (codex: `-c`, `key=value`, `-c`, `key=value`, … — flag and value alternating), each passing this backend's
+    /// command-line guard. `Err` = a line the command line cannot carry (problem ②).
+    /// A backend whose raw settings never reach the command line answers `Ok(vec![])`.
+    fn command_line_args(&self, raw: &Value) -> Result<Vec<String>, Reason>;
+
+    /// Whether the launch command line holds all of `line`, counting the pieces only the launch knows (the control
+    /// channel, a resume id) at their upper-bound length. `Err` = over the budget, an instructions text the command
+    /// line cannot carry, or a refusal of the backend's hook assembly (codex: a pass-through hooks argument, a raw
+    /// hooks line it cannot fold, an unsafe hook folder path, a terminal hook line the guard refuses) (problem ②) —
+    /// carried where [`RefusalSubject::of`] says. `Ok` = the launch
+    /// notices this line raises, which the caller adds to the plan's notices without reading them. A backend with no
+    /// command-line budget and no such notices answers `Ok(vec![])`.
+    // ADR-0420
+    fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<Vec<Notice>, Reason>;
+
+    /// Whether the merged instructions this backend gets in `mode` are added to what the CLI loads by itself (`true`)
+    /// or replace a value the user set in the CLI's own config (`false`). The default is `false`, the safe answer: a
+    /// launch never opens a replacing channel only to carry its launch note.
+    // ADR-0215
+    // ADR-0387
+    fn instructions_append(&self, _mode: AgentOutputFormat) -> bool {
+        false
+    }
+
+    /// The skill folders this backend reads by itself in `mode`, besides the roots Engram passes — the input of the
+    /// same-name notice. Pure: candidate paths and rules only; the caller stats and lists them. Empty for a backend
+    /// or mode that needs no such notice.
+    fn native_skill_roots(
+        &self,
+        places: &NativePlaces<'_>,
+        mode: AgentOutputFormat,
+    ) -> NativeSkillRoots;
+
+    /// The skills this backend loads from one skill root, predicted from a listing of that root (paths relative to
+    /// the root) — the same walk and format check as the skill roots inside [`SettingsCheck::folder_load_set`].
+    /// Fills `loads` (`Skill` rows only), `skill_names`, `malformed` and `unsure`.
+    fn root_skills(
+        &self,
+        entries: &[FolderEntry],
+        read: &dyn Fn(&Path) -> std::io::Result<String>,
+        parser: &dyn FrontMatterParser,
+    ) -> FolderLoadSet;
+}
+
+/// The notice codes of [`SettingsCheck::notice_codes`]. `None` = this backend · mode never emits that notice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoticeCodes {
+    /// Library instructions or skills this mode does not load (e.g. [`crate::launch::CODEX_TERMINAL_OMITTED`]).
+    pub omitted: Option<&'static str>,
+    /// What this mode does not load from a folder entry ([`FolderLoadSet::omitted`]).
+    pub folder_omitted: Option<&'static str>,
+    /// Skills of one name in several skill roots the backend reads.
+    pub same_name: Option<&'static str>,
+    /// Hook components this mode does not load ([`ModeLoads::hooks`] `false`) — never left out unnamed.
+    // ADR-0420
+    pub hooks_omitted: Option<&'static str>,
+}
+
+/// Where a backend's own skill folders are looked for ([`SettingsCheck::native_skill_roots`]).
+pub struct NativePlaces<'a> {
+    pub home: &'a Path,
+    /// The agent's normalized working folder.
+    pub cwd: &'a Path,
+    /// An environment variable as the agent's process would see it (the profile env over the daemon's).
+    pub env: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// The candidates of [`SettingsCheck::native_skill_roots`]. All empty = no native roots to look at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeSkillRoots {
+    /// Roots read as they are (absolute).
+    pub fixed: Vec<PathBuf>,
+    /// Root paths (relative) looked for in `cwd` and in each parent up to the project root.
+    pub per_folder: Vec<PathBuf>,
+    /// The names whose presence in a folder marks it as the project root. None found = `cwd` only.
+    pub project_markers: Vec<String>,
+}
+
+/// The result of [`SettingsCheck::skill_format`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillFormat {
+    /// The backend loads the skill without a format check.
+    NotChecked,
+    /// The identity the backend gives the skill.
+    Valid { name: String, description: String },
+    /// The backend skips the skill. A front-matter parse failure carries the line of the file, from 1.
+    Invalid(Reason),
+}
+
+/// One launch command line as [`SettingsCheck::command_line_fits`] counts it.
+pub struct CommandLine<'a> {
+    pub mode: AgentOutputFormat,
+    /// The normalized working folder (codex terminal puts it on the line with `--cd`).
+    pub cwd: &'a Path,
+    /// The agent's pass-through arguments (`command.extra_args`).
+    pub extra_args: &'a [String],
+    /// What [`SettingsCheck::command_line_args`] returned for the attached raw values, concatenated in attach
+    /// order — every argument (flags included) those values give, as returned.
+    pub config_args: &'a [String],
+    /// The origin of each argument of `config_args`, at the same index — built in the same loop, so the two have the
+    /// same length.
+    // ADR-0420
+    pub config_origins: &'a [ConfigOrigin],
+    /// The plan's hook components ([`crate::launch::LaunchPlan::hooks`]), in plan order.
+    // ADR-0420
+    pub hooks: &'a [HookRef],
+    /// The instructions text this mode puts on the command line (codex terminal: the merged instructions file,
+    /// which holds only the built-in priming). `None` = none.
+    pub instructions: Option<&'a str>,
+}
+
+/// Where one argument of [`CommandLine::config_args`] came from: the settings asset (its library path or built-in
+/// spelling) and the line of its raw field in that file (`None` = no line).
+// ADR-0420
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigOrigin {
+    pub source: String,
+    pub line: Option<u32>,
+}
+
+/// The `args` key of a [`SettingsCheck::command_line_fits`] refusal or notice that names a hook component (its
+/// library path).
+// ADR-0420
+pub const SUBJECT_HOOK_ARG: &str = "hook";
+
+/// The `args` key of a [`SettingsCheck::command_line_fits`] refusal or notice that names a settings asset (a
+/// [`ConfigOrigin::source`]); the reason's `line` is the field's line.
+// ADR-0420
+pub const SUBJECT_SOURCE_ARG: &str = "source";
+
+/// What a [`SettingsCheck::command_line_fits`] refusal is about — the entry the caller carries it on, read from its
+/// `args` only.
+// ADR-0420
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalSubject<'a> {
+    /// A hook component — the library path [`SUBJECT_HOOK_ARG`] names.
+    Hook(&'a str),
+    /// A settings asset at the reason's `line` — the path [`SUBJECT_SOURCE_ARG`] names.
+    Source(&'a str),
+    /// The command line as a whole (the budget, an argument of the agent's own) — neither key is a string.
+    CommandLine,
+}
+
+impl<'a> RefusalSubject<'a> {
+    /// The subject of `reason`: a string [`SUBJECT_HOOK_ARG`] first, else a string [`SUBJECT_SOURCE_ARG`], else the
+    /// command line.
+    pub fn of(reason: &'a Reason) -> Self {
+        let named = |key: &str| reason.args.get(key).and_then(Value::as_str);
+        if let Some(hook) = named(SUBJECT_HOOK_ARG) {
+            RefusalSubject::Hook(hook)
+        } else if let Some(source) = named(SUBJECT_SOURCE_ARG) {
+            RefusalSubject::Source(source)
+        } else {
+            RefusalSubject::CommandLine
+        }
+    }
+}
+
+/// What one backend · mode loads from the launch materials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeLoads {
+    pub instructions: InstructionLoad,
+    pub skills: bool,
+    /// Hook components ([`crate::launch::LaunchPlan::hooks`]).
+    // ADR-0420
+    pub hooks: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionLoad {
+    /// Every attached instruction.
+    All,
+    /// Only the priming of the built-in default preset.
+    BuiltinPrimingOnly,
+}
+
+/// One entry of a folder listing. The path is relative to the folder and has normal components only (no `.`, `..`,
+/// root or prefix); an entry with any other component is ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderEntry {
+    File(PathBuf),
+    /// A link (file or directory) the listing did not follow — what it points to is not listed.
+    UnenteredLink(PathBuf),
+}
+
+/// Parses front-matter text into the agent-defined types. The caller owns the YAML parser.
+pub trait FrontMatterParser {
+    /// The front matter of a file whose `paths` field the port reads (a claude rule or skill file).
+    fn paths(&self, text: &str) -> Result<PathsFrontMatter, FrontMatterError>;
+    fn subagent(&self, text: &str) -> Result<SubagentFrontMatter, FrontMatterError>;
+    /// The front matter of a `SKILL.md` as codex reads it.
+    fn skill(&self, text: &str) -> Result<SkillFrontMatter, FrontMatterError>;
+    /// Whether `text` alone parses as a YAML document holding any value — the question codex's front-matter
+    /// repair asks of a value that starts with `[`, `{`, `@` or `` ` ``.
+    fn is_yaml_value(&self, text: &str) -> bool;
+}
+
+/// The fields codex reads from a `SKILL.md` front matter, typed the way codex deserializes them (`SkillFrontmatter`
+/// in `codex-rs/skills/src/parser.rs` at `rust-v0.163.0`). A value of the wrong type is a parse failure, so the
+/// codex repair runs. Unknown keys are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SkillFrontMatter {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Absent = the default (no short description) — codex types it as a plain struct with a default, not an
+    /// `Option`.
+    #[serde(default)]
+    pub metadata: SkillMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SkillMetadata {
+    #[serde(default, rename = "short-description")]
+    pub short_description: Option<String>,
+}
+
+/// The `paths` field of a claude rule or skill file's front matter.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct PathsFrontMatter {
+    /// `None` = no `paths` key (or `paths: null`).
+    #[serde(default)]
+    pub paths: Option<Value>,
+}
+
+/// The fields of a claude subagent file's (`.claude/agents/…`) front matter the folder load set reads. `name` and
+/// `description` are kept as untyped values: a value of the wrong type is a reason not to load, not a parse
+/// failure. The three `has_*` fields say whether that top-level key is present at all (any value, `null` included);
+/// `other` holds every other top-level key with its value.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SubagentFrontMatter {
+    #[serde(default)]
+    pub name: Option<Value>,
+    #[serde(default)]
+    pub description: Option<Value>,
+    #[serde(default, rename = "hooks", deserialize_with = "present")]
+    pub has_hooks: bool,
+    #[serde(default, rename = "PreToolUse", deserialize_with = "present")]
+    pub has_pre_tool_use: bool,
+    #[serde(default, rename = "PermissionRequest", deserialize_with = "present")]
+    pub has_permission_request: bool,
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
+}
+
+/// A key that is present — its value is not looked at. An absent key never reaches here (`default` = `false`).
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrontMatterError {
+    pub message: String,
+    /// From the parser: the line within the front-matter text it was given, from 1. In [`UnsureWhy::FrontMatter`]
+    /// the port has turned it into the line of the file. `None` = the parser gave no line.
+    pub line: Option<u32>,
+}
+
+/// The result of [`SettingsCheck::folder_load_set`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FolderLoadSet {
+    /// Files the backend loads, in listing order.
+    pub loads: Vec<FolderLoad>,
+    /// Entries the backend may load from, whose answer the port could not decide.
+    pub unsure: Vec<FolderUnsure>,
+    /// Skills under a skill root that fail the backend's format check — the backend skips them. A mark for the
+    /// preview, never a block (Engram passes the root, not the skill). Not `unsure`: `unsure` means "the backend's
+    /// finer rules were not predicted", this means "the format check failed".
+    pub malformed: Vec<FolderMalformed>,
+    /// The names the backend gives the skills in `loads` (codex: the front-matter `name`, else the folder name),
+    /// one row per loaded skill, in `loads` order. Empty for a backend that does not name folder skills.
+    /// Codex's plugin namespace (`plugin:name`, given when a plugin manifest sits on the skill's own ancestry
+    /// inside the root) and its cap on the qualified name are not predicted — for such a layout the names, the
+    /// same-name notice and the `loads` rows can differ from codex's.
+    pub skill_names: Vec<FolderSkillName>,
+    /// What another mode of the same backend loads from this folder and this mode does not (codex terminal: the
+    /// codex JSON set) — the input of the omission notice. Empty when nothing is omitted.
+    pub omitted: Vec<FolderLoad>,
+    /// The rows of `loads` the launch itself carries from this folder in this mode — an `Instructions` row joins the
+    /// merged instructions, a `SkillRoot` row is passed as an extra skill root. Empty when the backend reads the folder
+    /// itself (it gets the folder path) or loads nothing from it in this mode, and in a
+    /// [`SettingsCheck::root_skills`] answer. An `Instructions` row is carried only after `read` of that file
+    /// succeeded — the launch check takes the file's text from that read.
+    // ADR-0341
+    pub carried: Vec<FolderLoad>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderLoad {
+    /// Relative to the folder, as listed — for a [`FolderLoadKind::SkillRoot`], the root folder.
+    pub path: PathBuf,
+    pub kind: FolderLoadKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderLoadKind {
+    Instructions,
+    Rule,
+    Skill,
+    Agent,
+    Command,
+    /// A folder the backend walks for skills by itself (codex: passed as an extra skill root).
+    SkillRoot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderMalformed {
+    /// Relative to the folder, as listed.
+    pub path: PathBuf,
+    pub reason: Reason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderSkillName {
+    /// Relative to the folder, as listed — the skill's `SKILL.md`.
+    pub path: PathBuf,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderUnsure {
+    /// Relative to the folder, as listed.
+    pub path: PathBuf,
+    /// `None` = the entry could hold items of several kinds (e.g. a link in place of a whole config folder).
+    pub kind: Option<FolderLoadKind>,
+    pub why: UnsureWhy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnsureWhy {
+    /// `read` failed — the message of that error.
+    Unreadable(String),
+    /// The front matter did not parse with the caller's parser. Its `line` is the line of the file, from 1.
+    FrontMatter(FrontMatterError),
+    /// An unfollowed link where the backend loads files — the backend follows links, the listing did not.
+    Link,
+    /// The front matter holds `---` before its closing line — the backend may close the front matter there.
+    DashesInFrontMatter,
+    /// A `paths` value whose effect is not predicted (a rule's value that is not a plain list of path globs, or any
+    /// `paths` on a skill).
+    UnclearPaths,
+    /// The file's content (after its front matter) is blank, or may be blank once HTML comments are stripped — the
+    /// backend may skip it.
+    EmptyBody,
+    /// A subagent front matter with a hook key (`hooks`, `PreToolUse`, `PermissionRequest`) — the backend may
+    /// refuse the file. Nested hook keys count too (see the backend's rule).
+    HookKeys,
+    /// A command folder that holds a `skill.md` — the backend keeps only that file of the folder.
+    SkillFileInCommandFolder,
+}
+
+/// The components of a listed path — `None` = it has a component other than a normal one.
+pub(super) fn normal_parts(path: &Path) -> Option<Vec<&OsStr>> {
+    path.components()
+        .map(|component| match component {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A name the backend opens by a joined path — the OS decides whether case matters.
+pub(super) fn is(part: &OsStr, name: &str) -> bool {
+    same_path(Path::new(part), Path::new(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A refusal is carried on the hook its `hook` names, else on the settings asset its `source` names, else on the
+    /// command line — a non-string value names nothing.
+    // ADR-0420
+    #[test]
+    fn a_refusal_subject_is_its_hook_then_its_source_then_the_command_line() {
+        let refusal = |args: Value| Reason {
+            code: "x".to_owned(),
+            args,
+            line: Some(4),
+        };
+        for (args, subject) in [
+            (
+                json!({"hook": "team/hooks/a", "source": "team/s.yaml"}),
+                RefusalSubject::Hook("team/hooks/a"),
+            ),
+            (
+                json!({"source": "team/s.yaml", "why": "y"}),
+                RefusalSubject::Source("team/s.yaml"),
+            ),
+            (
+                json!({"hook": 1, "source": "team/s.yaml"}),
+                RefusalSubject::Source("team/s.yaml"),
+            ),
+            (
+                json!({"hook": null, "source": ["s"]}),
+                RefusalSubject::CommandLine,
+            ),
+            (json!({"needed": 9000}), RefusalSubject::CommandLine),
+            (json!("hook"), RefusalSubject::CommandLine),
+        ] {
+            let reason = refusal(args.clone());
+            assert_eq!(RefusalSubject::of(&reason), subject, "{args}");
+        }
+    }
+
+    #[test]
+    fn paths_front_matter_reads_paths_and_takes_null_as_absent() {
+        for (value, expected) in [
+            (json!({}), None),
+            (json!({"paths": null}), None),
+            (json!({"paths": "src/**"}), Some(json!("src/**"))),
+            (
+                json!({"paths": [1, "a"], "other": true}),
+                Some(json!([1, "a"])),
+            ),
+        ] {
+            let parsed: PathsFrontMatter = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(parsed.paths, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn subagent_front_matter_keeps_values_untyped_and_marks_present_hook_keys() {
+        let parsed: SubagentFrontMatter = serde_json::from_value(json!({
+            "name": 7,
+            "description": ["d"],
+            "hooks": null,
+            "PermissionRequest": {"x": 1},
+            "tools": {"PreToolUse": 1},
+            "has_pre_tool_use": true,
+        }))
+        .unwrap();
+        assert_eq!(parsed.name, Some(json!(7)));
+        assert_eq!(parsed.description, Some(json!(["d"])));
+        assert!(parsed.has_hooks, "a null value is still a present key");
+        assert!(
+            !parsed.has_pre_tool_use,
+            "only the key `PreToolUse` sets it"
+        );
+        assert!(parsed.has_permission_request);
+        assert_eq!(
+            Value::Object(parsed.other),
+            json!({"tools": {"PreToolUse": 1}, "has_pre_tool_use": true})
+        );
+
+        let parsed: SubagentFrontMatter =
+            serde_json::from_value(json!({"PreToolUse": null})).unwrap();
+        assert!(parsed.has_pre_tool_use);
+        assert!(!parsed.has_hooks && !parsed.has_permission_request);
+
+        let parsed: SubagentFrontMatter = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(parsed, SubagentFrontMatter::default());
+    }
+}

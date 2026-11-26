@@ -84,7 +84,7 @@ use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
 use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
-    Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
+    DeadlineClass, Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
 };
 use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
@@ -125,34 +125,71 @@ pub const ENTRANCE_CONTROL: &str = "control";
 /// ★Condition to resume★ — when a dedup store (completed-work replay + TTL) stands, lift this function and revive the instruction derived from the code.
 /// Reviving it before then would make "it is safe" a lie.
 ///
-/// ★The only way this file builds an error is here★ — the place guarded by machine is
-/// `tests::this_module_can_only_build_do_not_retry_failures`.
+/// ★This is the only place in this file that builds an error★ — machine-checked by
+/// `tests::this_module_can_only_build_do_not_retry_failures`. `agent_ref_refusal` does not build one: it
+/// reshapes the resolver's own error and forces `Never` with `set_retry`, which the gate cannot see — its
+/// test pins the `Never`.
 // ADR-0159
 fn no_retry(code: ErrorCode, detail: impl Into<String>) -> CommandError {
     CommandError::with_retry(code, detail, RetryMode::Never)
 }
 
-/// Does the deadline fit within the caller's **silence limit** — ★the inequality exists in this one function only★ (ADR-0161 decision 3).
+/// Does a seat of `deadline` fit inside its caller's **silence window** `caller_window` — ★the inequality lives only in
+/// this function★ (ADR-0161 decision 3): deadline + the expiry sweep + the caller margin ≤ the caller's window.
 ///
-/// Left as prose, an edit fixing either side quietly flips the relation — it really was flipped, and the symptom was a
-/// **false report** of "could not reach the daemon" (full basis = [`CommandDeliveries::DEFAULT_DEADLINE`]).
-/// ★But measuring only the constant cannot bite the **running value**★: the deadline production sees is a field of [`CommandDeliveries`]
-/// and that value is decided by [`CommandDeliveries::with_clock`]. So this predicate is hung in two places —
-/// the default by the `const` assertion below (at compile time) and the injected value by that constructor (at construction time), judged by the same function.
-/// ★Compare in milliseconds — comparing in seconds makes this decision **looser than its own prose**★: `as_secs()` is a truncation that discards, so
-/// a deadline of 8.5 s + a period of 1.4 s passes as `8 + 1 < 10` while the real worst case is 9.9 s. The product below is `u128` arithmetic so
-/// it cannot overflow.
-const fn fits_caller_silence_window(deadline: Duration) -> bool {
+/// As prose, an edit to either side silently inverted the relation — it really was inverted, and the symptom was the
+/// **false report** "could not reach the daemon" (full rationale = [`CommandDeliveries::DEFAULT_DEADLINE`]).
+/// ★Checking constants alone does not bind the **running value**★: the default seat production sees is a field of
+/// [`CommandDeliveries`] set by [`CommandDeliveries::with_clock`]. So the predicate is applied twice — the constant
+/// pairs below at compile time (the default seat with the CLI's 10 s, and each launch seat with the wait derived around
+/// it — ADR-0360 decision 2 · ADR-0369), the injected default in that constructor at assembly.
+/// ★Compared in milliseconds — in seconds the check would be **looser** than its own prose★: `as_secs()` truncates, so a
+/// deadline of 8.5 s + a sweep of 1.4 s would pass as `8 + 1 < 10` while the real worst case is 9.9 s. The `u128`
+/// arithmetic below cannot overflow.
+// ADR-0360
+const fn fits_caller_silence_window(deadline: Duration, caller_window: Duration) -> bool {
     deadline.as_millis()
         + CommandDeliveries::SWEEP_INTERVAL.as_millis()
         + CommandDeliveries::CALLER_MARGIN.as_millis()
-        <= (engram_dashboard_agent::types::CLI_CONTROL_READ_TIMEOUT_SECS as u128) * 1_000
+        <= caller_window.as_millis()
 }
 
+/// The CLI's silence window for every ordinary command — the caller of the default seat.
+const CLI_CALLER_WINDOW: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::CLI_CONTROL_READ_TIMEOUT_SECS);
+
 const _: () = assert!(
-    fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE),
+    fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE, CLI_CALLER_WINDOW),
     "command deadline + reap period + margin exceeds the CLI's silence limit — the caller cuts off before the reply goes out"
 );
+const _: () = assert!(
+    fits_caller_silence_window(LAUNCH_REPLY_BOUND, LAUNCH_CALLER_WAIT),
+    "the local launch seat + sweep + margin exceeds the direct launch caller's wait"
+);
+const _: () = assert!(
+    fits_caller_silence_window(LAUNCH_RELAY_SEAT, LAUNCH_RELAY_CALLER_WAIT),
+    "the relayed launch seat + sweep + margin exceeds the CLI's launch wait"
+);
+
+// The launch-wait chain (ADR-0369) as `Duration`s. agent `types.rs` owns the values; the seats below read them, and the
+//   shell — which does not depend on agent (ADR-0270) — pins its own restatement against these through its daemon
+//   dev-dependency.
+
+/// The longest one launch takes to reply — the seat of a launch-class name this daemon answers itself.
+pub const LAUNCH_REPLY_BOUND: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_REPLY_BOUND_SECS);
+/// The one margin every step of the chain adds.
+pub const LAUNCH_MARGIN: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_MARGIN_SECS);
+/// The direct launch caller's wait — the shell's `Spawn` · `SpawnByCwd` · `SpawnProfile`.
+pub const LAUNCH_CALLER_WAIT: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_CALLER_WAIT_SECS);
+/// The seat of a relayed launch-class name (`agent.spawnInto`).
+pub const LAUNCH_RELAY_SEAT: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_RELAY_SEAT_SECS);
+/// The CLI's wait for every launch verb.
+pub const LAUNCH_RELAY_CALLER_WAIT: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_RELAY_CALLER_WAIT_SECS);
 
 /// One in-flight round trip — **the origin connection**, **the deadline**, and the place to take the reply.
 ///
@@ -170,6 +207,10 @@ struct Pending {
     /// field, and the reason it is not attached ahead of time is that it is a cost for an unreachable risk.
     origin: ConnId,
     deadline: Instant,
+    /// This seat's own duration ([`CommandDeliveries::seat_span`]) — `deadline` is its open time + this, and an applied
+    /// stage-1 seat is retained for this long ([`SeatState::Retained`]).
+    // ADR-0369
+    span: Duration,
     /// ★The seat's ID card — **not the key, this is what points at that round trip**★.
     ///
     /// Without it cleanup picks a seat by `request_id` alone, and in between the earlier-opened seat may be gone and **a new seat with the same key**
@@ -236,7 +277,8 @@ enum SeatState {
     /// ★The point is that the place holding the number is **one seat only**★ — with a second table doing the same job (a memory collecting only numbers)
     /// two authorities diverge over one namespace: a seat that did not run remains in the memory, or unrelated read
     /// traffic pushes out the memory, or the two lifetimes drift apart. The seat is the owner of that number.
-    /// ★The hold period is one deadline window★ (`until`) — once the window passes the collector releases it ([`CommandDeliveries::expire`]).
+    /// ★It is held for one window of **that seat's own deadline**★ (`until` — [`Pending::span`]: 7 s for an ordinary
+    /// name, the launch bound for a launch-class one), then the sweeper lets it go ([`CommandDeliveries::expire`]).
     /// ★A disconnected caller's too **remains** until the window passes★: [`CommandDeliveries::drop_origin`] does not
     /// touch stage 1 seats (the reason for that filter is in that function — a disconnect is exactly the event where that hold is most needed).
     /// The only place that releases is the collector.
@@ -299,14 +341,18 @@ enum Seat {
 ///
 /// ## Residency — **only one axis is closed**
 ///
-/// - **In-flight seats**: this table itself has no cap. Seats that can be opened are one per round trip and the deadline ([`CommandDeliveries::DEFAULT_DEADLINE`])
-///   reaps them so it does not grow without bound, but that is **not the same as having a cap** — neither the seat count nor the size of the name · arguments a seat holds
-///   ([`Pending::name`]·[`Pending::args`]) is measured. ★The two entrances differ★: on the control route that door carries its own cap ([`MAX_RELAYED_IN_FLIGHT`] —
-///   global 64). The socket side has none, and what tolerates that is the **connection lifetime** — that entrance's seats hang on one connection and disconnect
-///   cleanup reaps them ([`CommandDeliveries::drop_origin`]). ★Do not read this as "inside the auth boundary so one trusted client"★: both entrances are inside the auth boundary
-///   (ADR-0153 — the socket by the daemon token, the control route by an issued agent credential), but the latter keys are **one per agent, several, and do not know each other**,
-///   so that door's cap is carried by that constant, not by trust. If a cap is put on this table the precedent is the roster's
-///   (`engram_dashboard_command::Roster::MAX_NAMES`).
+/// - **Seats in flight**: the table itself has no cap. A round trip opens at most one seat and the seat's own deadline
+///   reaps it (its class's span — [`CommandDeliveries::DEFAULT_DEADLINE`] for an ordinary name, the launch spans for a
+///   launch-class name, ADR-0360), so the table does not grow without end — but **that is not a cap**: neither the seat
+///   count nor the size of a seat's name and arguments ([`Pending::name`] · [`Pending::args`]) is measured.
+///   ★The two entrances differ★: the control route carries its own cap ([`MAX_RELAYED_IN_FLIGHT`] — 64 in total). The
+///   socket has none, and what bounds it is **the connection's life** — its seats hang on one connection, and the
+///   disconnect cleanup reaps them with it ([`CommandDeliveries::drop_origin`]).
+///   ★Do not read it as "inside the auth boundary, so one trusted client" — that premise now holds for the socket
+///   only★: both entrances are inside the auth boundary (ADR-0153 — the socket with the daemon token, the control route
+///   with an issued agent credential), but behind the second there are **many keys, one per agent**, that do not know
+///   each other, so that door's cap is carried by the constant, not by trust. If this table ever gets a cap, the
+///   precedent is the roster's (`engram_dashboard_command::Roster::MAX_NAMES`).
 /// - **Held seats**: closed. These live **after** the round trip ends for one more window, so residency becomes **arrival rate × window**, not "concurrency" — so they are bounded by both time (the window) and count
 ///   ([`MAX_RETAINED_LOCAL`]), and the payload is discarded when crossing it ([`CommandDeliveries::settle_local`]). ★Do not read this axis as "the deadline reaps it so it is fine"★ — held seats are not reaped by the deadline.
 // ADR-0154
@@ -352,7 +398,9 @@ struct Seats {
 }
 
 impl Seats {
-    /// Brings the number of held seats back below [`MAX_RETAINED_LOCAL`] — releases **the oldest first**.
+    /// Brings the retained seats back under [`MAX_RETAINED_LOCAL`] — releasing first the ones whose retention ends
+    /// soonest (`until`). With one span for every seat that is the oldest; with launch seats retained longer (their own
+    /// span — ADR-0360), it keeps the launch ids longest.
     /// ★The time boundary alone does not close the table★: the number of requests that can enter the window has no cap (arrival rate × window) so the count must be bounded too for residency to be bounded. One client running
     /// `agent.rename` fast really makes that product.
     /// ★An evicted number loses its protection★ — a re-query of that number becomes a new request and runs again. Even so the oldest go first because re-queries cluster at the **front** of the window (they come right after the deadline).
@@ -392,6 +440,8 @@ impl CommandDeliveries {
     /// that streams bytes midway (chunks · progress notices) the client does not cut off even when total elapsed exceeds this value, and a test that reads this value as a "budget" and measures total elapsed measures the wrong thing from that day.
     /// ★The arithmetic of 7 s★: limit 10 − reap period 1 − margin 2 ([`CommandDeliveries::CALLER_MARGIN`]) = 7. It buys **observability**, not throughput, so it is set toward the margin side.
     /// ★The socket entrance uses the same value — that is the point★: the deadline is a property of one seat table and if it diverges per entrance it becomes two machines (module header). The shell side has no constant tied to this value (measured — `HANDSHAKE_TIMEOUT` is for the handshake only).
+    /// ★Ordinary names only★ — a launch-class name gets a launch seat instead ([`CommandDeliveries::seat_span`] ·
+    /// ADR-0369).
     pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(7);
 
     /// The expiry reap period — a deadline overrun can be observed this much later.
@@ -411,7 +461,7 @@ impl CommandDeliveries {
     /// ★That it is `pub(crate)` is part of this★ — opening this door outside the crate would let the deadline be set outside the places that know the inequality.
     pub(crate) fn with_clock(clock: Arc<dyn Clock>, deadline: Duration) -> Self {
         assert!(
-            fits_caller_silence_window(deadline),
+            fits_caller_silence_window(deadline, CLI_CALLER_WINDOW),
             "the injected command deadline exceeds the caller's silence limit — the caller cuts off before the reply goes out so TIMEOUT becomes unreachable (CommandDeliveries::DEFAULT_DEADLINE doc)"
         );
         Self {
@@ -446,8 +496,11 @@ impl CommandDeliveries {
 
     /// Launches the expiry sweeper task — on the daemon shutdown signal it **answers every remaining seat** and stops.
     /// ★Without the sweeper "unknown" becomes "an answer that never comes"★ (TRD §4-④). Even if this one line is missing every normal round trip still runs so **the symptom shows only as one unanswered request** — an easy place to miss in assembly.
-    /// ★Calling [`CommandDeliveries::drain`] on the way out is what makes shutdown bounded★: a delivery task waits for its reply seat and **the sender side of that seat is inside this table**. Ending without emptying leaves those
-    /// tasks with no occasion to wake until the deadline ([`CommandDeliveries::DEFAULT_DEADLINE`]), and meanwhile the table and tasks outlive the moment they are reported "ended". Emptying releases all of them **at once**.
+    /// ★Calling [`CommandDeliveries::drain`] on the way out is what bounds the shutdown★: a delivery task waits on its
+    /// reply seat, and the **sending half of that seat lives in this table**. Ending without draining leaves those tasks
+    /// with nothing to wake them until their seat's deadline (7 s for an ordinary name, up to 91 s for a launch — ADR-0360),
+    /// so the table and the tasks outlive the moment the daemon reported it had stopped. Draining frees them all
+    /// **at once**.
     /// ★Do not discard the returned handle★ — the assembly must wait on it for "the sweeper stopped" to be observed.
     ///
     /// ★A table has **only one sweeper, and what carries that is the table's marker, not visibility**★
@@ -538,6 +591,8 @@ impl CommandDeliveries {
     /// ★Open before doing anything★ — opening after writing the envelope lets a quick owner's outcome arrive before the seat and get nothing, and if another stage of `route` makes the answer that answer goes out without going through the table at all (module header rule 1).
     /// ★Do not overwrite an already taken key★: overwriting quietly erases the earlier round trip's seat and that caller hangs until the deadline. The meaning of each branch is [`Seat`].
     /// `local` = **does the daemon answer this name by itself** ([`LocalCommands::owns`]). The reason it must be decided when the seat is born is [`Pending::local`].
+    /// `class` = the name's declared deadline class — the seat is sized from it here, when it opens
+    /// ([`CommandDeliveries::seat_span`]).
     fn open(
         &self,
         request_id: RequestId,
@@ -545,6 +600,7 @@ impl CommandDeliveries {
         name: &str,
         args: &serde_json::Value,
         local: bool,
+        class: DeadlineClass,
     ) -> Seat {
         // ★Settle expired seats **here first**★ (before locking — `expire` locks by itself).
         // The sweeper runs every second but the retry comes right after the deadline. If a re-query arriving in between were coalesced into "a corpse not yet reaped", **that attempt would never be delivered** and the caller would get the
@@ -555,7 +611,8 @@ impl CommandDeliveries {
 
         let (waiter, rx) = oneshot::channel();
         let now = self.clock.now();
-        let deadline = now + self.deadline;
+        let span = self.seat_span(class, local);
+        let deadline = now + span;
         let mut table = self.lock();
         // A closed table opens no seat — opening one has no eyes to wake it ([`CommandDeliveries::drain`]).
         if table.closed {
@@ -612,6 +669,7 @@ impl CommandDeliveries {
             Pending {
                 origin,
                 deadline,
+                span,
                 token,
                 name: name.to_string(),
                 args: args.clone(),
@@ -622,11 +680,24 @@ impl CommandDeliveries {
         Seat::Opened { rx, token }
     }
 
-    /// How long [`SeatState::Retained`] holds a number — **one deadline window**.
-    /// The window to close is "until a caller that received `TIMEOUT` at the deadline asks again with the same number", and the natural length of that window is the deadline. There is no reason to take it longer — a re-query after that belongs to a caller that
-    /// broke the convention (this path instructs no retry at all — [`no_retry`]) and seat residency grows by that much.
-    fn retention(&self) -> Duration {
-        self.deadline
+    /// How long one seat waits for its answer — and, once an applied stage-1 seat is retained
+    /// ([`SeatState::Retained`]), how long it holds the request id.
+    ///
+    /// A launch-class name gets the launch budget: [`LAUNCH_REPLY_BOUND`] when this daemon answers it itself (it runs the
+    /// launch), [`LAUNCH_RELAY_SEAT`] when it relays it (the owner's own launch wait sits inside); every other name the
+    /// default seat. ★The retention window is the same span★: the window to close is "deadline → `TIMEOUT` → same-id
+    /// retry", whose natural length is that seat's deadline — the default 7 s would release an applied launch's id while
+    /// its caller was told to wait up to the launch bound, and a retry inside that wait would launch again (ADR-0122).
+    /// Longer is not needed — a later retry is a caller breaking the contract (this path never asks for one —
+    /// [`no_retry`]).
+    // ADR-0360
+    // ADR-0369
+    fn seat_span(&self, class: DeadlineClass, local: bool) -> Duration {
+        match (class, local) {
+            (DeadlineClass::Launch, true) => LAUNCH_REPLY_BOUND,
+            (DeadlineClass::Launch, false) => LAUNCH_RELAY_SEAT,
+            (DeadlineClass::Ordinary, _) => self.deadline,
+        }
     }
 
     /// May a stage 1 body start — within the cap it raises the count and issues **a marker keeper that undoes it**.
@@ -730,7 +801,7 @@ impl CommandDeliveries {
     /// would get back "already applied" for a **command that never ran**. The decision is [`retains_the_id`].
     /// ★Picks by ticket★ — if this call is late and a different round trip sits on the same key it must not be touched.
     fn settle_local(&self, request_id: RequestId, token: SeatToken, retain: bool) {
-        let until = self.clock.now() + self.retention();
+        let now = self.clock.now();
         let mut table = self.lock();
         // The count return is **inside the same lock** so there is no window where a permit looks free in between.
         table.local_running = table.local_running.saturating_sub(1);
@@ -745,7 +816,9 @@ impl CommandDeliveries {
             table.open.remove(&request_id);
             return;
         }
-        pending.state = SeatState::Retained { until };
+        pending.state = SeatState::Retained {
+            until: now + pending.span,
+        };
         // ★A held seat answers **by number only — there is no reason to hold the payload**★: the standing decision comes before the arguments comparison ([`Seat::LocalAlreadyRan`]) so these two are never read again, but left as is the JSON the caller gave
         // would stay resident for the whole window. Erasing it fixes the size of one held entry.
         pending.name.clear();
@@ -1041,7 +1114,9 @@ pub trait LocalCommands: Send + Sync {
     /// ★It only decides★ — no execution, and none of the locks · disk that execution takes. With `None` [`deliver`] does not stop by the blocking pool and goes straight to the next stage (carrying another's name is this daemon's constant path).
     /// ★Why the effect is received here★: only an applied Write holds the number ([`SeatState::Retained`]) and a read does not. Deciding that after the outcome would mean searching the declaration by name again, a value that may have
     /// changed by then — using the value born with the seat cannot diverge.
-    fn claim(&self, name: &str) -> Option<Effect>;
+    /// The declared [`DeadlineClass`] comes with the effect for the same reason: the seat is sized from it when it
+    /// opens ([`CommandDeliveries::seat_span`] — ADR-0369).
+    fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)>;
 
     /// Checks and executes to produce the outcome.
     /// ★`None` is a **contract violation**★ — only names [`LocalCommands::claim`] answered as mine come here so it cannot be empty-handed. It is left in the return type because an implementation could make that state, and [`deliver`] does not let it flow to the
@@ -1076,7 +1151,7 @@ pub trait LocalCommands: Send + Sync {
 pub struct NoLocalCommands;
 
 impl LocalCommands for NoLocalCommands {
-    fn claim(&self, _name: &str) -> Option<Effect> {
+    fn claim(&self, _name: &str) -> Option<(Effect, DeadlineClass)> {
         None
     }
 
@@ -1131,8 +1206,11 @@ const MAX_RESOLVING_IN_FLIGHT: usize = 16;
 const CEILING_WARN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The cap on the number of seats that can hold a number ([`Seats::evict_oldest_retained`]).
-/// ★The arithmetic of the value★: one held entry is only standing · time · ticket · connection id (the payload is discarded when handing over to holding — [`CommandDeliveries::settle_local`]). 256 entries is within tens of KiB and more than the number of write round trips that
-/// end inside one window (one deadline) in normal use — those round trips queue on one profile lock so per-window throughput is not that large. Exceeding it is not normal use but a **runaway caller**, and what must be protected then is the table's boundedness.
+/// ★The arithmetic of the value★: one held entry is only standing · time · ticket · connection id (the payload is discarded when handing over to holding —
+/// [`CommandDeliveries::settle_local`]). 256 entries stay within tens of KiB and exceed the write round trips that
+/// finish within one retention window in normal use (a seat's own span — 7 s ordinary, longer for a launch) — those
+/// round trips queue on one profile lock, so the throughput per window is small. Passing this count means a **runaway
+/// caller**, not normal use, and what must hold then is the table's bound.
 const MAX_RETAINED_LOCAL: usize = 256;
 
 /// A marker representing one stage 1 running — ★`Drop` **always** undoes the count★.
@@ -1196,6 +1274,8 @@ type LocalJoin = Result<
 ///   `a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched` pins that fact). Releasing these three keeps a caller who fixed a typo and resent with the same number from getting `ALREADY_APPLIED` for a "command that never ran".
 ///   ★One exception — a decision refusal of waking (`target` of `agent.spawn`)★: a registration rewriting that entry with the same value can be refused after it was saved (ADR-0291 §3-9 partial success) — a retry gives the same result so releasing is fine.
 ///   A launch refusal of create-and-launch leaves the created agent so it comes out as `INTERNAL`, not `CONFLICT` (agent `create_and_start`).
+///   A wake's launch refusal (blocked or raced, TRD S25 step 16) is a second such `CONFLICT` after a write: it
+///   records the last failure (and a race consumes an epoch) — releasing is still safe, a rerun gives the same answer.
 /// - **Everything else is held** — `INTERNAL`·`OUTCOME_UNKNOWN` fall here. The latter especially is a code that **states in its wording** "part may already have been applied" (`control::commands::drive_to_completion`).
 /// - **Empty-handed is released** — it is certain the table ran nothing ([`fold_local`] folds it into an `INTERNAL` reply but the decision looks at the table's outcome, not the reply).
 /// - **Death is held** — it is not known how far it got.
@@ -1422,12 +1502,21 @@ pub async fn deliver(
     //   so the replies of stage 1 (own table) and stage 3 (owner absent) went out without going through the table at all — a deterministic path emitting a second frame under the key of a round trip in progress (it happens even without a race).
     // ★Decide whether this name is mine **before opening the seat**★: that fact must be born with the seat so there is no gap for an outcome another sent to slip in ([`Pending::local`]). This question is pure — no execution, no lock.
     let claim = locals.claim(&envelope.name);
+    // The seat is sized when it opens, so a relayed name's class is read before `open` — the roster lock is taken and
+    //   released inside `class_of`, then `open` takes the seat table's: never nested. Accepted: a re-registration
+    //   between this read and `route`'s own lookup can mis-size one seat.
+    // ADR-0369
+    let class = match claim {
+        Some((_, class)) => class,
+        None => roster.class_of(&envelope.name),
+    };
     let (rx, token) = match deliveries.open(
         request_id,
         origin,
         &envelope.name,
         &envelope.args,
         claim.is_some(),
+        class,
     ) {
         Seat::Opened { rx, token } => (rx, token),
         // The reply is given by the round trip opened first — giving it here would make two under the same key (basis = [`Seat::Coalesced`]).
@@ -1545,7 +1634,7 @@ pub async fn deliver(
     };
 
     // ── stage 1 — my own table ("stage 1 is outside route" in the doc above) ──────────────────────────
-    if let Some(effect) = claim {
+    if let Some((effect, _)) = claim {
         // ★Do not **start work** for a caller who left★ — the same as the check stage 2 does just before handing over the envelope (`OwnerLink::send`), and this one is the **early** side: it does not put work that cannot pass into the pool and uses not one cap permit.
         //   The **late** check actually just before the side effect is inside the body ([`spawn_local`]) — that closure can queue in the pool so the sample here goes stale. With only one of the two: with only the early one an exit during queue wait is missed, and with only the late one
         //   a seat · pool job · one cap permit is spent for a caller who has already left.
@@ -1657,6 +1746,16 @@ pub async fn deliver(
     deliveries.release(request_id, token);
 }
 
+/// The resolver's refusal for one marked argument, as this round trip's answer: the message gains the
+/// `<arg>: ` head and the retry is `never` (like [`no_retry`]); the code and its `args` stay as resolved.
+// ADR-0308
+fn agent_ref_refusal(arg: &str, mut refused: CommandError) -> CommandError {
+    let message = format!("{arg}: {}", refused.message());
+    refused.set_message(message);
+    refused.set_retry(RetryMode::Never);
+    refused
+}
+
 /// The agent-reference conversion before the relay (ADR-0308) — turns the **string values** of the fields the owner marked at registration into agent ids with this daemon's resolver
 /// ([`resolve_in`] — ADR-0132) and writes them back into the envelope.
 /// All the daemon knows is "this field points at my agent" — what that field means on the owner side it does not know and it does not open `help` either. Fields are resolved in the marked order, and absent · `null` · non-string values are left untouched (the owner
@@ -1709,10 +1808,7 @@ async fn resolve_agent_args(
         refs.into_iter()
             .map(|(arg, token)| match resolve_in(&agents, &token) {
                 Ok(agent) => Ok((arg, agent.id.to_string())),
-                Err(refused) => Err(no_retry(
-                    refused.code(),
-                    format!("{arg}: {}", refused.message()),
-                )),
+                Err(refused) => Err(agent_ref_refusal(&arg, refused)),
             })
             .collect::<Result<Vec<_>, CommandError>>()
     });
@@ -1839,9 +1935,12 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
 ///
 /// ★What this constant binds is **concurrency only** — not resident bytes★
 ///
-/// A cap is needed because this door has no connection lifetime: a round trip on the socket entrance hangs on **one connection** so when it drops the seat is cleaned ([`CommandDeliveries::drop_origin`]), but this door's caller stands up anew per request. One relay round trip holds
-/// **a task + a seat + a roster entry** for the deadline ([`CommandDeliveries::DEFAULT_DEADLINE`]) and even when it leaves by cancellation all three come back (the count is [`RelaySlot`], the other two are [`CallerSeat`]) — so what this number counts is really
-/// "the round trips held at the same time now".
+/// The cap is needed because this door has no connection lifetime: a socket round trip hangs on **one connection**
+/// and is cleaned up when it drops ([`CommandDeliveries::drop_origin`]), but a caller of this door stands up anew per
+/// request. One relayed round trip holds **a task + a seat + one roster slot** for its seat's deadline
+/// ([`CommandDeliveries::seat_span`] — the default seat, or the relay seat for a launch-class name), and all three come
+/// back even when it leaves by cancellation (the count via [`RelaySlot`], the other two via [`CallerSeat`]) — so what
+/// this number counts really is "the round trips held at the same time now".
 /// ★There is a fourth — the roster read (blocking pool) of a command that marked agent-reference fields★: it does not come back on cancellation and remains until the read ends (`spawn_blocking`). So this number cannot bind it and [`MAX_RESOLVING_IN_FLIGHT`] binds it separately.
 ///
 /// ★Do not claim a byte cap here★: what a seat holds is not the request body but **a parsed `serde_json::Value` copy** ([`Pending::args`]). The body is closed at 1 MiB (`MAX_BODY_BYTES` of `mcp_server`) but the ratio at which those bytes swell into a `Value`
@@ -2365,6 +2464,7 @@ pub(crate) mod tests {
                     name: name.to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("registration");
@@ -2404,6 +2504,8 @@ pub(crate) mod tests {
         panic_after_gate: bool,
         /// The effect of this name — separates whether it holds the number (Write) or not (Read) ([`retains_the_id`]).
         effect: Effect,
+        /// This name's declared deadline class — sizes its seat ([`CommandDeliveries::seat_span`]).
+        deadline: DeadlineClass,
     }
 
     impl FakeLocal {
@@ -2420,6 +2522,7 @@ pub(crate) mod tests {
                 gate: Mutex::new(None),
                 panic_after_gate: false,
                 effect: Effect::Write,
+                deadline: DeadlineClass::Ordinary,
             }
         }
 
@@ -2481,8 +2584,8 @@ pub(crate) mod tests {
     }
 
     impl LocalCommands for Arc<FakeLocal> {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == self.name).then_some(self.effect)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == self.name).then_some((self.effect, self.deadline))
         }
 
         fn run(
@@ -2980,6 +3083,246 @@ pub(crate) mod tests {
         assert_eq!(deliveries.in_flight(), 0);
     }
 
+    // ── seat sizing by deadline class (ADR-0369) ─────────────────────────────────────────
+
+    /// A seat's duration comes from the class it opened with and who answers: an ordinary name gets the default,
+    /// a launch-class name this daemon runs the launch bound, a relayed one the relay seat. Each expires exactly at
+    /// its own duration, not before.
+    #[test]
+    fn a_seat_expires_at_the_duration_of_its_class() {
+        let cases = [
+            (
+                DeadlineClass::Ordinary,
+                true,
+                CommandDeliveries::DEFAULT_DEADLINE,
+            ),
+            (
+                DeadlineClass::Ordinary,
+                false,
+                CommandDeliveries::DEFAULT_DEADLINE,
+            ),
+            (DeadlineClass::Launch, true, LAUNCH_REPLY_BOUND),
+            (DeadlineClass::Launch, false, LAUNCH_RELAY_SEAT),
+        ];
+        for (class, local, span) in cases {
+            let clock = Arc::new(ManualClock::new());
+            let deliveries = deliveries_with(clock.clone());
+            let Seat::Opened { .. } =
+                deliveries.open(RequestId::new(), 1, "agent.spawn", &json!({}), local, class)
+            else {
+                panic!("an empty table opens the seat");
+            };
+            clock.advance(span - Duration::from_millis(1));
+            assert_eq!(
+                deliveries.expire(),
+                0,
+                "{class:?} local={local}: not before"
+            );
+            clock.advance(Duration::from_millis(1));
+            assert_eq!(
+                deliveries.expire(),
+                1,
+                "{class:?} local={local}: at {span:?}"
+            );
+        }
+    }
+
+    /// A launch-class name this daemon answers itself is not cut at the default seat: the launch runs past 7 s and its
+    /// answer goes out as the round trip's one reply.
+    #[tokio::test]
+    async fn a_local_launch_class_name_outlives_the_default_seat_and_is_answered() {
+        let roster = CommandRoster::new();
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let clock = Arc::new(ManualClock::new());
+        let deliveries = deliveries_with(clock.clone());
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (entered_tx, mut entered) = mpsc::unbounded_channel::<()>();
+        let local = Arc::new(FakeLocal {
+            entered: Mutex::new(Some(entered_tx)),
+            gate: Mutex::new(Some(gate)),
+            deadline: DeadlineClass::Launch,
+            ..FakeLocal::answering("agent.spawn", Ok(json!({ "agent_id": "a" })))
+        });
+        let env = envelope("agent.spawn", &OwnerToken::new("whatever"));
+        let request_id = env.request_id;
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&local)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+        entered.recv().await.expect("the launch started");
+        clock.advance(CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1));
+        assert_eq!(
+            deliveries.expire(),
+            0,
+            "the launch seat is not the default one"
+        );
+
+        open.send(()).expect("open the gate");
+        finished(round_trip).await;
+        match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
+                assert_eq!(reply.request_id, request_id);
+                assert_eq!(reply.outcome.expect("answered"), json!({ "agent_id": "a" }));
+            }
+            other => panic!("the reply must come: {other:?}"),
+        }
+        assert!(caller_inbox.try_recv().is_err(), "one reply only");
+        assert_eq!(local.runs(), 1);
+    }
+
+    /// The retention window of an applied launch is its seat's duration: a same-id retry sent more than the default
+    /// seat but less than the launch bound after the body completed still finds the retained id and is not run again
+    /// (with the default 7 s retention it would launch a second time), and the id is let go once that window passes.
+    #[tokio::test]
+    async fn a_launch_retry_after_the_default_window_still_finds_the_retained_id() {
+        let roster = CommandRoster::new();
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let clock = Arc::new(ManualClock::new());
+        let deliveries = deliveries_with(clock.clone());
+        let local = Arc::new(FakeLocal {
+            deadline: DeadlineClass::Launch,
+            ..FakeLocal::answering("agent.spawn", Ok(json!({ "agent_id": "a" })))
+        });
+        let env = envelope("agent.spawn", &OwnerToken::new("whatever"));
+        let again = CommandEnvelope {
+            request_id: env.request_id,
+            ..env.clone()
+        };
+
+        super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&local)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+        let _answered = next_event(&mut caller_inbox).await;
+
+        let later = CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1);
+        assert!(later < LAUNCH_REPLY_BOUND);
+        clock.advance(later);
+        assert_eq!(deliveries.expire(), 0);
+        super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&local)),
+            2,
+            again,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+        match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let err = opened_reply(&reply).outcome.expect_err("not run again");
+                assert_eq!(err.code(), ErrorCode::AlreadyApplied);
+            }
+            other => panic!("the retry gets an answer: {other:?}"),
+        }
+        assert_eq!(local.runs(), 1, "no second launch");
+
+        clock.advance(LAUNCH_REPLY_BOUND - later);
+        assert_eq!(
+            deliveries.expire(),
+            0,
+            "a retained seat is not an unanswered one"
+        );
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "let go once its own window passed"
+        );
+    }
+
+    /// A relayed name's seat is sized from the class its owner registered, read before the seat opens: a launch-class
+    /// name holds past the default seat and times out at the relay seat; an ordinary one keeps the default.
+    #[tokio::test]
+    async fn a_relayed_seat_is_sized_from_the_class_its_owner_registered() {
+        for (class, span) in [
+            (DeadlineClass::Launch, LAUNCH_RELAY_SEAT),
+            (DeadlineClass::Ordinary, CommandDeliveries::DEFAULT_DEADLINE),
+        ] {
+            let clock = Arc::new(ManualClock::new());
+            let roster = CommandRoster::new();
+            let (sink, mut owner_inbox) = sink_with_inbox();
+            roster.attach(1, &sink);
+            roster
+                .register(
+                    1,
+                    vec![CommandDecl {
+                        name: "agent.spawnInto".to_string(),
+                        help: "{}".to_string(),
+                        agent_args: Vec::new(),
+                        deadline: class,
+                    }],
+                )
+                .expect("register");
+            assert_eq!(roster.class_of("agent.spawnInto"), class);
+            let mut caller_inbox = attach_caller(&roster, 2);
+            let deliveries = deliveries_with(clock.clone());
+            let env = envelope("agent.spawnInto", &OwnerToken::new("whatever"));
+
+            let round_trip = tokio::spawn(deliver(roster.clone(), deliveries.clone(), 2, env));
+            assert!(matches!(
+                next_event(&mut owner_inbox).await,
+                AgentEvent::CommandRequest { .. }
+            ));
+            clock.advance(span - Duration::from_millis(1));
+            assert_eq!(deliveries.expire(), 0, "{class:?}: not before {span:?}");
+            clock.advance(Duration::from_millis(1));
+            assert_eq!(deliveries.expire(), 1, "{class:?}: at {span:?}");
+            finished(round_trip).await;
+            match next_event(&mut caller_inbox).await {
+                AgentEvent::CommandReply { reply } => assert_eq!(
+                    opened_reply(&reply).outcome.expect_err("timed out").code(),
+                    ErrorCode::Timeout
+                ),
+                other => panic!("{class:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The daemon's re-exports of the launch-wait chain are agent's values, and each launch seat fits its caller's
+    /// window by the one inequality (the compile-time asserts restated as a test for the mutation run).
+    #[test]
+    fn the_launch_seats_fit_inside_the_waits_derived_around_them() {
+        use engram_dashboard_agent::types as t;
+        assert_eq!(LAUNCH_REPLY_BOUND.as_secs(), t::LAUNCH_REPLY_BOUND_SECS);
+        assert_eq!(LAUNCH_MARGIN.as_secs(), t::LAUNCH_MARGIN_SECS);
+        assert_eq!(LAUNCH_CALLER_WAIT.as_secs(), t::LAUNCH_CALLER_WAIT_SECS);
+        assert_eq!(LAUNCH_RELAY_SEAT.as_secs(), t::LAUNCH_RELAY_SEAT_SECS);
+        assert_eq!(
+            LAUNCH_RELAY_CALLER_WAIT.as_secs(),
+            t::LAUNCH_RELAY_CALLER_WAIT_SECS
+        );
+        assert_eq!(
+            LAUNCH_MARGIN,
+            CommandDeliveries::SWEEP_INTERVAL + CommandDeliveries::CALLER_MARGIN,
+            "agent's margin restates this daemon's sweep + caller margin"
+        );
+        for (seat, caller) in [
+            (CommandDeliveries::DEFAULT_DEADLINE, CLI_CALLER_WINDOW),
+            (LAUNCH_REPLY_BOUND, LAUNCH_CALLER_WAIT),
+            (LAUNCH_RELAY_SEAT, LAUNCH_RELAY_CALLER_WAIT),
+        ] {
+            assert!(
+                fits_caller_silence_window(seat, caller),
+                "({seat:?}, {caller:?})"
+            );
+            assert!(
+                !fits_caller_silence_window(seat, caller - Duration::from_millis(1)),
+                "the pair is tight — the guard reads the caller window it is given"
+            );
+        }
+    }
+
     /// ★The hold is closed **by count** too★ — by the window alone it grows to arrival rate × window (one fast-running client really makes that product). On overflow **the oldest are pushed out first** and a pushed-out number loses its protection.
     #[tokio::test]
     async fn retention_is_bounded_by_count_not_only_by_time() {
@@ -3288,8 +3631,8 @@ pub(crate) mod tests {
     struct PanickingLocal;
 
     impl LocalCommands for PanickingLocal {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == "agent.new").then_some(Effect::Write)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == "agent.new").then_some((Effect::Write, DeadlineClass::Ordinary))
         }
 
         fn run(
@@ -3752,7 +4095,7 @@ pub(crate) mod tests {
     }
 
     impl LocalCommands for Arc<AgentsOnly> {
-        fn claim(&self, _name: &str) -> Option<Effect> {
+        fn claim(&self, _name: &str) -> Option<(Effect, DeadlineClass)> {
             None
         }
 
@@ -3810,6 +4153,7 @@ pub(crate) mod tests {
                     name: name.to_string(),
                     help: "{}".to_string(),
                     agent_args: agent_args.iter().map(|arg| arg.to_string()).collect(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("registration");
@@ -3979,6 +4323,27 @@ pub(crate) mod tests {
             "{}",
             err.message()
         );
+    }
+
+    /// A resolver refusal keeps its code and `args` (e.g. the candidates of an ambiguous name); only the
+    /// message head and the retry are this hop's.
+    #[test]
+    fn an_agent_ref_refusal_keeps_the_resolvers_code_and_args() {
+        let args = json!({"candidates": ["a-1", "a-2"]})
+            .as_object()
+            .expect("object")
+            .clone();
+        // Built via `no_retry` — this module's source gate allows one direct retry constructor.
+        let mut refused =
+            no_retry(ErrorCode::Conflict, "more than one agent").with_args(args.clone());
+        refused.set_retry(RetryMode::AfterCondition);
+
+        let answer = agent_ref_refusal("agent", refused);
+
+        assert_eq!(answer.code(), ErrorCode::Conflict);
+        assert_eq!(answer.message(), "agent: more than one agent");
+        assert_eq!(answer.retry(), RetryMode::Never);
+        assert_eq!(answer.args(), Some(&args));
     }
 
     /// ★Fields are resolved in marked order★ — if both fail to resolve the first-marked field becomes the answer (the same answer for the same request).
@@ -4433,6 +4798,7 @@ pub(crate) mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("registration");
@@ -5024,8 +5390,10 @@ pub(crate) mod tests {
     // ── shutdown (FIX 4) ──────────────────────────────────────────────────
 
     /// ★Shutdown is bounded — it answers every remaining seat and those answers free the delivery tasks at once★
-    /// If not emptied, a delivery task waits for its reply seat and **the sender side of that seat is inside this table**, so nothing wakes it until the deadline ([`CommandDeliveries::DEFAULT_DEADLINE`]). Meanwhile both the table and the task live longer than the moment
-    /// they are reported "ended". The sweeper is **waited on** to observe that fact — dropping the handle leaves this assertion nowhere to stand.
+    /// Without the drain a delivery task waits on its reply seat whose **sending half lives in this table**, so nothing
+    /// wakes it until the seat's deadline (7 s ordinary, up to 91 s for a launch); meanwhile the table and the task
+    /// outlive the moment the daemon reported it had stopped.
+    /// The sweeper is **waited on** to observe that fact — dropping the handle leaves this assertion nowhere to stand.
     #[tokio::test]
     async fn shutdown_answers_every_outstanding_round_trip_and_stops_the_sweeper() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
@@ -5073,9 +5441,14 @@ pub(crate) mod tests {
     fn draining_twice_answers_each_seat_once() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
-        let Seat::Opened { rx: _rx, .. } =
-            deliveries.open(request_id, 1, "tab.create", &json!({}), false)
-        else {
+        let Seat::Opened { rx: _rx, .. } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &json!({}),
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("must get a seat");
         };
 
@@ -5097,7 +5470,14 @@ pub(crate) mod tests {
 
         assert!(
             matches!(
-                deliveries.open(RequestId::new(), 1, "tab.create", &json!({}), false),
+                deliveries.open(
+                    RequestId::new(),
+                    1,
+                    "tab.create",
+                    &json!({}),
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Closed
             ),
             "a closed table gives no seat"
@@ -5119,22 +5499,41 @@ pub(crate) mod tests {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let args = json!({ "window": "main" });
-        let Seat::Opened { rx: _first, .. } =
-            deliveries.open(request_id, 1, "tab.create", &args, false)
-        else {
+        let Seat::Opened { rx: _first, .. } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("the first round trip gets a seat");
         };
 
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Coalesced
             ),
             "the same request from the same connection is coalesced"
         );
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "theme.set", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "theme.set",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Conflict
             ),
             "a different name is a different request — it must not be coalesced"
@@ -5146,7 +5545,8 @@ pub(crate) mod tests {
                     1,
                     "tab.create",
                     &json!({ "window": "other" }),
-                    false
+                    false,
+                    DeadlineClass::Ordinary,
                 ),
                 Seat::Conflict
             ),
@@ -5154,7 +5554,14 @@ pub(crate) mod tests {
         );
         assert!(
             matches!(
-                deliveries.open(request_id, 2, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    2,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Taken { holder: 1 }
             ),
             "if it is another connection that side must be answered"
@@ -5173,9 +5580,14 @@ pub(crate) mod tests {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let args = json!({});
-        let Seat::Opened { rx: _rx, token } =
-            deliveries.open(request_id, 1, "tab.create", &args, false)
-        else {
+        let Seat::Opened { rx: _rx, token } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("must get a seat");
         };
 
@@ -5185,7 +5597,14 @@ pub(crate) mod tests {
         );
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Coalesced
             ),
             "even if the outcome has attached, before the frame the seat still belongs to that round trip"
@@ -5194,7 +5613,14 @@ pub(crate) mod tests {
         deliveries.release(request_id, token);
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Opened { .. }
             ),
             "after the frame goes out a new round trip can be opened with the same id"
@@ -5212,7 +5638,14 @@ pub(crate) mod tests {
         let Seat::Opened {
             rx: _first,
             token: stale,
-        } = deliveries.open(request_id, 1, "tab.create", &args, false)
+        } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        )
         else {
             panic!("the first round trip gets a seat");
         };
@@ -5222,9 +5655,14 @@ pub(crate) mod tests {
         assert_eq!(deliveries.expire(), 1);
 
         // A re-query of the same number that the contract does not forbid — the new round trip must sit on the same key.
-        let Seat::Opened { rx: _second, .. } =
-            deliveries.open(request_id, 1, "tab.create", &args, false)
-        else {
+        let Seat::Opened { rx: _second, .. } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("the re-query gets a new seat");
         };
 

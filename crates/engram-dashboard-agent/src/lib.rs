@@ -5,6 +5,10 @@
 //!
 //! ## Isolation gate (invariant): `rg "^\s*use tauri" src/` → 0 lines. (anchored on import lines — prevents false hits on self-quotes like this comment)
 
+// `declare_commands!` walks the whole `commands.rs` block one type, command and field at a time; with the `preset.*`
+//   declarations (ADR-0386) its depth passed the default limit of 128.
+#![recursion_limit = "256"]
+
 // ADR-0175: the old `agent/` submodules were folded up into the crate root — removes the double `agent` reading of the crate name and
 //   the module name in paths. The first group below is what moved.
 pub mod backend;
@@ -14,12 +18,19 @@ pub mod commands;
 pub mod failure;
 // ADR-0231
 pub mod inputs_pending;
+// ADR-0334
+pub mod launch;
+// ADR-0386
+pub mod library_commands;
+#[cfg(test)]
+pub(crate) mod log_capture;
 pub mod manager;
 // ADR-0101
 pub mod name;
 pub mod output_core;
-pub mod preset;
 pub mod profile;
+// ADR-0311
+pub mod profile_edit;
 // ADR-0231
 pub mod queued_input;
 pub mod reaper;

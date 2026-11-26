@@ -381,7 +381,6 @@ async fn revoked_mid_session_request_is_rejected() {
 async fn epoch_rotation_revokes_old_token_and_config_file() {
     use engram_dashboard_agent::types::ControlChannel;
     use engram_dashboard_daemon::control::mcp_config;
-    use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
     use engram_dashboard_daemon::control::DaemonControlChannel;
 
     let registry = Arc::new(ControlRegistry::new());
@@ -404,7 +403,6 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None,
-        Arc::new(NoopPrimingProvider),
     );
 
     let id = AgentId::new_v4();

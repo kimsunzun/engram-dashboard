@@ -336,6 +336,8 @@ impl ConnectionHandler for AgentConnection {
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                         request_id: None,
                         message: "already authenticated".into(),
+                        launch_blocked: None,
+                        created_agent_id: None,
                     }));
                     ConnFlow::Continue
                 }
@@ -344,6 +346,8 @@ impl ConnectionHandler for AgentConnection {
                     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                         request_id: None,
                         message: format!("invalid command: {e}"),
+                        launch_blocked: None,
+                        created_agent_id: None,
                     }));
                     ConnFlow::Continue
                 }
@@ -364,6 +368,8 @@ impl ConnectionHandler for AgentConnection {
             let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                 request_id: None,
                 message: "unexpected binary frame".into(),
+                launch_blocked: None,
+                created_agent_id: None,
             }));
             let _ = frames.send(Frame::Close("protocol error".into())).await;
             ConnFlow::Close
@@ -405,6 +411,8 @@ impl ConnectionHandler for AgentConnection {
         let refusal = sink.enqueue(Outbound::event(AgentEvent::Error {
             request_id: cmd.as_ref().and_then(command_request_id),
             message: SATURATED_REFUSAL.to_string(),
+            launch_blocked: None,
+            created_agent_id: None,
         }));
         match refusal {
             Ok(()) => Saturated::Refused,
@@ -572,6 +580,8 @@ impl ConnectionHandlerFactory for AgentConnections {
         event_json(&AgentEvent::Error {
             request_id: None,
             message: message.to_string(),
+            launch_blocked: None,
+            created_agent_id: None,
         })
     }
 }
@@ -813,6 +823,8 @@ mod tests {
         sink.enqueue(Outbound::event(AgentEvent::Error {
             request_id: None,
             message: "boom".into(),
+            launch_blocked: None,
+            created_agent_id: None,
         }))
         .expect("event ok");
         sink.enqueue(Outbound::Binary(vec![1, 2, 3]))
@@ -849,7 +861,6 @@ mod tests {
         deliveries: CommandDeliveries,
         usage: Arc<UsageService>,
     ) -> AgentConnections {
-        use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
         use engram_dashboard_agent::profile::{
             AgentProfile, ProfileRegistry, ProfileStore, StoreError,
         };
@@ -864,19 +875,10 @@ mod tests {
                 Vec::new()
             }
         }
-        impl PresetStore for NoStore {
-            fn save(&self, _: &[Preset]) -> Result<(), StoreError> {
-                Ok(())
-            }
-            fn load(&self) -> Vec<Preset> {
-                Vec::new()
-            }
-        }
 
         let manager = Arc::new(AgentManager::new(
             Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone())),
             Arc::new(ProfileRegistry::new(Arc::new(NoStore))),
-            Arc::new(PresetRegistry::new(Arc::new(NoStore))),
             Arc::new(SessionTracker::new(
                 TrackerConfig::default(),
                 Arc::new(|_agent_id, _sid| {}),
@@ -1037,6 +1039,7 @@ mod tests {
             AgentEvent::Error {
                 request_id,
                 message,
+                ..
             } => {
                 assert_eq!(
                     request_id,
@@ -1117,6 +1120,7 @@ mod tests {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             }])
             .unwrap(),
             catalog_version: 1,
@@ -1214,6 +1218,7 @@ mod tests {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             }])
             .unwrap(),
             catalog_version: 1,
@@ -1610,6 +1615,7 @@ mod tests {
                 AgentEvent::Error {
                     request_id,
                     message,
+                    ..
                 } => {
                     assert_eq!(request_id, Some(r));
                     assert!(message.starts_with("NOT_FOUND: "), "{message}");

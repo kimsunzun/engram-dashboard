@@ -2,7 +2,7 @@
 // ★Role★: slot right-click "agent monitoring" (slot.assignRunningAgent) opens this popup, with monitoringPickerStore.open(viewId, slotId) carrying the target; it draws a search box + running-agent filter list, and picking one assigns it. No placement state of its own — on-select flows through viewStore.assignAgent (assign_agent), the §5 single control surface (ADR-0067 invariant).
 // ★Target = the right-clicked slot (explicit)★: the (viewId, slotId) in the store, independent of focus (focus-steal blocked at the source); opening does not touch focused_slot_id (ADR-0067 focus invariant).
 // ★No optimistic update (ADR-0035)★: assignAgent only invokes assign_agent; the popup closes right after sending and the slot swap is drawn by the backend-authoritative layout:updated emit.
-// ★Single mount per window★: WindowLayout mounts one and it renders nothing when target is null (same fixed-overlay pattern as SlotContextMenu). ★Style = variables only★ (same discipline as PresetPalette/AgentList — e-ink contrast, zero color literals).
+// ★Single mount per window★: WindowLayout mounts one and it renders nothing when target is null (same fixed-overlay pattern as SlotContextMenu). ★Style = variables only★ (same discipline as AgentList — e-ink contrast, zero color literals).
 
 import { useEffect, useRef, useState } from 'react'
 

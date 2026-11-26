@@ -182,8 +182,17 @@ pub(crate) async fn forward_to_daemon(
         return Ok(None);
     }
 
-    // Reply serialization: the daemon reply (Ack/Spawned/…) is an externally-tagged AgentEvent, so serializing it gives the `{"Ack":{"request_id":…}}` shape the frontend handleEvent expects. Disconnect: if `send_command` returns Err (disconnected / no response received) that message goes to the frontend so ProtocolClient.sendCommand's `send().catch` rejects the pending (no permanent hang).
-    // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's request timeout — the shared one of every round trip (ADR-0181 · ADR-0310 D15 ① · `daemon_client::connection::link_policy`), text `link::errors::reply_timeout_text`. No second timeout here. A command sent while the connection is live but not yet opened by the driver first waits for the open, bounded by the same value — worst case about twice it (the open gap is normally milliseconds).
+    // ★reply serialization★: the daemon reply (Ack/Spawned/…) is an externally-tagged AgentEvent, so serializing it gives
+    //   the `{"Ack":{"request_id":…}}` shape as is — isomorphic to the wire shape the frontend handleEvent expects.
+    // ★Disconnect handling★: if send_command returns Err (disconnected / no response received), that message is passed to the frontend so that
+    //   the send().catch of ProtocolClient.sendCommand rejects the corresponding pending (blocks a permanent hang).
+    //
+    // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's
+    //   request timeout — the shared 30 s, or the launch wait for `Spawn` · `SpawnByCwd` · `SpawnProfile` (ADR-0181 ·
+    //   ADR-0310 D15 ① · ADR-0369 · `daemon_client::connection::reply_deadline_of`), whose text is
+    //   `link::errors::reply_timeout_text`. No second timeout here. A command sent while the connection is live but not
+    //   yet opened by the driver first waits for the open, bounded by the shared 30 s — so the worst case is that plus
+    //   its reply deadline (the open gap is normally milliseconds).
     let event = client.send_command(agent_cmd).await?;
     let value =
         serde_json::to_value(&event).map_err(|e| format!("failed to serialize reply: {e}"))?;

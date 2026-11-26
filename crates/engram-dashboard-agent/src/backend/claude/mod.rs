@@ -5,9 +5,13 @@
 //! ★A folder, not a file★ — a bare `claude.rs` cannot say 「claude ends here」, so leaks into dispatch went unread as violations; it did leak (`backend/mod.rs` called this module directly for input encoding · synthetic echo ·
 //! output decoder · transcript seed).
 //!
-//! ★Surface going out = one [`crate::backend::AgentBackend`] implementation + one usage prober singleton [`CLAUDE_USAGE_PROBE`] ([`crate::usage::UsageProbe`])★: new outside knowledge means a trait method implemented here, not
-//! the outside calling this module's items by name. The prober is not a trait field because it is a query that runs without an agent (avoids a two-layer dispatch); only the registry in `backend/mod.rs` may call it by
-//! name — `pub(crate)` blocks the outside of the crate and the gate below watches the inside.
+//! ★The surface that goes out = one [`crate::backend::AgentBackend`] implementation + two singletons: the usage probe
+//!   [`CLAUDE_USAGE_PROBE`] ([`crate::usage::UsageProbe`]) and the settings check [`CLAUDE_SETTINGS_CHECK`]
+//!   ([`crate::backend::SettingsCheck`])★: when the outside needs new knowledge, add a method to one of those traits
+//!   and implement it here — the outside does not call this module's items by name. The two singletons are not trait
+//!   slots because they run without an agent (no double dispatch), and the only place that may name them is the
+//!   registry in `backend/mod.rs` — outside the crate `pub(crate)` lets the compiler stop it, inside the crate the
+//!   isolation gate below watches.
 //! ★Isolation gate (common to the four backend folders — swap the name)★:
 //!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
 //!   ★Do not count hits★ — judge whether each is the **registry** of `backend/mod.rs` (`pub use claude::ClaudeBackend;`); the registry and dispatch table must write the name, any other hit is a violation.
@@ -16,15 +20,18 @@
 //!
 //! tauri import 0.
 
+mod launch;
 mod leftover;
 mod session_file;
+mod settings;
 mod usage;
 mod usage_probe;
 
+pub(crate) use settings::CLAUDE_SETTINGS_CHECK;
 pub(crate) use usage_probe::CLAUDE_USAGE_PROBE;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use engram_dashboard_base::panic::uncontained;
@@ -40,6 +47,7 @@ use crate::backend::{
     TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
+use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit};
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
@@ -111,16 +119,22 @@ impl AgentBackend for ClaudeBackend {
         //
         // ★What this value decides — education and enforcement, not wiring (ADR-0133)★:
         //   - **Wiring goes to everyone.** The `engram` executable, credentials and PATH are laid down for MCP-capable spawns too (control verbs open to all — ADR-0132 decision 5; one executable cannot be split by family).
-        //   - **Only education differs**: whether the priming is loaded — ★「load it or not」, not 「which variant」★ (the CLI-only copy was deleted in `2ef6902`; non-MCP gets 0 lines of instructions — ADR-0209 decision 3).
+        //   - **Teaching follows this value, but this value does not load it.** The priming comes only from the launch materials
+        //     (ADR-0370), and the tripwire `every_backend_with_a_settings_check_has_what_the_priming_teaches` (backend `mod.rs`) keeps
+        //     every backend that gets it MCP- and mail-capable; a non-MCP spawn gets no instructions (ADR-0209 decision 3). The CLI-only
+        //     copy was deleted in commit `2ef6902`.
         //   - **Enforcement is only the daemon's refusal** of mail requests carrying an MCP-capable spawn's credentials. ★The mail screen of `engram help` opens regardless★ — the spawn-env marker that chose the screen was removed;
         //     bringing it back would let a value the agent can erase decide the screen.
-        // ★Teaching a channel it cannot use reproduces the send freeze ADR-0099 measured★ — priming load and mail availability must be decided by the same value (the non-MCP side teaches nothing, so that holds).
+        // ★Teaching a channel the spawn cannot use brings back the send freeze ADR-0099 measured★ — what the priming teaches and the
+        //   mail permission must agree. Mail permission splits on this value; the priming is not loaded by it (ADR-0370), so on the real
+        //   path the tripwire above holds the agreement, and a non-MCP spawn agrees by **teaching nothing**.
         // ★The living invariant is channel unification (ADR-0128 decision 1)★: the mail channel is decided only by backend capability, no runtime switching or fallback; ADR-0133 changed only **how** it is enforced.
         // ADR-0099
         // ADR-0126
         // ADR-0128
         // ADR-0133
         // ADR-0209
+        // ADR-0370
         true
     }
 
@@ -134,6 +148,16 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
+    fn materialize(
+        &self,
+        _command: &AgentCommand,
+        kit: &LaunchKit,
+        _cwd: &Path,
+        fs: &dyn LaunchFs,
+    ) -> Result<LaunchArtifacts, String> {
+        launch::materialize(kit, fs)
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -143,6 +167,7 @@ impl AgentBackend for ClaudeBackend {
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Claude {
@@ -150,12 +175,28 @@ impl AgentBackend for ClaudeBackend {
                 output_format,
             } => {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
-                // ★AUTO permission mode — `--permission-mode bypassPermissions`★: the spawned claude is a headless worker with no approver, so default-deny + per-tool grants cannot hold (CLI measured 0/38, all permission-blocked).
-                //   **A temporary regime**; its replacement is a constraint layer shared by all LLMs (this flag is removed then).
-                //   ★Placed first★: it is a NON-variadic 2-element pair, so it does not trip the later group's absorption rule (the extra_args comment below). Injected **unconditionally** (any endpoint, any mode).
+                // ADR-0341: the folder entries go first — `--add-dir` is variadic, and the always-present
+                //   `--permission-mode` right after the group ends it, so no later bare value (an `extra_args` one) joins it.
+                for dir in &artifacts.add_dirs {
+                    args.push("--add-dir".to_string());
+                    args.push(dir.to_string_lossy().into_owned());
+                }
+                // ★AUTO permission mode — `--permission-mode bypassPermissions` (user decision 2026-07-22)★: the spawned
+                //   claude is a headless worker with no approver — default-deny + per-tool grant wiring cannot work without a
+                //   person to answer the approval prompt (CLI measured 0/38, all permission-blocked). It is a **temporary
+                //   regime**; the proper replacement is a constraint layer shared by every LLM (this base flag goes then).
+                //   ★Placement★: a NON-variadic pair, so it joins no absorbing group (see the extra_args comment below);
+                //   it ends the `--add-dir` group above. Injected **unconditionally** — with
+                //   or without a control endpoint, in every spawn mode.
                 // ADR-0097
                 args.push("--permission-mode".to_string());
                 args.push("bypassPermissions".to_string());
+                // ADR-0341: the launch-material env overrides a profile value for the same key — the stated exception to
+                //   the profile-wins rule below (why the folder variable must hold: `launch.rs` `ADDED_DIRS_CLAUDE_MD_ENV`).
+                for (key, value) in &artifacts.env {
+                    env.retain(|(k, _)| !env_key_eq(k, key));
+                    env.push((key.clone(), value.clone()));
+                }
                 // Skipped if the profile already set the same key — the same profile-first rule as MAX_THINKING_TOKENS below.
                 let (key, value) = NO_AUTOUPDATE_ENV;
                 if !env.iter().any(|(k, _)| env_key_eq(k, key)) {
@@ -227,23 +268,32 @@ impl AgentBackend for ClaudeBackend {
                         args.push(config_path.to_string_lossy().into_owned());
                     }
                 }
-                // ADR-0092: priming (receive contract) injection — `--append-system-prompt-file <abs-path>`: the CLI (2.1.170) **reads the file directly** and appends it **after** the default system prompt; both modes receive the
-                //   system prompt, so the injection is mode-independent.
+                // Instructions — `--append-system-prompt-file <abs-path>`: claude CLI (2.1.170) reads the file itself
+                //   and appends it after its default system prompt, in both modes.
                 // ADR-0092
-                if let Some(endpoint) = &control {
-                    if let Some(priming) = &endpoint.priming_file {
+                // ADR-0316: real materials load the merged instructions here and turn the system-prompt snapshot off,
+                //   so a resumed session also gets the current text.
+                // ADR-0370: without real materials nothing is loaded — the control channel carries no priming file.
+                if artifacts.real {
+                    if let Some(instructions) = &artifacts.instructions_file {
                         args.push("--append-system-prompt-file".to_string());
-                        args.push(priming.to_string_lossy().into_owned());
+                        args.push(instructions.to_string_lossy().into_owned());
                     }
+                    args.push("--system-prompt-snapshot".to_string());
+                    args.push("off".to_string());
                 }
-                // S18 D (spec §6): session-scoped settings fragment injection — `--settings <abs-path>`. (ADR-0109)
-                //
-                // ★Why a **file path** and not inline JSON (load-bearing — Windows quoting)★: `--settings` also accepts a JSON string, but on Windows `console_command` adds a cmd.exe layer, and quotes/braces like
-                //   `{"allowedMcpServers":[…]}` in argv break silently under cmd's quoting/escaping (lost quotes · `&`/`^`) into 「starts normally with the settings ignored」 (MCP tools missing again), noticed late. A path only has to
-                //   handle spaces, and the same path-passing (`--mcp-config`/`--append-system-prompt-file`) is already measured (M3). The cost — one file's lifetime — reuses the **same folder and create/delete/boot-sweep path** as the
-                //   mcp-config file (mcp_config.rs).
-                if let Some(endpoint) = &control {
-                    if let Some(settings) = &endpoint.settings_file {
+                // `--settings` takes a **file path**, not inline JSON: a Windows spawn goes through one more cmd.exe
+                //   layer (`console_command`), whose quoting silently breaks a `{"…":[…]}` argument, and the result is
+                //   "settings ignored, normal start" (ADR-0109).
+                // ADR-0328: the merged raw settings (in the volatile folder) are the one `--settings`.
+                // ADR-0370: without real materials there is none — the control-channel settings fragment is withdrawn.
+                // ADR-0316: the skills ride in as a plugin folder here.
+                if artifacts.real {
+                    for root in &artifacts.skill_roots {
+                        args.push("--plugin-dir".to_string());
+                        args.push(root.to_string_lossy().into_owned());
+                    }
+                    if let Some(settings) = &artifacts.settings_file {
                         args.push("--settings".to_string());
                         args.push(settings.to_string_lossy().into_owned());
                     }
@@ -369,6 +419,7 @@ impl AgentBackend for ClaudeBackend {
         //   the attribution of leftover-cleanup logs.
         // ADR-0262
         control: Option<&ControlEndpoint>,
+        _artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
         // Not used, as the doc above says — using an underscore name would make the signature rustdoc renders diverge from the doc.
         let _ = (sid_sink, first_turn_sink, resume_session_id);
@@ -1839,7 +1890,16 @@ mod tests {
     }
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
-        ClaudeBackend.build_spec(command, mode, sid, None, PathBuf::from("."), vec![], None)
+        ClaudeBackend.build_spec(
+            command,
+            mode,
+            sid,
+            None,
+            PathBuf::from("."),
+            vec![],
+            None,
+            &LaunchArtifacts::default(),
+        )
     }
 
     fn spec_with_control(
@@ -1856,6 +1916,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             control,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1911,24 +1972,11 @@ mod tests {
             config_path: Some(PathBuf::from("C:/data/mcp/agent-x.json")),
             // The default helper carries send_exe so the ENGRAM_CLI_EXE injection path can be verified.
             send_exe: Some(PathBuf::from("C:/app/engram.exe")),
-            // The default helper does not carry a priming file (ADR-0092) — priming injection tests fill it explicitly.
-            priming_file: None,
-            // ADR-0094: the default helper leaves grants empty — grant injection tests fill it explicitly (regression isolation:
-            //   so existing mcp-config/priming tests are not affected by --allowedTools).
+            // ADR-0094: the base helper leaves grants empty — the grant tests fill them (so the mcp-config tests are
+            //   not affected by --allowedTools).
             grants: vec![],
-            // S18 D: the default helper does not carry a settings fragment — `--settings` injection tests fill it explicitly
-            //   (so existing arg-golden tests are not affected by the new flag — the same discipline as priming_file).
-            settings_file: None,
             // ADR-0133: the same pair as the daemon output of the MCP-capable branch (config_path=Some) — no mail.
             mail_allowed: false,
-        }
-    }
-
-    /// A variant carrying the session-scoped settings fragment path (S18 D · spec §6) — for verifying `--settings` injection.
-    fn ep_with_settings() -> ControlEndpoint {
-        ControlEndpoint {
-            settings_file: Some(PathBuf::from("C:/data/mcp/agent-x.settings.json")),
-            ..ep()
         }
     }
 
@@ -1944,14 +1992,6 @@ mod tests {
                     exe: CLI_EXE_NAME.to_string(),
                 },
             ],
-            ..ep()
-        }
-    }
-
-    /// A variant carrying the priming file path (ADR-0092) — for verifying `--append-system-prompt-file` injection.
-    fn ep_with_priming() -> ControlEndpoint {
-        ControlEndpoint {
-            priming_file: Some(PathBuf::from("C:/repo/prompts/agent-priming.md")),
             ..ep()
         }
     }
@@ -2183,6 +2223,7 @@ mod tests {
             PathBuf::from("."),
             profile_env,
             control,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -2399,51 +2440,18 @@ mod tests {
         );
     }
 
-    // ── ADR-0092: priming injection (`--append-system-prompt-file`) ──────────────────────────
+    // ── ADR-0370: a Noop launch carries no instructions and no `--settings`, control channel or not ───────────
+    // ADR-0370
     #[test]
-    fn claude_priming_file_injects_append_system_prompt_flag_terminal() {
-        let s = spec_with_control(
-            &terminal(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_priming()),
-        );
-        let pos = s
-            .args
-            .iter()
-            .position(|a| a == "--append-system-prompt-file")
-            .expect("with a priming file, --append-system-prompt-file is injected");
-        assert_eq!(
-            s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("C:/repo/prompts/agent-priming.md"),
-            "the argument after the flag = absolute path of the priming MD: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_priming_file_injects_flag_json_mode() {
-        let s = spec_with_control(
-            &json(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_priming()),
-        );
-        assert!(
-            s.args.iter().any(|a| a == "--append-system-prompt-file"),
-            "priming injected in json mode too: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_no_priming_file_no_append_flag() {
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
-        assert!(
-            !s.args.iter().any(|a| a == "--append-system-prompt-file"),
-            "without priming there is no append-system-prompt-file: {:?}",
-            s.args
-        );
+    fn claude_noop_spawn_with_a_control_endpoint_has_no_append_flag() {
+        for command in [terminal(vec![]), json(vec![])] {
+            let s = spec_with_control(&command, SpawnMode::Fresh, None, Some(ep()));
+            assert!(
+                !s.args.iter().any(|a| a == "--append-system-prompt-file"),
+                "{command:?}: {:?}",
+                s.args
+            );
+        }
     }
 
     #[test]
@@ -2456,52 +2464,17 @@ mod tests {
         );
     }
 
-    // ── S18 D (spec §6): session-scoped settings fragment injection (`--settings`) ────────────────────────────
+    // ADR-0370
     #[test]
-    fn claude_settings_file_injects_settings_flag_terminal() {
-        let s = spec_with_control(
-            &terminal(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_settings()),
-        );
-        let pos = s
-            .args
-            .iter()
-            .position(|a| a == "--settings")
-            .expect("with settings_file, --settings is injected");
-        assert_eq!(
-            s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("C:/data/mcp/agent-x.settings.json"),
-            "the argument after the flag = absolute path of the settings fragment: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_settings_file_injects_flag_json_mode() {
-        // json (stream-json) headless is the real spawn path — if it is not attached here, the measure itself is meaningless.
-        let s = spec_with_control(
-            &json(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_settings()),
-        );
-        assert!(
-            s.args.iter().any(|a| a == "--settings"),
-            "settings fragment injected in json mode too: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_no_settings_file_no_settings_flag() {
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
-        assert!(
-            !s.args.iter().any(|a| a == "--settings"),
-            "without a settings fragment there is no --settings: {:?}",
-            s.args
-        );
+    fn claude_noop_spawn_with_a_control_endpoint_has_no_settings_flag() {
+        for command in [terminal(vec![]), json(vec![])] {
+            let s = spec_with_control(&command, SpawnMode::Fresh, None, Some(ep()));
+            assert!(
+                !s.args.iter().any(|a| a == "--settings"),
+                "{command:?}: {:?}",
+                s.args
+            );
+        }
     }
 
     #[test]
@@ -2510,36 +2483,6 @@ mod tests {
         assert!(
             !s.args.iter().any(|a| a == "--settings"),
             "without control there is no --settings: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_settings_flag_does_not_disturb_the_allowed_tools_tail() {
-        let ep = ControlEndpoint {
-            settings_file: Some(PathBuf::from("C:/data/mcp/a.settings.json")),
-            ..ep_with_grants()
-        };
-        let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep));
-        let settings_pos = s
-            .args
-            .iter()
-            .position(|a| a == "--settings")
-            .expect("injected");
-        let allowed_pos = s
-            .args
-            .iter()
-            .position(|a| a == "--allowedTools")
-            .expect("grant group injected");
-        assert!(
-            settings_pos < allowed_pos,
-            "--settings comes before the --allowedTools group: {:?}",
-            s.args
-        );
-        assert_eq!(
-            s.args.last().map(|s| s.as_str()),
-            Some(format!("PowerShell({CLI_EXE_NAME}:*)").as_str()),
-            "the grant group is still at the very end: {:?}",
             s.args
         );
     }
@@ -2952,6 +2895,7 @@ mod tests {
             cwd.clone(),
             env.clone(),
             None,
+            &LaunchArtifacts::default(),
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, [env[0].clone(), owned(NO_AUTOUPDATE_ENV)]);
@@ -3109,6 +3053,7 @@ mod tests {
             PathBuf::from("."),
             env,
             None,
+            &LaunchArtifacts::default(),
         );
         let vals: Vec<&str> = s
             .env
@@ -3134,6 +3079,7 @@ mod tests {
             PathBuf::from("."),
             env,
             None,
+            &LaunchArtifacts::default(),
         );
         let vals: Vec<&str> = s
             .env
@@ -4326,6 +4272,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
 
         let pos = spec
@@ -6140,9 +6087,19 @@ mod tests {
             env: vec![],
             cwd: PathBuf::from("."),
         };
-        let parts =
-            crate::backend::open_spawn(&json(vec![]), &probe, 80, 24, None, None, None, None, None)
-                .expect("open_spawn");
+        let parts = crate::backend::open_spawn(
+            &json(vec![]),
+            &probe,
+            80,
+            24,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &LaunchArtifacts::default(),
+        )
+        .expect("open_spawn");
         assert!(parts.transport.capabilities().control.interrupt);
         assert!(
             matches!(parts.transport.interrupt(), Err(PtyError::Unsupported(_))),

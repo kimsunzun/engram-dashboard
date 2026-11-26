@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-import type { AgentInfo, AgentProfile, AgentStatus, Preset } from '../api/types'
+import type { AgentInfo, AgentProfile, AgentStatus } from '../api/types'
 
 export const dummyAgents = [
   { id: '1', name: 'Assistant', status: 'running', cost: '$0.12' },
@@ -25,12 +25,6 @@ interface AgentState {
    * Whether the profile list has been received even once (ADR-0148 — counterpart of agentsLoaded). The profile pull can be late or fail (the boot pull can finally fail after retries — `App.tsx` `bootPull`; other re-reads are one-shots), and reading `profiles: []` as "no profiles" would **misclassify a living corpse slot as "no target" and unmount early a view preserving the conversation**. So "no profile" is decided only after this is set (else it stays at "connecting").
    */
   profilesLoaded: boolean
-  /**
-   * All saved presets (ADR-0061 — cwd bookmarks). Loaded once at boot + replaced by the PresetListUpdated broadcast after create/delete (profile mirror). PresetPalette draws it and derives each row's name from the cwd basename (names not stored).
-   */
-  presets: Preset[]
-  /** Whether the preset list has been received even once (counterpart of agentsLoaded) — `presets: []` cannot tell "not received" from "really none"; PresetPalette draws the empty notice only after this. */
-  presetsLoaded: boolean
   groups: typeof dummyGroups
   selectedAgentId: string | null
   setSelectedAgent: (id: string | null) => void
@@ -38,8 +32,6 @@ interface AgentState {
   setAgents: (agents: AgentInfo[]) => void
   /** Full replacement of the profiles with the listProfiles refetch result. */
   setProfiles: (profiles: AgentProfile[]) => void
-  /** Full replacement of the presets with the listPresets / PresetListUpdated broadcast result (ADR-0061). */
-  setPresets: (presets: Preset[]) => void
   /**
    * On agent-status-changed, only that agent's status is updated (badge). T-4: Killed/Exited is not removed from the list; removal comes from the agent-list-updated the manager sends after the kill completes.
    */
@@ -51,14 +43,11 @@ export const useAgentStore = create<AgentState>(set => ({
   agentsLoaded: false,
   profiles: [],
   profilesLoaded: false,
-  presets: [],
-  presetsLoaded: false,
   groups: dummyGroups,
   selectedAgentId: null,
   setSelectedAgent: id => set({ selectedAgentId: id }),
   setAgents: agents => set({ agents, agentsLoaded: true }),
   setProfiles: profiles => set({ profiles, profilesLoaded: true }),
-  setPresets: presets => set({ presets, presetsLoaded: true }),
   onStatusChanged: (id, status) =>
     set(state => ({
       agents: state.agents.map(a => (a.id === id ? { ...a, status } : a)),

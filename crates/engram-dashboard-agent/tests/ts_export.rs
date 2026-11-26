@@ -8,11 +8,26 @@
 //! ★Commit the generated files★ — the CI diff gate must watch this directory to catch vocabulary drift.
 
 use engram_dashboard_agent::commands::{
-    AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentInterruptArgs, AgentInterruptOk,
-    AgentListArgs, AgentListOk, AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs,
-    AgentMoveOk, AgentNewArgs, AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentResolveArgs,
-    AgentResolveOk, AgentSpawnArgs, AgentSpawnOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk,
-    UsageVendorRow, CATALOG_VERSION,
+    AgentAttachPresetArgs, AgentAttachPresetOk, AgentCancelQueuedInputArgs,
+    AgentCancelQueuedInputOk, AgentDetachPresetArgs, AgentDetachPresetOk, AgentDuplicateArgs,
+    AgentDuplicateOk, AgentInterruptArgs, AgentInterruptOk, AgentListArgs, AgentListOk,
+    AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs,
+    AgentNewOk, AgentPresetsArgs, AgentPresetsOk, AgentRenameArgs, AgentRenameOk,
+    AgentReorderPresetsArgs, AgentReorderPresetsOk, AgentResolveArgs, AgentResolveOk,
+    AgentSetWorkspaceArgs, AgentSetWorkspaceOk, AgentSpawnArgs, AgentSpawnOk, LibraryAddMountArgs,
+    LibraryAddMountOk, LibraryCopyArgs, LibraryCopyOk, LibraryDeleteArgs, LibraryDeleteOk,
+    LibraryEmptyTrashArgs, LibraryEmptyTrashOk, LibraryFoldersArgs, LibraryFoldersOk,
+    LibraryListArgs, LibraryListOk, LibraryListTrashArgs, LibraryListTrashOk, LibraryMoveArgs,
+    LibraryMoveOk, LibraryNewFileArgs, LibraryNewFileOk, LibraryNewFolderArgs, LibraryNewFolderOk,
+    LibraryReadArgs, LibraryReadOk, LibraryRefreshArgs, LibraryRefreshOk, LibraryRelinkArgs,
+    LibraryRelinkOk, LibraryRelocateMountArgs, LibraryRelocateMountOk, LibraryRemoveMountArgs,
+    LibraryRemoveMountOk, LibraryRenameArgs, LibraryRenameMountArgs, LibraryRenameMountOk,
+    LibraryRenameOk, LibraryRestoreArgs, LibraryRestoreOk, LibraryStatusArgs, LibraryStatusOk,
+    PresetAddArgs, PresetAddOk, PresetCheckArgs, PresetCheckOk, PresetGetArgs, PresetGetOk,
+    PresetPreviewFolderArgs, PresetPreviewFolderOk, PresetRemoveArgs, PresetRemoveOk,
+    PresetReorderArgs, PresetReorderOk, PresetSaveArgs, PresetSaveOk, PresetSetBackendArgs,
+    PresetSetBackendOk, UsageGetArgs, UsageRefreshArgs, UsageRefreshOk, UsageVendorRow,
+    CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -70,6 +85,102 @@ fn export_typescript_bindings() {
     UsageVendorRow::export_all_to(out).expect("failed to export the UsageVendorRow bindings");
     UsageRefreshArgs::export_all_to(out).expect("failed to export the UsageRefreshArgs bindings");
     UsageRefreshOk::export_all_to(out).expect("failed to export the UsageRefreshOk bindings");
+    LibraryStatusArgs::export_all_to(out).expect("failed to export the LibraryStatusArgs bindings");
+    LibraryStatusOk::export_all_to(out).expect("failed to export the LibraryStatusOk bindings");
+    LibraryAddMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryAddMountArgs bindings");
+    LibraryAddMountOk::export_all_to(out).expect("failed to export the LibraryAddMountOk bindings");
+    LibraryRemoveMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryRemoveMountArgs bindings");
+    LibraryRemoveMountOk::export_all_to(out)
+        .expect("failed to export the LibraryRemoveMountOk bindings");
+    LibraryRelocateMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryRelocateMountArgs bindings");
+    LibraryRelocateMountOk::export_all_to(out)
+        .expect("failed to export the LibraryRelocateMountOk bindings");
+    LibraryRenameMountArgs::export_all_to(out)
+        .expect("failed to export the LibraryRenameMountArgs bindings");
+    LibraryRenameMountOk::export_all_to(out)
+        .expect("failed to export the LibraryRenameMountOk bindings");
+    LibraryFoldersArgs::export_all_to(out)
+        .expect("failed to export the LibraryFoldersArgs bindings");
+    LibraryFoldersOk::export_all_to(out).expect("failed to export the LibraryFoldersOk bindings");
+    LibraryRefreshArgs::export_all_to(out)
+        .expect("failed to export the LibraryRefreshArgs bindings");
+    LibraryRefreshOk::export_all_to(out).expect("failed to export the LibraryRefreshOk bindings");
+    LibraryListArgs::export_all_to(out).expect("failed to export the LibraryListArgs bindings");
+    LibraryListOk::export_all_to(out).expect("failed to export the LibraryListOk bindings");
+    LibraryReadArgs::export_all_to(out).expect("failed to export the LibraryReadArgs bindings");
+    LibraryReadOk::export_all_to(out).expect("failed to export the LibraryReadOk bindings");
+    LibraryNewFolderArgs::export_all_to(out)
+        .expect("failed to export the LibraryNewFolderArgs bindings");
+    LibraryNewFolderOk::export_all_to(out)
+        .expect("failed to export the LibraryNewFolderOk bindings");
+    LibraryNewFileArgs::export_all_to(out)
+        .expect("failed to export the LibraryNewFileArgs bindings");
+    LibraryNewFileOk::export_all_to(out).expect("failed to export the LibraryNewFileOk bindings");
+    LibraryRelinkArgs::export_all_to(out).expect("failed to export the LibraryRelinkArgs bindings");
+    LibraryRelinkOk::export_all_to(out).expect("failed to export the LibraryRelinkOk bindings");
+    PresetGetArgs::export_all_to(out).expect("failed to export the PresetGetArgs bindings");
+    PresetGetOk::export_all_to(out).expect("failed to export the PresetGetOk bindings");
+    PresetCheckArgs::export_all_to(out).expect("failed to export the PresetCheckArgs bindings");
+    PresetCheckOk::export_all_to(out).expect("failed to export the PresetCheckOk bindings");
+    PresetAddArgs::export_all_to(out).expect("failed to export the PresetAddArgs bindings");
+    PresetAddOk::export_all_to(out).expect("failed to export the PresetAddOk bindings");
+    PresetRemoveArgs::export_all_to(out).expect("failed to export the PresetRemoveArgs bindings");
+    PresetRemoveOk::export_all_to(out).expect("failed to export the PresetRemoveOk bindings");
+    PresetReorderArgs::export_all_to(out).expect("failed to export the PresetReorderArgs bindings");
+    PresetReorderOk::export_all_to(out).expect("failed to export the PresetReorderOk bindings");
+    PresetSetBackendArgs::export_all_to(out)
+        .expect("failed to export the PresetSetBackendArgs bindings");
+    PresetSetBackendOk::export_all_to(out)
+        .expect("failed to export the PresetSetBackendOk bindings");
+    PresetSaveArgs::export_all_to(out).expect("failed to export the PresetSaveArgs bindings");
+    PresetSaveOk::export_all_to(out).expect("failed to export the PresetSaveOk bindings");
+    PresetPreviewFolderArgs::export_all_to(out)
+        .expect("failed to export the PresetPreviewFolderArgs bindings");
+    PresetPreviewFolderOk::export_all_to(out)
+        .expect("failed to export the PresetPreviewFolderOk bindings");
+    AgentPresetsArgs::export_all_to(out).expect("failed to export the AgentPresetsArgs bindings");
+    AgentPresetsOk::export_all_to(out).expect("failed to export the AgentPresetsOk bindings");
+    AgentAttachPresetArgs::export_all_to(out)
+        .expect("failed to export the AgentAttachPresetArgs bindings");
+    AgentAttachPresetOk::export_all_to(out)
+        .expect("failed to export the AgentAttachPresetOk bindings");
+    AgentDetachPresetArgs::export_all_to(out)
+        .expect("failed to export the AgentDetachPresetArgs bindings");
+    AgentDetachPresetOk::export_all_to(out)
+        .expect("failed to export the AgentDetachPresetOk bindings");
+    AgentReorderPresetsArgs::export_all_to(out)
+        .expect("failed to export the AgentReorderPresetsArgs bindings");
+    AgentReorderPresetsOk::export_all_to(out)
+        .expect("failed to export the AgentReorderPresetsOk bindings");
+    AgentSetWorkspaceArgs::export_all_to(out)
+        .expect("failed to export the AgentSetWorkspaceArgs bindings");
+    AgentSetWorkspaceOk::export_all_to(out)
+        .expect("failed to export the AgentSetWorkspaceOk bindings");
+    AgentDuplicateArgs::export_all_to(out)
+        .expect("failed to export the AgentDuplicateArgs bindings");
+    AgentDuplicateOk::export_all_to(out).expect("failed to export the AgentDuplicateOk bindings");
+    LibraryMoveArgs::export_all_to(out).expect("failed to export the LibraryMoveArgs bindings");
+    LibraryMoveOk::export_all_to(out).expect("failed to export the LibraryMoveOk bindings");
+    LibraryRenameArgs::export_all_to(out).expect("failed to export the LibraryRenameArgs bindings");
+    LibraryRenameOk::export_all_to(out).expect("failed to export the LibraryRenameOk bindings");
+    LibraryCopyArgs::export_all_to(out).expect("failed to export the LibraryCopyArgs bindings");
+    LibraryCopyOk::export_all_to(out).expect("failed to export the LibraryCopyOk bindings");
+    LibraryDeleteArgs::export_all_to(out).expect("failed to export the LibraryDeleteArgs bindings");
+    LibraryDeleteOk::export_all_to(out).expect("failed to export the LibraryDeleteOk bindings");
+    LibraryListTrashArgs::export_all_to(out)
+        .expect("failed to export the LibraryListTrashArgs bindings");
+    LibraryListTrashOk::export_all_to(out)
+        .expect("failed to export the LibraryListTrashOk bindings");
+    LibraryRestoreArgs::export_all_to(out)
+        .expect("failed to export the LibraryRestoreArgs bindings");
+    LibraryRestoreOk::export_all_to(out).expect("failed to export the LibraryRestoreOk bindings");
+    LibraryEmptyTrashArgs::export_all_to(out)
+        .expect("failed to export the LibraryEmptyTrashArgs bindings");
+    LibraryEmptyTrashOk::export_all_to(out)
+        .expect("failed to export the LibraryEmptyTrashOk bindings");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("read bindings/")

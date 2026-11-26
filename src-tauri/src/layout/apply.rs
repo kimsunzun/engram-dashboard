@@ -187,17 +187,62 @@ pub trait LabelSource: Send + Sync {
     fn next_label(&self) -> String;
 }
 
-/// The agent spawn port — the agent id on success. ★Awaited while not holding the lock★ (daemon round trip).
+/// Agent spawn port — creates a new agent for `cwd` and starts it. ★Awaited with no lock held★ (a daemon round trip).
 ///
-/// Returned errors go out to the caller as is (fail-loud). Interpreting the response (which frame is success) is the implementation's job (the transport contract).
+/// The refusal goes out to the caller as is (fail-loud). Reading the reply (which frame is success) is the
+/// implementation's job — that is a transport contract this service does not know.
 ///
-/// `backend` is **in the wire vocabulary as is**: a vocabulary of its own here would let the words the shell passes diverge from the daemon's, and the divergence would show only as a different backend quietly starting. `None` = not picked — **the daemon refuses** (the shell invents no default).
+/// `backend` is **the wire vocabulary as is**: a vocabulary of its own here could let the word the shell passes and
+/// the word the daemon knows drift apart, and that drift shows only as a different backend starting silently.
+/// `None` = not chosen — **the daemon refuses it** (the shell invents no default).
 pub trait AgentSpawner: Send + Sync {
     fn spawn_by_cwd<'a>(
         &'a self,
         cwd: String,
         backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>>;
+}
+
+/// A started agent. `notices` = the daemon's launch notice rows (`AgentEvent::Spawned.notices`, `[]` when absent),
+/// passed on undecoded — the shell does not know the agent types (ADR-0270).
+// ADR-0348
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedAgent {
+    pub id: String,
+    pub notices: Vec<serde_json::Value>,
+}
+
+/// Why a spawn-and-place did not end placed. `message` is the whole text (`Display`); the other fields are the
+/// structured part a bus answer carries as `args`:
+/// - `launch_blocked` = the daemon's `{"reasons": […]}` object, verbatim;
+/// - `created_agent_id` = the daemon added this agent to the roster and it did not start — it is asleep and not placed;
+/// - `live_agent_id` = a spawn succeeded before the placement failed — this agent runs and is not placed;
+/// - `notices` = the rows of that spawn — the daemon may have recorded them as shown, so they must reach the caller
+///   with the failure.
+///
+/// A refusal of the shell's own (validation, placement) has only `message` and, after a spawn, `live_agent_id` and
+/// `notices`.
+// ADR-0348
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct SpawnRefusal {
+    pub message: String,
+    pub launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+    pub created_agent_id: Option<engram_dashboard_protocol::AgentId>,
+    pub live_agent_id: Option<String>,
+    pub notices: Vec<serde_json::Value>,
+}
+
+impl From<String> for SpawnRefusal {
+    fn from(message: String) -> Self {
+        SpawnRefusal {
+            message,
+            launch_blocked: None,
+            created_agent_id: None,
+            live_agent_id: None,
+            notices: Vec::new(),
+        }
+    }
 }
 
 // Window already gone → None → skip the tab notice (e.g. closing a popup's last tab just removed the entry).
@@ -762,7 +807,7 @@ pub async fn spawn_into(
     slot: Option<Uuid>,
     backend: Option<String>,
     cwd: String,
-) -> Result<String, String> {
+) -> Result<String, SpawnRefusal> {
     spawn_into_placed(
         state,
         subs,
@@ -775,11 +820,13 @@ pub async fn spawn_into(
         cwd,
     )
     .await
-    .map(|placed| placed.out)
+    .map(|placed| placed.out.id)
 }
 
-/// The outcome edition of [`spawn_into`]: the id of the agent brought up (`out`) · the place it landed · the layout rows of that tab (taken in the very lock that placed it). `window` = the window to place in; `None` → the window of `tab` if given, otherwise main. Rejection texts are as `spawn_into`.
-// ADR-0307 (TRD S28 §7)
+/// The outcome form of [`spawn_into`] — the started agent (`out`, with its launch notices), where it was placed and
+/// that tab's layout rows (taken under the lock that placed it · TRD S28 §7). `window` = the window to place in — `None`
+/// = the tab's window when `tab` is given, else main. The refusal texts are those of `spawn_into`.
+// ADR-0307 · ADR-0348
 pub async fn spawn_into_placed(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -790,7 +837,7 @@ pub async fn spawn_into_placed(
     slot: Option<Uuid>,
     backend: Option<String>,
     cwd: String,
-) -> Result<Wrote<String>, String> {
+) -> Result<Wrote<SpawnedAgent>, SpawnRefusal> {
     // ── 0) Pre-spawn validation (before the agent exists, so alive_err is unnecessary) ──────────────
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
@@ -799,7 +846,8 @@ pub async fn spawn_into_placed(
     if tab.is_none() && slot.is_some() {
         return Err(
             "cannot specify a particular slot for a tab that will be newly created — omit slot or specify tab. Not spawned."
-                .to_string(),
+                .to_string()
+                .into(),
         );
     }
     // If a tab is given, place it in that tab's window, and do not bring it up if that window is not the tab's owner (learning that afterwards would leave an agent with nowhere to be placed). The same decision in the placement lock below covers the tab moving during the spawn.
@@ -857,10 +905,12 @@ pub enum SpawnAtError {
     Unplaced(TargetError),
     /// Otherwise the text has the same form as [`spawn_into`] (a pre-spawn rejection is "Not spawned", a post-spawn placement failure carries the living agent's id).
     #[error("{0}")]
-    Failed(String),
+    Failed(SpawnRefusal),
 }
 
-/// The spatial-word edition of [`spawn_into`]: brings it up in the area that `at` picks in window `window`'s visible tab; that area must be empty (`resolve_spawn_slot`'s occupancy decision). Outcome = agent id (`out`) · the resolved place · the layout rows of that tab (taken in the very lock that placed it).
+/// The spatial-word form of [`spawn_into`] — starts the agent in the slot `at` picks in window `window`'s shown tab.
+/// That slot must be empty (`resolve_spawn_slot`'s occupancy check). Outcome = the started agent (`out`), the resolved
+/// place and that tab's layout rows (taken under the lock that placed it).
 ///
 /// The word is resolved twice: in the pre-spawn lock (cannot pick or occupied → ends without spawning) and again in the placement lock (the first lock after the spawn). If the layout changed during the spawn and it now cannot pick, is occupied, or ★picks a different area than the one confirmed★ (a relative word follows focus), it is not placed in another area. The spawn already happened, so the text is the same as the placement failure of [`spawn_into`] (the living agent's id).
 // ADR-0307 (TRD S28 §5-2)
@@ -873,10 +923,10 @@ pub async fn spawn_into_at(
     at: SpatialToken,
     backend: Option<String>,
     cwd: String,
-) -> Result<Wrote<String>, SpawnAtError> {
+) -> Result<Wrote<SpawnedAgent>, SpawnAtError> {
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
-        Some(word) => Some(parse_backend(word).map_err(SpawnAtError::Failed)?),
+        Some(word) => Some(parse_backend(word).map_err(|e| SpawnAtError::Failed(e.into()))?),
     };
     let target = Target::At {
         token: at,
@@ -911,7 +961,11 @@ fn spawn_slot_at(mgr: &ViewManager, target: &Target) -> Result<(ViewId, Uuid), T
     Ok((at.view, slot))
 }
 
-// Placement after the spawn (a single critical section under the lock). `place` picks (tab, empty area) inside that lock; the failure text is made by attaching the living agent's id (spawn-first). Outcome = agent id · placed place · the layout rows of that tab (same lock).
+// Spawn (async with no lock held — a daemon round trip), then place (one critical section under the lock). `place`
+//   picks (tab, empty slot) under that lock. A placement failure names the live agent id (spawn-first — failure
+//   visibility above) and keeps the spawn's notices (M11). Outcome = the started agent · where it was placed · that tab's layout
+//   rows (same lock).
+// ADR-0348
 async fn spawn_then_place(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -921,13 +975,22 @@ async fn spawn_then_place(
     backend: Option<AgentBackendKind>,
     cwd: String,
     place: impl FnOnce(&mut ViewManager) -> Result<(ViewId, Uuid), String>,
-) -> Result<Wrote<String>, String> {
+) -> Result<Wrote<SpawnedAgent>, SpawnRefusal> {
     // ── 1) Spawn (async, no lock — daemon round trip) ──────────────────────────────────────────
-    let agent_id = spawner.spawn_by_cwd(cwd, backend).await?;
+    let spawned = spawner.spawn_by_cwd(cwd, backend).await?;
+    let agent_id = spawned.id.clone();
 
     // ── 2) Placement (one critical section under the lock) ────────────────────────────────────────────────────────
     let alive_err = |detail: String| {
-        format!("placement failed ({detail}) — agent {agent_id} is alive (can be re-attached with list_agents)")
+        SpawnRefusal {
+        message: format!(
+            "placement failed ({detail}) — agent {agent_id} is alive (do not start it again; attach it with layout.setSlotContent <slot> --content Agent --assign {agent_id} · it is in agent.list)"
+        ),
+        launch_blocked: None,
+        created_agent_id: None,
+        live_agent_id: Some(agent_id.clone()),
+        notices: spawned.notices.clone(),
+    }
     };
     let (view_id, target_slot, layout, tabs, rows) = {
         // A lock acquisition failure (mutex poison) also keeps the living agent id. (FIX 4)
@@ -957,7 +1020,7 @@ async fn spawn_then_place(
             view: view_id,
             slot: Some(target_slot),
         },
-        out: agent_id,
+        out: spawned,
         rows,
     })
 }
@@ -976,7 +1039,7 @@ pub struct SlotMove {
 // ★MOVE a slot to a new tab of another window (not a mirror)★: moves the **content (SlotContent)** of the original slot to the new tab and removes the original slot from the original View. The agent process is untouched; only the display surface moves.
 // `to_window` unspecified → a new window (label = the handed-over prewarmed window's, otherwise a new one from the issuer); specified → a new tab of that existing window.
 //
-// ★ADR-0064 all slot content★: agent_list/preset_palette and empty slots (ADR-0228) move too. Non-agent content has no backend output subscription, so re-sync is naturally a no-op. The only rejections are a nonexistent view/slot, returned as the `LayoutError` reason.
+// ★ADR-0064 all slot content★: agent_list/usage and empty slots (ADR-0228) move too. Non-agent content has no backend output subscription, so re-sync is naturally a no-op. The only rejections are a nonexistent view/slot, returned as the `LayoutError` reason.
 //
 // ## ★2-phase rollback + no orphan for an existing-window target (G4)★
 // While the lock is released the target window may be destroyed/closed concurrently, so **tab insertion is deferred to phase C**, and the target window is re-checked there (absent → rollback). The source detach is closed in the 2nd lock with a still-ours guard.

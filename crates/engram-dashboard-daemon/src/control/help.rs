@@ -3,19 +3,21 @@
 //! Owns the screen word vocabulary (word → screen · old word aliases), the body file path rule, section parsing, the required-section check, rendering and request body
 //! interpretation; the CLI only sends one word and prints the screen (two copies would diverge).
 //! It reads the file on every request — do not add a cache: the daemon is long-lived, and a once-read body would not change after editing until relaunch (the purpose
-//! of keeping the body outside the binary). Cost: one ~20 KB read per request.
+//! of keeping the body outside the binary). Cost: one ~40 KB read per request.
 //! A failure is a bounce — no built-in copy, no half screen: an unreadable file or missing required section answers `INTERNAL` with a warn; a half screen hides what
 //! was missing and a stale copy hides that the body is broken.
 //! It does not look at the caller: the screen is the same for everyone (per-caller filters withdrawn — ADR-0220 decision 4), so this route is not mail and a
 //! mail-blocked credential reads it too (`mcp_server::ControlRoute::is_mail`).
 //! It does not interpret client text: it only picks a `## <id>` section of the daemon's own distribution file and gives it as is — it touches neither the roster's `help`
-//! blob (ADR-0156) nor UI command payloads (ADR-0081). The words `window` · `settings` are screen names, not UI command names; window command names and arguments exist only in that body's prose.
+//! blob (ADR-0156) nor UI command payloads (ADR-0081). The words `window` · `settings` · `library` are screen names, not UI command names or CLI families; the command names and arguments of those screens exist only in that body's prose.
+//! Six screens, all required (`HelpTopic::ALL`): `library` joined with the library, preset and agent-preset commands (ADR-0386).
 // ADR-0081
 // ADR-0092
 // ADR-0156
 // ADR-0212
 // ADR-0220
 // ADR-0285
+// ADR-0386
 
 use std::path::PathBuf;
 
@@ -30,12 +32,15 @@ use super::ingress::ControlQueryResult;
 /// The executable name placeholder of the help template, replaced with `CLI_EXE_NAME` at render time — help is where an agent learns the surface, so a diverging name would not find the command.
 const HELP_TOOL_SLOT: &str = "{tool}";
 
-/// The fixed relative path of the screen body, in the same `prompts/` folder as priming: ADR-0100 ships that folder whole next to the exe and the manifest tripwire catches missing and extra files, so a new folder would need both devices again.
+/// The screen body's fixed relative path, in `prompts/`. ADR-0100 ships that folder whole beside the exes and the
+/// manifest tripwire (`scripts/build-release.ps1`) catches both a missing and an extra file there, so moving the body
+/// to a new folder needs both of those built again for it.
 const REL_HELP_FILE: &str = "prompts/engram-help.md";
 
-/// Where an operator or harness swaps the body (env of this daemon process) — same contract as priming's `ENGRAM_PRIMING_FILE`.
+/// Where an operator or a harness swaps the body (this **daemon process**'s env).
 ///
-/// Even on failure it does not fall back to the fixed file (as priming): silently swapping an explicit choice makes it impossible to know what was read; it bounces carrying that path.
+/// ★A failure does not fall back to the fixed file★: quietly swapping an explicit choice for another file hides what
+///   was read. The request is refused, and the reason carries that path.
 const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
 
 /// The head of a section marker line; the whole line must be the marker — substring matching would let one prose line describing the format cut a section (that file's header carries such a sentence).
@@ -43,12 +48,14 @@ const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
 /// A markdown heading, not an HTML comment, on purpose: viewers hide the comment form entirely, so the editor saw no section boundary (7KB read as undivided prose). The header title is level 1 (`# `) and does not match this level-2 pattern.
 const SECTION_OPEN: &str = "## ";
 
-/// The section id of the top-level screen; the other four are the family words as is ([`HelpTopic::section_id`]).
+/// The section id of the top-level screen; the other five are the screen words as is ([`HelpTopic::section_id`]).
 const SECTION_ROOT: &str = "root";
 
-/// The words of the two screens with no family constant (`CLI_GROUP_*`): window and settings are called only by full name (`window.list` · `settings.get`) with no `<family> <verb>` entrance, so family constants would create families the CLI parser does not accept.
+/// The words of the three screens with no family constant (`CLI_GROUP_*`): window, settings and library are called only by full name (`window.list` · `settings.get` · `library.list` · `preset.get`) with no `<family> <verb>` entrance, so family constants would create families the CLI parser does not accept.
 const HELP_TOPIC_WINDOW: &str = "window";
 const HELP_TOPIC_SETTINGS: &str = "settings";
+// ADR-0386
+const HELP_TOPIC_LIBRARY: &str = "library";
 
 /// Old screen word → current screen. Accepted only as a request word, not carried in the bounce wording.
 ///
@@ -64,6 +71,7 @@ enum HelpTopic {
     Agent,
     Window,
     Settings,
+    Library,
 }
 
 impl HelpTopic {
@@ -74,6 +82,7 @@ impl HelpTopic {
         HelpTopic::Agent,
         HelpTopic::Window,
         HelpTopic::Settings,
+        HelpTopic::Library,
     ];
 
     fn section_id(self) -> &'static str {
@@ -83,6 +92,7 @@ impl HelpTopic {
             HelpTopic::Agent => CLI_GROUP_AGENT,
             HelpTopic::Window => HELP_TOPIC_WINDOW,
             HelpTopic::Settings => HELP_TOPIC_SETTINGS,
+            HelpTopic::Library => HELP_TOPIC_LIBRARY,
         }
     }
 
@@ -187,8 +197,9 @@ fn render_help_from(text: &HelpText, topic: HelpTopic) -> String {
 
 /// The source of help screens — where to find the body file; the assembly builds it and hands it to the server (`mcp_server::start_mcp_server_with_help`).
 ///
-/// Same path shape as priming (ADR-0092): the fixed relative path attached to base; a non-empty `ENGRAM_HELP_FILE` comes first and does not drop to the fixed path on failure; only absolute
-/// paths are read — cwd is not used (a WMI-launched daemon's cwd is System32). Unlike priming (which hands over only the path), this process reads the contents.
+/// ★Path shape★: the fixed relative path is joined to base; a non-empty `ENGRAM_HELP_FILE` comes first and does not
+///   fall back to the fixed path when it fails; only an absolute path is read. ★cwd is not used★ — a daemon launched
+///   through WMI has System32 as its cwd. This process reads the content itself.
 /// It takes base so tests can hand over a known-body folder regardless of the test exe location · `CARGO_TARGET_DIR`; hence it is not built from the install location inside the server.
 // ADR-0092
 // ADR-0285
@@ -212,7 +223,8 @@ impl HelpSource {
         }
     }
 
-    /// The production constructor — same anchor as priming (`data_dir::find_install_root`); in release the exe folder, where `prompts/` ships (ADR-0100).
+    /// The production constructor — anchored at the install location (`data_dir::find_install_root`). In a release that
+    /// is the exe folder, and `prompts/` ships beside it (ADR-0100).
     pub fn from_install_root() -> Self {
         match crate::data_dir::find_install_root() {
             Some(root) => Self::new(root),
@@ -250,6 +262,7 @@ impl HelpSource {
                 ControlQueryResult::Error {
                     code: ErrorCode::Internal.as_str(),
                     hint: format!("help text unavailable — {e}; report this to the owner"),
+                    args: None,
                 }
             }
         }
@@ -372,6 +385,7 @@ fn parse_request(body: &[u8]) -> Result<HelpTopic, ControlQueryResult> {
             "unknown help topic: {} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`",
             preview(&word)
         ),
+        args: None,
     })
 }
 
@@ -383,6 +397,7 @@ fn malformed_request(what: &str, body: &[u8]) -> ControlQueryResult {
             "the help request body {what} — it must be a JSON object like {{\"{CLI_HELP_TOPIC_KEY}\":null}} for the list of groups or {{\"{CLI_HELP_TOPIC_KEY}\":\"{CLI_GROUP_MAIL}\"}} for one group; got: {}",
             preview(&String::from_utf8_lossy(body))
         ),
+        args: None,
     }
 }
 
@@ -439,6 +454,7 @@ impl<'de> serde::Deserialize<'de> for HelpRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engram_dashboard_agent::commands::SHELL_ONLY;
     use engram_dashboard_agent::types::{CLI_AGENT_FLAGS, CLI_AGENT_VERBS};
     use std::sync::{Mutex, MutexGuard};
 
@@ -497,7 +513,7 @@ mod tests {
                     panic!("the success envelope must have a screen string ({word:?}): {v}")
                 })
                 .to_string(),
-            ControlQueryResult::Error { code, hint } => {
+            ControlQueryResult::Error { code, hint, .. } => {
                 panic!("must be a screen ({word:?}): {code} {hint}")
             }
         }
@@ -505,7 +521,7 @@ mod tests {
 
     fn rejection_of(source: &HelpSource, body: &[u8]) -> (&'static str, String) {
         match source.answer(body) {
-            ControlQueryResult::Error { code, hint } => (code, hint),
+            ControlQueryResult::Error { code, hint, .. } => (code, hint),
             ControlQueryResult::Ok(v) => panic!("must be a bounce: {v}"),
         }
     }
@@ -621,7 +637,7 @@ mod tests {
     #[test]
     fn the_priming_pointer_names_help_entries_that_actually_render() {
         let _env = env_guard();
-        let priming = std::fs::read_to_string(repo_root().join("prompts/agent-priming.md"))
+        let priming = std::fs::read_to_string(repo_root().join("builtin/instructions/priming.md"))
             .expect("the priming file exists");
         let pointer = format!("{CLI_EXE_NAME} help");
         assert!(
@@ -662,6 +678,56 @@ mod tests {
                 !screen.trim().is_empty() && !screen.contains(HELP_TOOL_SLOT),
                 "the `{pointer} {word}` screen priming points at does not stand: {screen}"
             );
+        }
+    }
+
+    /// The text guard (ADR-0419): no rendered help screen, not the raw help file and not the priming names
+    /// `emptyTrash` — an agent learns the shell-only command from none of them (the library screen says emptying is
+    /// the user's, without the name).
+    // ADR-0419
+    #[test]
+    fn no_help_screen_and_not_the_priming_names_the_shell_only_command() {
+        let _env = env_guard();
+        let source = HelpSource::new(repo_root());
+        let priming = std::fs::read_to_string(repo_root().join("builtin/instructions/priming.md"))
+            .expect("the priming file exists");
+        let screens = HelpTopic::ALL
+            .iter()
+            .map(|topic| screen_of(&source, topic.group_word()));
+        let verbs: Vec<&str> = SHELL_ONLY
+            .iter()
+            .map(|name| name.rsplit('.').next().unwrap_or(name))
+            .collect();
+        assert!(verbs.contains(&"emptyTrash"), "{verbs:?}");
+        // The raw body too: a section no screen renders (the old `theme` pointer) must not carry the name either.
+        for text in [priming, shipped_file()].into_iter().chain(screens) {
+            for verb in &verbs {
+                assert!(
+                    !text.contains(verb),
+                    "the shell-only {verb} is named: {text}"
+                );
+            }
+        }
+    }
+
+    /// The root screen's library line and the priming's pointer line name the file operations (move · copy · delete ·
+    /// restore), so an agent asked to move or delete a library file finds the library screen from either (ADR-0419).
+    // ADR-0419
+    #[test]
+    fn the_root_line_and_the_priming_pointer_name_the_library_file_operations() {
+        let _env = env_guard();
+        let root = screen_of(&HelpSource::new(repo_root()), None);
+        let priming = std::fs::read_to_string(repo_root().join("builtin/instructions/priming.md"))
+            .expect("the priming file exists");
+        let entry = format!("{CLI_EXE_NAME} help {HELP_TOPIC_LIBRARY} ");
+        for text in [&root, &priming] {
+            let line = text
+                .lines()
+                .find(|line| line.contains(&entry))
+                .unwrap_or_else(|| panic!("no `{entry}` line: {text}"));
+            for word in ["move", "copy", "delete", "restore"] {
+                assert!(line.contains(word), "{word} on the library line: {line}");
+            }
         }
     }
 
@@ -707,7 +773,235 @@ mod tests {
         }
     }
 
-    /// The four family words each reach their own screen — a word wired to another screen still shows a success envelope, so it checks they differ from each other and the head is its own family.
+    /// The library screen teaches every library, preset and agent-preset command by its full name (full names only —
+    /// the CLI has no `library` family), and the rules no single command summary carries: the file formats with a
+    /// `description:`, the description rule, the folder entry form, the whole-file rewrite (ADR-0358), the two edit
+    /// guards, how to read a refusal, the check before a creating call is repeated, and the `library.status` state
+    /// words. It says a start leaves a missing item out and stops on a folder entry it cannot read (`folder-unreadable`),
+    /// and never says a missing item blocks a launch — a launch skips missing items (ADR-0374, ADR-0387). The agent
+    /// screen names the two new verbs and `--presets`, points at this screen, and says a start leaves a missing item
+    /// out and names it in `notices`. A command added to the library port without a line here turns this red — except a
+    /// shell-only one, which must not be on the screen at all (ADR-0419).
+    // ADR-0358
+    // ADR-0374
+    // ADR-0386
+    // ADR-0387
+    // ADR-0419
+    #[test]
+    fn the_library_screen_teaches_every_library_command_and_the_edit_rules() {
+        let _env = env_guard();
+        let source = HelpSource::new(repo_root());
+        let root = screen_of(&source, None);
+        let library = screen_of(&source, Some(HELP_TOPIC_LIBRARY));
+        let agent = screen_of(&source, Some(CLI_GROUP_AGENT));
+        assert!(
+            root.contains(&format!("{CLI_EXE_NAME} help {HELP_TOPIC_LIBRARY} ")),
+            "the root screen lists the library screen: {root}"
+        );
+
+        let agent_presets = [
+            "agent.presets",
+            "agent.attachPreset",
+            "agent.detachPreset",
+            "agent.reorderPresets",
+        ];
+        let names: Vec<&str> = engram_dashboard_agent::commands::COMMAND_SPECS
+            .iter()
+            .map(|spec| spec.name)
+            .filter(|name| {
+                name.starts_with("library.")
+                    || name.starts_with("preset.")
+                    || agent_presets.contains(name)
+            })
+            .filter(|name| !SHELL_ONLY.contains(name))
+            .collect();
+        assert_eq!(
+            names.len(),
+            30,
+            "18 library, 8 preset and 4 agent-preset commands an agent can call are declared: {names:?}"
+        );
+        for name in SHELL_ONLY {
+            assert!(
+                !library.contains(name),
+                "the shell-only {name} is on the library screen: {library}"
+            );
+        }
+        for name in names {
+            // A whole word — `agent.presets` must not pass on the strength of `agent.presetsX`.
+            let line = format!("{CLI_EXE_NAME} {name}");
+            assert!(
+                library.contains(&format!("{line} ")) || library.contains(&format!("{line}\n")),
+                "{name} by its full name on the library screen: {library}"
+            );
+        }
+
+        for taught in [
+            "kind: preset",
+            "description:",
+            "folders:",
+            "Write a one-line description when you create or edit a settings or preset file.",
+            "An edit through Engram rewrites the whole preset file",
+            "root_generation",
+            "root-generation-stale",
+            "base_rev",
+            "rev-mismatch",
+            "args.code",
+            "clear the cause, then repeat the same call",
+            "workspace-not-found",
+            "check agent.list before calling again",
+            "ok · missing (not there, or not a folder) · unreadable (there but could not be read, did not answer, or overlaps",
+            "A start leaves a missing item out and names it in notices",
+            "folder-unreadable",
+            // ADR-0419: the file commands' rows, their confirmation, an answer that never came, and where emptying is.
+            "status done · skipped · conflict · failed",
+            "--yes true --detach_refs true --plan_digest",
+            "the outcome is unknown and the command may still be running — do not repeat it",
+            "Emptying the trash and deleting for good are done by the user in the library screen.",
+        ] {
+            assert!(
+                library.contains(taught),
+                "the library screen teaches `{taught}`: {library}"
+            );
+        }
+        assert!(
+            !library.contains("block"),
+            "the library screen must not tie a missing item to a blocked launch: {library}"
+        );
+
+        let pointer = format!("{CLI_EXE_NAME} help {HELP_TOPIC_LIBRARY}");
+        for taught in [
+            "agent.new --backend",
+            "--presets",
+            "agent.setWorkspace --target",
+            "agent.duplicate --target",
+            "check agent.list before calling again",
+            "does not stop the start: it is left out and named in notices",
+            pointer.as_str(),
+        ] {
+            assert!(
+                agent.contains(taught),
+                "the agent screen teaches `{taught}`: {agent}"
+            );
+        }
+    }
+
+    /// The library screen teaches the mounts as a caller needs them: paths start with a mount name, the built-in is
+    /// `engram/…` (never the refused `engram:/…` as a usable spelling), the top holds only the mounts, and
+    /// `library.status` and the four mount commands by name. For a rename it teaches the two calls — the first answers
+    /// `mount-rename-unconfirmed` with the plan in `args.args`, the repeat carries `--yes true`, `root_generation`
+    /// and `plan_digest` —, what the plan keys mean (`git`, `unread` with `paths` null, `agents`, whole-file
+    /// rewrite, `already_pointing`), that a stopped rename is called again and answers the plan of what is left
+    /// (ADR-0407), `mount-unusable`, the repeat that saves after `library-config-write-failed`, and reading
+    /// `library.status` after a timeout. The `--section` words are the lowercase preset-file keys (ADR-0400 decision
+    /// 22), `hooks` among them, and so are the `--kinds` words with `Hook` · `HookFile` and the save rule that omitted
+    /// hooks stay (ADR-0420).
+    // ADR-0400
+    // ADR-0405
+    // ADR-0407
+    // ADR-0420
+    #[test]
+    fn the_library_screen_teaches_the_mounts_and_the_two_step_rename() {
+        let _env = env_guard();
+        let library = screen_of(&HelpSource::new(repo_root()), Some(HELP_TOPIC_LIBRARY));
+        for name in [
+            "library.status",
+            "library.addMount",
+            "library.removeMount",
+            "library.relocateMount",
+            "library.renameMount",
+        ] {
+            let line = format!("{CLI_EXE_NAME} {name}");
+            assert!(
+                library.contains(&format!("{line} ")) || library.contains(&format!("{line}\n")),
+                "the library screen names {name}: {library}"
+            );
+        }
+        for taught in [
+            "starting with its mount's name",
+            "The top holds only the mounts",
+            "virtual-root-read-only",
+            "engram/default",
+            "engram/priming",
+            "engram/settings/default",
+            "the old spelling engram:/… is refused",
+            "mount-rename-unconfirmed",
+            "args.args carries plan, root_generation and plan_digest",
+            "--yes true --root_generation <that root_generation> --plan_digest <that plan_digest>",
+            "plan.files",
+            "git true = that mount is in a git working tree",
+            "plan.unread",
+            "paths null = never read",
+            "plan.agents",
+            "rewritten whole: comments and quoting are not kept",
+            "plan.already_pointing",
+            "If stopped is not null",
+            "the reply is the plan of what is left",
+            "mount-unusable",
+            "library-config-write-failed",
+            "repeating the same call saves it",
+            "After a timeout, read library.status before repeating",
+            "--section <presets|instructions|skills|hooks|settings|folders>",
+            "Instruction|Skill|SkillFile|Hook|HookFile|Settings|Preset",
+            "hooks or folders omitted = they stay",
+        ] {
+            assert!(
+                library.contains(taught),
+                "the library screen teaches `{taught}`: {library}"
+            );
+        }
+        // `engram:/` appears only in the sentence that says it is refused — never as a spelling to type.
+        assert_eq!(
+            library.matches("engram:/").count(),
+            1,
+            "the refused built-in spelling is taught as usable: {library}"
+        );
+        for (at, lead) in library.match_indices("--section <") {
+            assert!(
+                library[at + lead.len()..].starts_with(|c: char| c.is_ascii_lowercase()),
+                "a capitalized --section word is taught: {library}"
+            );
+        }
+    }
+
+    /// Every `--flag` on a command line of the library screen (`  engram <name> …`) is a declared argument of that
+    /// command — a flag the LLM learns here and the declaration does not take is refused by the CLI before it is sent.
+    // ADR-0386
+    #[test]
+    fn every_flag_on_the_library_screen_is_a_declared_argument() {
+        let _env = env_guard();
+        let library = screen_of(&HelpSource::new(repo_root()), Some(HELP_TOPIC_LIBRARY));
+        let lead = format!("  {CLI_EXE_NAME} ");
+        let mut checked = 0;
+        for line in library.lines().filter(|l| l.starts_with(&lead)) {
+            let mut tokens = line[lead.len()..].split_whitespace();
+            let name = tokens.next().expect("a command name after the executable");
+            let spec = engram_dashboard_agent::commands::COMMAND_SPECS
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| {
+                    panic!("`{name}` on the library screen is not declared: {line}")
+                });
+            let schema: serde_json::Value =
+                serde_json::from_str(spec.args_schema).expect("an args schema");
+            for flag in tokens.filter_map(|t| {
+                t.trim_start_matches(['(', '['])
+                    .strip_prefix("--")
+                    .map(|f| f.trim_end_matches([')', ']', '|']))
+            }) {
+                assert!(
+                    schema["properties"].get(flag).is_some(),
+                    "--{flag} is not an argument of {name}: {line}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no flag found on the library screen: {library}"
+        );
+    }
+
+    /// The five screen words each reach their own screen — a word wired to another screen still shows a success envelope, so it checks they differ from each other and the head is its own family.
     #[test]
     fn each_group_word_renders_its_own_screen() {
         let _env = env_guard();
@@ -724,7 +1018,7 @@ mod tests {
             );
             seen.push((word, screen));
         }
-        assert_eq!(seen.len(), 4, "the family words are four: {seen:?}");
+        assert_eq!(seen.len(), 5, "the screen words are five: {seen:?}");
         let root = screen_of(&source, None);
         for (word, screen) in &seen {
             assert_ne!(*screen, root, "{word} is the same as the top-level screen");
@@ -850,7 +1144,9 @@ mod tests {
         assert_eq!(no_trailing_newline.section("s"), "last");
     }
 
-    /// The env override beats the fixed file, and its failure is a bounce — no return to the fixed file (as priming). A sound fixed file sits in base so a fallback would produce a screen and turn this red.
+    /// ★The env override beats the fixed file, and its failure is a **refusal** — no fallback to the fixed file★
+    ///   (quietly swapping an explicit choice for another file hides what was read). base holds a sound fixed file, so a
+    ///   fallback would render a screen and turn this assertion red.
     /// It reads on every request: after changing only the file, the next request must give the changed text — a cache would serve the old text until relaunch.
     // ADR-0092
     #[test]
@@ -859,7 +1155,7 @@ mod tests {
         let source = HelpSource::new(repo_root());
         let dir = temp_dir("override");
         let custom = dir.join("custom-help.md");
-        let landmark = "{tool} help agent";
+        let landmark = "what you can do on this team";
         let shipped = shipped_file();
         assert!(
             shipped.contains(landmark),
@@ -933,7 +1229,7 @@ mod tests {
             String::new(),
         ] {
             match parse_request(body.as_bytes()) {
-                Err(ControlQueryResult::Error { code, hint }) => {
+                Err(ControlQueryResult::Error { code, hint, .. }) => {
                     assert_eq!(code, invalid, "{body:?}: {hint}");
                     assert!(
                         hint.contains(CLI_HELP_TOPIC_KEY),
@@ -973,7 +1269,7 @@ mod tests {
             r#"{"topic":"mail","topic":"mail"}"#,
         ] {
             match parse_request(body.as_bytes()) {
-                Err(ControlQueryResult::Error { code, hint }) => {
+                Err(ControlQueryResult::Error { code, hint, .. }) => {
                     assert_eq!(code, ErrorCode::InvalidArgument.as_str(), "{body}: {hint}");
                     assert!(
                         hint.contains("duplicate field") && hint.contains(CLI_HELP_TOPIC_KEY),

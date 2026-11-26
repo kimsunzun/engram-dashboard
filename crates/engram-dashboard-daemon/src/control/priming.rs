@@ -1,13 +1,12 @@
-//! PrimingProvider seam (ADR-0092 receive contract) — yields the absolute path of the priming file to inject into the system prompt at spawn.
+//! The mail-CLI decider for priming text ([`teaches_mail_cli`] · [`mentions_mail_cli_surface`]) and the content checks
+//! on the shipped built-in priming (`builtin/instructions/priming.md` — the launch materials' priming source, ADR-0327).
 //!
-//! At every spawn (provision) the daemon asks this seam for the priming file path and sends it as `ControlEndpoint.priming_file`. Path only — the file content is not read (no hardcoding, ADR-0092: content lives only in the external MD `prompts/agent-priming.md`).
+//! ★No priming provider lives here — do not revive one★: the daemon resolves no priming path per spawn and
+//!   `ENGRAM_PRIMING_FILE` is read nowhere; the launch materials (`LaunchKitSource`) are the only priming seam.
 //!
-//! Why a seam (ADR-0092 "leave the road open"): `FilePrimingProvider` gives one shared file regardless of agent (a stopgap); a future per-agent prompt injection / skill system swaps only this trait's implementation, so provision depends only on `PrimingProvider`.
-//!
-//! Graceful: with no resolved file it returns `None` and leaves a warn — missing priming is not a spawn failure (unlike the control channel provision's fail-closed); the agent comes up without the receive contract but works.
+//! tauri import 0 (daemon crate).
 // ADR-0092
-
-use std::path::PathBuf;
+// ADR-0370
 
 use engram_dashboard_agent::types::{
     CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
@@ -163,260 +162,15 @@ pub fn mentions_mail_cli_surface(content: &str) -> bool {
         .any(|f| contains_bounded(&normalized, &normalized_token(f)))
 }
 
-/// Send+Sync+'static — DaemonControlChannel holds it as an Arc and calls it at every provision.
-pub trait PrimingProvider: Send + Sync + 'static {
-    /// The absolute path of the priming MD file to inject into this spawn. `None` if absent (file missing) or unconfigured.
-    /// Absolute path contract: the agent's cwd differs from the daemon/repo (each workspace), so claude finds the file only by an absolute path — a relative one would resolve against the agent's cwd and miss.
-    ///
-    /// Who gets the injection is not decided by this seam: the consistency invariant (the mail channel priming teaches == the mail channel that spawn can actually use — violated, you get the send freeze ADR-0099 measured) depends on `uses_mail` and `accepts_mcp_config`, known only to the daemon. Provision chooses whether to call;
-    /// this seam answers only "is there a file to give". Authority: `DaemonControlChannel::provision`.
-    // ADR-0126
-    // ADR-0133
-    fn priming_file(&self) -> Option<PathBuf>;
-}
-
-/// Base is the exe-based root (ADR-0092, both reviewers PRIMARY): base was once the daemon process cwd (`from_cwd`), but the production daemon is launched through WMI Win32_Process.Create and does not inherit the parent cwd (cwd=System32), so priming was quietly disabled. The fix reuses the exe-walk-up pattern
-/// (`data_dir::find_install_root`) that `default_data_dir` uses to anchor `.engram-dev`, taking a trustworthy absolute root (distrust cwd).
-///
-/// Base is injected at construction so tests can swap in a temp dir and verify deterministically without cwd/exe contamination; production wiring is from_install_root.
-pub struct FilePrimingProvider {
-    base_dir: PathBuf,
-}
-
-const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
-const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
-
-/// Characters that corrupt under cmd.exe (ADR-0092, Codex #1+#5): on Windows claude arguments are wrapped by `console_command` (the platform crate's `shell`) as `cmd.exe /c claude …`, which expands `%VAR%` even inside quotes and treats `& ^ | < >` as shell metacharacters. A priming path with these would reach claude wrong/truncated, so it is not injected (None).
-///   PRE-EXISTING · separate follow-up (ADR-0092): the cmd.exe escaping flaw of `console_command` is not introduced by this slice; `--mcp-config` (config_path) on the same path is exposed the same way (a daemon-made path, practically safe, same principle). This does only the cheap slice-level defense (the priming path filter) and does not fix console_command
-///   — tracked separately since it affects the arguments of all backends.
-const CMD_UNSAFE_CHARS: &[char] = &['%', '&', '^', '|', '<', '>'];
-
-/// UTF-8 is checked too (Codex #5): arguments are stringified with `to_string_lossy()` for the CLI (`backend/claude/`); a non-UTF8 path would be corrupted to U+FFFD and claude would get a nonexistent path — not injecting beats a corrupted path.
-fn path_is_cli_safe(p: &std::path::Path) -> bool {
-    let Some(s) = p.to_str() else {
-        return false;
-    };
-    !s.chars().any(|c| CMD_UNSAFE_CHARS.contains(&c))
-}
-
-impl FilePrimingProvider {
-    pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
-    }
-
-    /// If the root cannot be obtained (current_exe failure etc.), base is `.` (relative) — absolutize then fails and yields None (a relative path is never injected).
-    pub fn from_install_root() -> Self {
-        let base = crate::data_dir::find_install_root().unwrap_or_else(|| PathBuf::from("."));
-        Self::new(base)
-    }
-
-    /// absolute-or-None contract (ADR-0092, Codex #3): a relative base is no longer made absolute via current_dir (and returned relative on failure); the cwd fallback is removed, so failing to absolutize strictly yields None.
-    fn absolutize(&self, p: PathBuf) -> Option<PathBuf> {
-        if p.is_absolute() {
-            return Some(p);
-        }
-        let joined = self.base_dir.join(&p);
-        joined.is_absolute().then_some(joined)
-    }
-
-    fn resolve_checked(&self, raw: PathBuf, label: &str) -> Option<PathBuf> {
-        let Some(abs) = self.absolutize(raw) else {
-            tracing::warn!(
-                label,
-                "cannot resolve the priming path to an absolute path (base is not absolute) — spawning without priming (ADR-0092 graceful)"
-            );
-            return None;
-        };
-        if !path_is_cli_safe(&abs) {
-            tracing::warn!(
-                label,
-                path = %abs.display(),
-                "the priming path is non-UTF8 or contains cmd.exe metacharacters (% & ^ | < >) — not injected due to corruption risk (ADR-0092)"
-            );
-            return None;
-        }
-        // TOCTOU residue (accepted, ADR-0092 Codex #4): if the file disappears between this is_file and claude opening it after spawn, claude comes up without priming or errors. The priming file is stable infrastructure (version-controlled MD), not a racing target — accepted as a best-effort existence check, no lock; residual risk equals graceful absence.
-        if abs.is_file() {
-            return Some(abs);
-        }
-        tracing::warn!(
-            label,
-            path = %abs.display(),
-            "priming file not found — spawning without priming (ADR-0092 graceful)"
-        );
-        None
-    }
-}
-
-impl PrimingProvider for FilePrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
-        // An override failure does not fall back to fixed: quietly swapping an explicit override for a different file is confusing; whichever gate catches it, None (proceed without priming — resolve_checked warns).
-        // The env override beats the fixed file (ADR-0099 test-seam): a harness/operator can force a priming (roundtrip_smoke `--priming` passes it through this env); production leaves it unset. A spawn that provision decided not to call this seam is not revived by the override either — that decision is one body with the mail authorization and must not flip by one env (the trait doc is the authority).
-        if let Some(v) = std::env::var_os(ENV_OVERRIDE) {
-            if !v.is_empty() {
-                return self.resolve_checked(PathBuf::from(v), "override");
-            }
-        }
-
-        self.resolve_checked(PathBuf::from(REL_MCP_PRIMARY), "fixed")
-    }
-}
-
-/// Fills the seam in tests and paths unrelated to priming while keeping `--append-system-prompt-file` from being attached; no real file keeps the test deterministic.
-pub struct NoopPrimingProvider;
-
-impl PrimingProvider for NoopPrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
-        None
-    }
-}
-
-/// Fixed-path provider (test only) — returns the given absolute path as is (no existence check), for integration tests confirming priming is carried through the spawn wiring.
-pub struct FixedPrimingProvider(pub PathBuf);
-
-impl PrimingProvider for FixedPrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
-        Some(self.0.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use engram_dashboard_agent::types::CLI_EXE_NAME;
-    use std::io::Write as _;
-    use std::sync::Mutex;
+    use std::path::PathBuf;
 
-    /// env is process-global: parallel tests touching `ENGRAM_PRIMING_FILE` erase each other's set/remove (flaky); this mutex serializes them (cargo is parallel by default).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn make_fixture_dir() -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("engram-priming-test-{}", uuid::Uuid::new_v4()));
-        let prompts = dir.join("prompts");
-        std::fs::create_dir_all(&prompts).unwrap();
-        let mut f = std::fs::File::create(prompts.join("agent-priming.md")).unwrap();
-        writeln!(f, "# test priming (mcp-primary)").unwrap();
-        dir
-    }
-
-    #[test]
-    fn resolves_fixed_relative_to_absolute_under_base() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        let provider = FilePrimingProvider::new(dir.clone());
-        std::env::remove_var(ENV_OVERRIDE);
-        let got = provider
-            .priming_file()
-            .expect("Some when the fixed file exists");
-        assert!(
-            got.is_absolute(),
-            "the resolved result must be an absolute path: {got:?}"
-        );
-        assert!(
-            got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md")
-        );
-        assert!(got.is_file(), "it must point to a real file");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_fixed_file_yields_none_no_panic() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir =
-            std::env::temp_dir().join(format!("engram-priming-empty-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(dir.clone());
-        assert!(provider.priming_file().is_none(), "missing file → None");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn env_override_wins_over_fixed() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        let override_file = dir.join("custom-priming.md");
-        {
-            let mut f = std::fs::File::create(&override_file).unwrap();
-            writeln!(f, "# override priming").unwrap();
-        }
-        std::env::set_var(ENV_OVERRIDE, &override_file);
-        let provider = FilePrimingProvider::new(dir.clone());
-        let got = provider
-            .priming_file()
-            .expect("override file exists → Some");
-        assert!(got.is_absolute());
-        assert!(
-            got.ends_with("custom-priming.md"),
-            "the override path must win: {got:?}"
-        );
-        std::env::remove_var(ENV_OVERRIDE);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn env_override_missing_file_yields_none_not_fallback() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        let ghost = dir.join("does-not-exist.md");
-        std::env::set_var(ENV_OVERRIDE, &ghost);
-        let provider = FilePrimingProvider::new(dir.clone());
-        assert!(
-            provider.priming_file().is_none(),
-            "override file missing → None (no fixed fallback)"
-        );
-        std::env::remove_var(ENV_OVERRIDE);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ── ADR-0092 hardening: absolute-or-None contract (Codex #3) ──────────────────────────────
-    #[test]
-    fn relative_base_yields_none_never_relative_path() {
-        let _env = ENV_LOCK.lock().unwrap();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(PathBuf::from("relative-base"));
-        assert!(
-            provider.priming_file().is_none(),
-            "relative base → cannot be made absolute → None (no relative path leak)"
-        );
-    }
-
-    // ── ADR-0092 hardening: cmd.exe metacharacter path → None (Codex #1+#5) ────────────────────
-    #[test]
-    fn cmd_metachar_in_path_yields_none() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let root =
-            std::env::temp_dir().join(format!("engram-priming-meta-{}", uuid::Uuid::new_v4()));
-        let meta_base = root.join("we&ird%dir");
-        let prompts = meta_base.join("prompts");
-        std::fs::create_dir_all(&prompts).unwrap();
-        let mut f = std::fs::File::create(prompts.join("agent-priming.md")).unwrap();
-        writeln!(f, "# meta").unwrap();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(meta_base.clone());
-        assert!(
-            provider.priming_file().is_none(),
-            "path containing cmd metacharacters (% &) → None (not injected due to corruption risk)"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // ── ADR-0092 hardening: path_is_cli_safe unit (per metacharacter) ────────────────────────────
-    #[test]
-    fn path_is_cli_safe_rejects_each_metachar() {
-        for c in CMD_UNSAFE_CHARS {
-            let p = std::path::PathBuf::from(format!("C:/base/na{c}me/agent.md"));
-            assert!(
-                !path_is_cli_safe(&p),
-                "a path containing metacharacter {c:?} must be refused"
-            );
-        }
-        assert!(
-            path_is_cli_safe(std::path::Path::new("C:/base/prompts/agent-priming.md")),
-            "a path without metacharacters is safe"
-        );
-    }
+    /// The built-in priming the launch materials merge into every claude and codex launch — these checks guard it.
+    // ADR-0368
+    const BUILTIN_PRIMING: &str = "builtin/instructions/priming.md";
 
     // ── ADR-0099/0126: consistency invariant pin (content-based) — the channel the production priming file actually teaches ──────
     /// Tests run inside the compile-time source tree, so MANIFEST_DIR is trustworthy.
@@ -579,9 +333,12 @@ mod tests {
     #[test]
     fn production_priming_file_carries_no_mail_cli_surface() {
         let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A priming file exists");
-        // Total absence of A's CLI surface — exactly the ADR-0126 impact/invariant check list (command notation + accompanying flags); erasing only the name leaves the roundabout teaching half alive.
-        // Do not revert to a bare `contains`: scrambling notation with case, line breaks or markdown emphasis lets `!a.contains(...)` pass — this pin blocks only with the same normalization and word boundary as the decider, and does not falsely catch ordinary words like `--token`.
+        let a = std::fs::read_to_string(root.join(BUILTIN_PRIMING)).expect("A priming file exists");
+        // **Total** absence of A's CLI surface — exactly the check list of the ADR-0126 impact/invariant (command notation + accompanying flags).
+        //   If only the name is erased and flag notation remains, the roundabout teaching survives in half.
+        // ★Do not revert to a bare `contains`★: even merely scrambling the notation with case, line breaks or markdown emphasis
+        //   lets `!a.contains(...)` pass — this pin actually blocks only when it uses **the same normalization and the same word boundary** as the decider,
+        //   and it also does not falsely catch ordinary words like `--token`.
         //   (`mentions_mail_cli_surface` = call form ∪ `engram mail` fragment ∪ env variable names ∪ CLI-only flags.)
         assert!(
             !mentions_mail_cli_surface(&a),
@@ -598,7 +355,7 @@ mod tests {
     #[test]
     fn production_priming_files_point_at_the_control_surface() {
         let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A priming file exists");
+        let a = std::fs::read_to_string(root.join(BUILTIN_PRIMING)).expect("A priming file exists");
         let discovery = format!("{CLI_EXE_NAME} help");
         assert!(
             a.contains(&discovery),

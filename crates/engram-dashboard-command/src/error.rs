@@ -124,29 +124,44 @@ impl fmt::Display for RetryMode {
 
 /// One failure — code (machine) + message (human) + retry directive. Wire shape = `{"code":"NOT_FOUND","message":"…","retry":"never"}`.
 ///
-/// ★Do not machine-branch on `message`★: the only branching material is `code` (the CLI's string matching existed only because this
-///   contract did not; TRD §4-⑦).
+/// ★Never branch on `message`★: the material to branch on is `code` (with its `args`). The string pattern
+/// matching the CLI does today grew out of the absence of this contract, and this type ends that fragility
+/// (TRD §4-⑦).
+/// Wire shape = `{"code":"NOT_FOUND","message":"…","retry":"never"}`, plus `"args":{…}` when the error carries
+/// arguments. Without arguments the key is absent, so such an error is byte-identical to the three-field shape.
 ///
-/// ★Equality is decided by **meaning** — three fields only★: `received` is a relay copy and takes no part, else a value read by
-///   downgrading an unknown code and a value built directly with the same meaning
-/// would differ, diverging from the contract's sameness (the flat three fields of TRD §4-⑦).
+/// ★Equality is **meaning** — the typed fields `code`, `message`, `retry` and `args`★: the `received` copy
+/// below is relay residue and takes no part. If it did, a value read by downgrading an unknown code and a value
+/// built with the same meaning would compare unequal, and the sameness the contract states (TRD §4-⑦) would
+/// split from the sameness the code states. `args` takes part because it is meaning: the human wording is
+/// rebuilt from code + args (TRD S25 §1-8).
 ///
-/// ★The three fields are private — writes go only through setters★: swapping a field directly on a value holding the raw copy would make
-///   reserialization emit the raw text and **silently ignore the written value**
-/// (a relay hop that lowers `retry` to cut a dangerous retry would be undone at the next hop — TRD §4-④·§4-⑦). **A written value always
-///   goes out as is.**
+/// ★The typed fields are private — write them only through the setters and `with_args`★: swapping a
+/// field directly on a value that holds a received copy would let re-serialization send that original, so
+/// **the written value would be silently ignored** (a relay hop lowering `retry` to stop a dangerous retry
+/// would still have the next hop read the original instruction — TRD §4-④ · §4-⑦). The setters close that
+/// path: **a written value always goes out as written.**
 #[derive(Debug, Clone)]
 pub struct CommandError {
     code: ErrorCode,
     message: String,
     retry: RetryMode,
-    /// Only what **the three typed fields cannot carry** out of the received raw text. An error built directly is `None`.
+    /// The code's arguments — structured material a reader rebuilds the wording from (`{code, args}`,
+    /// TRD S25 §1-8). `None` = the error carries none, and the key is then absent on the wire.
+    /// Only a non-empty JSON object sits here. A received `null` or `{}` folds into absence, the same way the
+    /// typed fields fold `null` — both say "no arguments".
+    /// What is not ours to read stays an out-of-contract field in `received` and goes out verbatim: an `args`
+    /// of any other shape, and **any** `args` next to a code this side does not know (absent, `null` or
+    /// unknown). Those arguments belong to a code we downgrade to `INTERNAL`; typing them would pair foreign
+    /// keys with our `INTERNAL`.
+    args: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Only what the **typed fields cannot carry** out of the received original. `None` for an error built here.
     ///
     /// ★Accepting must not be destroying★: reading an unknown code downgraded to `INTERNAL` (§4-⑦) must not **erase the raw text on
     ///   re-emission**, or a relay hop's reserialization hides the owner's code from the final caller.
     ///   Fields outside the contract are carried as is for the same reason.
-    ///   ★`null` and absence are normalized **together**★ — one of the three fields arriving as `null` is read as absent and not carried
-    ///   out (both mean "no value"; re-decoding gives the same value).
+    ///   ★`null` and absence are normalized **together**★ — a typed field (`code`, `message`, `retry`, or `args` next to a known
+    ///   code) arriving as `null` is read as absent and not carried out (both mean "no value"; re-decoding gives the same value).
     ///   Fields outside the contract get no such normalization and go out as `null` — their meaning is unknown, so there is no basis to
     ///   fold them.
     /// This field is private, so it cannot be built with a struct literal — use the constructors.
@@ -162,7 +177,8 @@ enum ReceivedCode {
     Unknown(String),
 }
 
-/// The raw fragments the decode holds on to — only what cannot be restored into the three fields of [`CommandError`].
+/// The piece of the original a decode holds on to — only what the typed fields of [`CommandError`] cannot
+/// restore.
 #[derive(Debug, Clone)]
 struct ReceivedError {
     /// `None` if it was a known code (the typed field carries it as is). The two exceptions are [`ReceivedCode`].
@@ -177,7 +193,10 @@ struct ReceivedError {
 
 impl PartialEq for CommandError {
     fn eq(&self, other: &Self) -> bool {
-        self.code == other.code && self.message == other.message && self.retry == other.retry
+        self.code == other.code
+            && self.message == other.message
+            && self.retry == other.retry
+            && self.args == other.args
     }
 }
 
@@ -190,6 +209,7 @@ impl CommandError {
             code,
             message: message.into(),
             retry: code.default_retry(),
+            args: None,
             received: None,
         }
     }
@@ -200,6 +220,7 @@ impl CommandError {
             code,
             message: message.into(),
             retry,
+            args: None,
             received: None,
         }
     }
@@ -216,14 +237,39 @@ impl CommandError {
         self.retry
     }
 
-    /// Swaps the code — **discards the raw copy.**
+    /// The code's arguments, if any. Their keys are defined per code, so read them together with
+    /// [`CommandError::code`].
+    pub fn args(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+        self.args.as_ref()
+    }
+
+    /// Attaches the code's arguments, replacing any already carried. An empty map means "no arguments" and
+    /// leaves the key off the wire. Meant for errors whose code this side knows: on a received error whose
+    /// code was downgraded to `INTERNAL`, it would pair the written keys with `INTERNAL` and drop the owner's
+    /// `args` that were travelling verbatim.
     ///
-    /// ★Discarding is the point★: keeping the copy would make reserialization emit the raw text for a value that received an unknown code,
-    ///   ignoring the written value; the fields outside the contract and the received raw `retry`
-    /// are **accessories of the old code** and would disagree with the new one.
-    /// Do not call it on a value that is only relayed — the raw text must reach the final caller.
+    /// Keeps the received copy, like [`CommandError::set_message`]: `args` always serializes from the typed
+    /// field, so no original can shadow the written value. An `args` held as an out-of-contract field in the
+    /// copy is dropped — otherwise the key would go out twice, or the written "none" would be overridden.
+    pub fn with_args(mut self, args: serde_json::Map<String, serde_json::Value>) -> Self {
+        if let Some(received) = self.received.as_deref_mut() {
+            received.extra.remove(ARGS_FIELD);
+        }
+        self.args = (!args.is_empty()).then_some(args);
+        self
+    }
+
+    /// Replaces the code — **drops the received copy and the arguments.**
+    ///
+    /// ★Dropping is the point★: keeping the copy while changing only the code would let re-serialization of a
+    /// value received with an unknown code send the original, silently ignoring the written code. What goes with
+    /// it — out-of-contract fields, the received `retry` text and `args` — all **belong to the old code**, and
+    /// next to a new code they contradict it (`args` keys are defined per code). Attach arguments for the new
+    /// code with [`CommandError::with_args`] afterwards.
+    /// Do not call this on a value you only relay — leave it as is so the original reaches the final caller.
     pub fn set_code(&mut self, code: ErrorCode) {
         self.code = code;
+        self.args = None;
         self.received = None;
     }
 
@@ -305,11 +351,16 @@ impl fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
+/// Wire name of [`CommandError::args`] — the decoder pulls it out of the out-of-contract fields by this name.
+const ARGS_FIELD: &str = "args";
+
 #[derive(serde::Serialize)]
 struct WireError<'a> {
     code: &'a str,
     message: &'a str,
     retry: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -335,6 +386,7 @@ impl serde::Serialize for CommandError {
                 code: self.code.as_str(),
                 message: &self.message,
                 retry: self.retry.as_str(),
+                args: self.args.as_ref(),
             }
             .serialize(s);
         };
@@ -349,6 +401,9 @@ impl serde::Serialize for CommandError {
         if let Some(retry) = &received.retry {
             map.serialize_entry("retry", retry)?;
         }
+        if let Some(args) = &self.args {
+            map.serialize_entry(ARGS_FIELD, args)?;
+        }
         for (key, value) in &received.extra {
             map.serialize_entry(key, value)?;
         }
@@ -358,8 +413,17 @@ impl serde::Serialize for CommandError {
 
 impl<'de> serde::Deserialize<'de> for CommandError {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let raw = RawError::deserialize(d)?;
+        let mut raw = RawError::deserialize(d)?;
         let known_code = raw.code.as_deref().and_then(ErrorCode::from_wire);
+        // Which `args` is typed, folded or kept verbatim: see the `args` field.
+        let args = match known_code.and_then(|_| raw.extra.remove(ARGS_FIELD)) {
+            Some(serde_json::Value::Object(args)) if !args.is_empty() => Some(args),
+            Some(serde_json::Value::Object(_)) | Some(serde_json::Value::Null) | None => None,
+            Some(other) => {
+                raw.extra.insert(ARGS_FIELD.to_string(), other);
+                None
+            }
+        };
         let known_retry = raw.retry.as_deref().and_then(RetryMode::from_wire);
         // Downgraded reading: an unknown code is INTERNAL + never (§4-⑦), an unknown directive is the code's derived value; a **missing**
         //   code folds here too (not a known code, meaning unknown).
@@ -368,8 +432,8 @@ impl<'de> serde::Deserialize<'de> for CommandError {
             Some(_) => known_retry.unwrap_or_else(|| code.default_retry()),
             None => RetryMode::Never,
         };
-        // If the three fields restore what was received as is, no copy is held — holding one needlessly would spread the "do not swap by
-        //   hand" rule to common values.
+        // If the typed fields restore what was received exactly, hold no copy — holding one without a reason
+        //   would spread the doc's "do not swap fields by hand" warning to the common value.
         let expressible = known_code.is_some()
             && known_retry.is_some()
             && raw.message.is_some()
@@ -390,6 +454,7 @@ impl<'de> serde::Deserialize<'de> for CommandError {
             code,
             message: raw.message.unwrap_or_default(),
             retry,
+            args,
             received,
         })
     }
@@ -641,11 +706,11 @@ mod tests {
         assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
-    /// ★Sameness is decided by the three fields★ — if a downgraded value and a value built with the same meaning came out different, the
-    ///   contract (§4-⑦) and
-    /// the code would speak of different sameness.
+    /// ★Sameness is the typed fields★ — if a downgraded value and a value built with the same meaning
+    /// compared unequal, the contract (§4-⑦) and the code would state different sameness. `args` is meaning,
+    /// so two errors that differ only there are different errors.
     #[test]
-    fn equality_is_the_three_contract_fields_not_the_relay_copy() {
+    fn equality_is_the_typed_fields_not_the_relay_copy() {
         let downgraded: CommandError =
             serde_json::from_str(r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#)
                 .expect("decode");
@@ -662,5 +727,179 @@ mod tests {
             serde_json::from_str(r#"{"code":"NOT_FOUND","message":"y","retry":"never"}"#)
                 .expect("decode");
         assert_ne!(other_message, CommandError::not_found("x"));
+
+        let with = |v| CommandError::not_found("x").with_args(object(v));
+        assert_eq!(
+            with(serde_json::json!({"k": 1})),
+            with(serde_json::json!({"k": 1}))
+        );
+        assert_ne!(
+            with(serde_json::json!({"k": 1})),
+            with(serde_json::json!({"k": 2}))
+        );
+        assert_ne!(
+            with(serde_json::json!({"k": 1})),
+            CommandError::not_found("x")
+        );
+    }
+
+    fn object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        match value {
+            serde_json::Value::Object(map) => map,
+            other => panic!("an object literal: {other}"),
+        }
+    }
+
+    /// `args` rides after the three fields and decodes back into the typed slot — no relay copy for it.
+    #[test]
+    fn args_round_trip_through_wire_as_a_typed_field() {
+        let e = CommandError::of(ErrorCode::Conflict, "blocked").with_args(object(
+            serde_json::json!({"reasons": [{"code": "missing", "item": "a/b"}]}),
+        ));
+        let text = serde_json::to_string(&e).expect("serialize");
+        assert_eq!(
+            text,
+            r#"{"code":"CONFLICT","message":"blocked","retry":"never","args":{"reasons":[{"code":"missing","item":"a/b"}]}}"#
+        );
+
+        let decoded: CommandError = serde_json::from_str(&text).expect("decode");
+        assert_eq!(decoded, e);
+        assert_eq!(decoded.args(), e.args());
+        assert!(
+            decoded.received.is_none(),
+            "an object `args` is expressible by the typed fields"
+        );
+    }
+
+    /// ★Accepting must not destroy★ — `args` next to an unknown code and an extra field reaches the next hop
+    /// as received, also after a relay hop lowers the retry instruction. It is not typed: those keys belong
+    /// to a code this side downgrades to `INTERNAL`.
+    #[test]
+    fn args_survive_a_relay_hop_next_to_an_unknown_code_and_extras() {
+        let wire = r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever","args":{"k":1},"details":true}"#;
+        let mut decoded: CommandError = serde_json::from_str(wire).expect("decode");
+
+        assert_eq!(decoded.args(), None);
+        assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), wire);
+
+        decoded.set_retry_for_relay(RetryMode::Never);
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"never","args":{"k":1},"details":true}"#
+        );
+    }
+
+    /// A downgraded code — unknown, absent or `null` — never pairs `INTERNAL` with the foreign code's
+    /// arguments, and the arguments still travel verbatim.
+    #[test]
+    fn a_downgraded_code_leaves_its_args_untyped() {
+        for wire in [
+            r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"never","args":{"k":1}}"#,
+            r#"{"message":"x","retry":"never","args":{"k":1}}"#,
+            r#"{"code":null,"message":"x","retry":"never","args":{"k":1}}"#,
+        ] {
+            let decoded: CommandError = serde_json::from_str(wire).expect("decode");
+            assert_eq!(decoded.code(), ErrorCode::Internal, "{wire}");
+            assert_eq!(decoded.args(), None, "{wire}");
+            assert!(
+                serde_json::to_string(&decoded)
+                    .expect("re-serialize")
+                    .ends_with(r#""args":{"k":1}}"#),
+                "{wire}"
+            );
+        }
+    }
+
+    /// Typed `args` of a known code ride next to a relay copy (here: an unknown retry text) and its extras.
+    #[test]
+    fn typed_args_ride_with_a_relay_copy_and_its_extras() {
+        let wire =
+            r#"{"code":"TIMEOUT","message":"x","retry":"tomorrow","args":{"k":1},"details":true}"#;
+        let mut decoded: CommandError = serde_json::from_str(wire).expect("decode");
+
+        assert_eq!(decoded.args(), Some(&object(serde_json::json!({"k": 1}))));
+        assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), wire);
+
+        decoded.set_retry_for_relay(RetryMode::Never);
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            r#"{"code":"TIMEOUT","message":"x","retry":"never","args":{"k":1},"details":true}"#
+        );
+    }
+
+    /// `{}` says "no arguments" like `null` does — on decode and when written — so the key stays off the wire.
+    #[test]
+    fn an_empty_args_object_folds_to_absence() {
+        let decoded: CommandError =
+            serde_json::from_str(r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":{}}"#)
+                .expect("decode");
+        assert_eq!(decoded.args(), None);
+        assert!(decoded.received.is_none());
+        assert_eq!(decoded, CommandError::not_found("x"));
+
+        let written = CommandError::not_found("x").with_args(serde_json::Map::new());
+        assert_eq!(written.args(), None);
+        assert_eq!(
+            serde_json::to_string(&written).expect("serialize"),
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never"}"#
+        );
+    }
+
+    /// An `args` that is not an object is not ours to read: it travels verbatim as an out-of-contract field,
+    /// and a hop that writes its own arguments replaces it instead of sending the key twice.
+    #[test]
+    fn a_non_object_args_travels_verbatim_and_a_written_one_replaces_it() {
+        let wire = r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":[1,2]}"#;
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
+
+        assert_eq!(decoded.args(), None);
+        assert_eq!(serde_json::to_string(&decoded).expect("re-serialize"), wire);
+
+        let rewritten = decoded.with_args(object(serde_json::json!({"k": 1})));
+        assert_eq!(
+            serde_json::to_string(&rewritten).expect("re-serialize"),
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":{"k":1}}"#
+        );
+    }
+
+    /// `null` folds into absence like the typed fields — decoding the folded form gives the same value back.
+    #[test]
+    fn an_explicit_null_args_is_canonicalized_to_absence() {
+        let decoded: CommandError = serde_json::from_str(
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never","args":null}"#,
+        )
+        .expect("decode");
+
+        assert_eq!(decoded.args(), None);
+        assert!(decoded.received.is_none());
+        assert_eq!(
+            serde_json::to_string(&decoded).expect("re-serialize"),
+            r#"{"code":"NOT_FOUND","message":"x","retry":"never"}"#
+        );
+    }
+
+    /// `args` keys are defined per code, so a new code does not inherit the old code's arguments.
+    #[test]
+    fn changing_the_code_drops_its_args() {
+        let mut e = CommandError::of(ErrorCode::Conflict, "blocked")
+            .with_args(object(serde_json::json!({"k": 1})));
+        e.set_code(ErrorCode::Internal);
+
+        assert_eq!(e.args(), None);
+        assert_eq!(
+            serde_json::to_string(&e).expect("serialize"),
+            r#"{"code":"INTERNAL","message":"blocked","retry":"never"}"#
+        );
+    }
+
+    /// The other writers leave `args` alone — they do not change what the arguments belong to.
+    #[test]
+    fn writing_the_message_or_the_retry_keeps_the_args() {
+        let args = object(serde_json::json!({"k": 1}));
+        let mut e = CommandError::of(ErrorCode::Conflict, "blocked").with_args(args.clone());
+        e.set_message("blocked twice");
+        e.set_retry(RetryMode::AfterCondition);
+
+        assert_eq!(e.args(), Some(&args));
     }
 }

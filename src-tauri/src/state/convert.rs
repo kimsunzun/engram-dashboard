@@ -164,7 +164,6 @@ fn persisted_content(
             agent_id: agent_id.clone(),
         },
         SlotContent::AgentList => SlotContent::AgentList,
-        SlotContent::PresetPalette => SlotContent::PresetPalette,
         SlotContent::Usage {
             show_claude,
             show_codex,
@@ -693,7 +692,6 @@ fn known_content(content: SlotContent) -> SlotContent {
         SlotContent::Empty => SlotContent::Empty,
         SlotContent::Agent { agent_id } => SlotContent::Agent { agent_id },
         SlotContent::AgentList => SlotContent::AgentList,
-        SlotContent::PresetPalette => SlotContent::PresetPalette,
         SlotContent::Usage {
             show_claude,
             show_codex,
@@ -811,8 +809,15 @@ mod tests {
 
         let p1 = mgr.create_window("slot-popup-7").unwrap();
         let s = first_slot(&mgr, p1);
-        mgr.set_slot_content(p1, s, SlotContent::PresetPalette)
-            .unwrap();
+        mgr.set_slot_content(
+            p1,
+            s,
+            SlotContent::Usage {
+                show_claude: false,
+                show_codex: true,
+            },
+        )
+        .unwrap();
         mgr.set_window_theme("slot-popup-7", Some(UiTheme::EInk))
             .unwrap();
         place(&mut mgr, "slot-popup-7", 100.0, false);
@@ -1092,14 +1097,12 @@ mod tests {
             "빈 칸",           // hangul-ok: the Korean word-table entry
             "에이전트",        // hangul-ok: the Korean word-table entry
             "에이전트 트리",   // hangul-ok: the Korean word-table entry
-            "프리셋",          // hangul-ok: the Korean word-table entry
             "사용량",          // hangul-ok: the Korean word-table entry
             "알 수 없는 내용", // hangul-ok: the Korean word-table entry
             // hangul-ok-end
             "Empty slot",
             "Agent",
             "Agent tree",
-            "Presets",
             "Usage",
             "Unknown content",
             "",
@@ -1521,8 +1524,10 @@ mod tests {
     fn a_dropped_popout_holds_no_ids_against_the_windows_after_it() {
         // A popout written before main shares tab ids · slot ids with main and is discarded because of the label.
         let (shared_view, view_slot) = slot_tab(PersistedContent::Known(SlotContent::AgentList));
-        let (shared_node, node_slot) =
-            slot_tab(PersistedContent::Known(SlotContent::PresetPalette));
+        let (shared_node, node_slot) = slot_tab(PersistedContent::Known(SlotContent::Usage {
+            show_claude: true,
+            show_codex: false,
+        }));
         let mut same_view = empty_tab();
         same_view.id = shared_view.id;
         let mut same_node = empty_tab();
@@ -1553,7 +1558,10 @@ mod tests {
         );
         assert_eq!(
             layout.slot_content(shared_node.id, node_slot),
-            Ok(SlotContent::PresetPalette)
+            Ok(SlotContent::Usage {
+                show_claude: true,
+                show_codex: false,
+            })
         );
         assert_eq!(layout.windows.len(), 1);
 

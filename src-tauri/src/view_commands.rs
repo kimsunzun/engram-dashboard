@@ -315,6 +315,7 @@ impl ViewCommandBridge {
                 name: name.clone(),
                 help: help.clone(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             })
             .collect();
         let removed = previous
@@ -399,6 +400,7 @@ fn decls_of(map: &BTreeMap<String, String>) -> Vec<CommandDecl> {
             name: name.clone(),
             help: help.clone(),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         })
         .collect()
 }

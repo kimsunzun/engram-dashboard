@@ -13,6 +13,7 @@ use std::time::Duration;
 use engram_dashboard_base::sync;
 
 use crate::backend::InputEncoder;
+use crate::launch::LaunchLease;
 use crate::output_core::{CancelRequest, OutputCore};
 use crate::queued_input::{overlay_unconfirmed, ListedRow, QueuedInputs, RowPhase};
 use crate::session_id_latch::SessionIdLatch;
@@ -59,6 +60,10 @@ pub struct AgentSession {
     continues_conversation: bool,
     /// This incarnation's session id first-submission latch. `None` = the submission counting of the two input verbs is a no-op.
     session_id_latch: Option<Arc<SessionIdLatch>>,
+    /// This incarnation's launch-material reclaim lease — the session only holds it; the reaper takes it out. `None` = nothing to
+    /// reclaim (harness session) · already taken. A leaf lock (never call out while holding it).
+    // TRD S25 §5-2 4 (c2) ②
+    launch_lease: Mutex<Option<LaunchLease>>,
     /// Mid-turn input policy — the backend's reported value. Default (`with_mid_turn` not called) = `None` (today's path).
     // ADR-0231
     mid_turn: MidTurnPolicy,
@@ -121,6 +126,7 @@ impl AgentSession {
             sleeper: blocking_sleep,
             continues_conversation: false,
             session_id_latch: None,
+            launch_lease: Mutex::new(None),
             mid_turn: MidTurnPolicy::None,
             delivery_ack: Arc::new(DeliveryAck::new()),
             input_order: Mutex::new(()),
@@ -147,6 +153,21 @@ impl AgentSession {
     pub(crate) fn with_session_id_latch(mut self, latch: Arc<SessionIdLatch>) -> Self {
         self.session_id_latch = Some(latch);
         self
+    }
+
+    /// Loads the launch-material reclaim lease — default (not called) = no lease.
+    ///
+    /// ★Missing it at the production assembly point silently leaves the launched incarnation's volatile folder★ (until the boot sweep — no error).
+    // TRD S25 §5-2 4 (c2) ②
+    pub(crate) fn with_launch_lease(mut self, lease: LaunchLease) -> Self {
+        self.launch_lease = Mutex::new(Some(lease));
+        self
+    }
+
+    /// Takes this incarnation's launch-material reclaim lease — `None` from the second call. The only caller is the reaper that removed this session from the roster.
+    // TRD S25 §5-2 4 (c2) ②
+    pub(crate) fn take_launch_lease(&self) -> Option<LaunchLease> {
+        sync::lock(&self.launch_lease).take()
     }
 
     /// Carries the mid-turn input policy and ack availability — default (not called) = `None` · `Unknown`.
@@ -1590,7 +1611,7 @@ mod tests {
             "persisted at the moment of sending — even a first input withdrawn with ✕ leaves a 0-turn id"
         );
 
-        (latch.first_turn_sink())();
+        (latch.first_turn_sink())(true);
         assert_eq!(*events.lock().unwrap(), vec![Ev::Commit("sid-1".into())]);
     }
 

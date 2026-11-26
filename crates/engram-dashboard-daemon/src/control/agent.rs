@@ -19,6 +19,7 @@
 // ADR-0155
 // ADR-0157
 
+use engram_dashboard_agent::commands::LAUNCH_REFUSAL;
 use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
 use engram_dashboard_command::{CommandError, ErrorCode};
 
@@ -143,9 +144,15 @@ pub fn handle_agent(table: &super::commands::DaemonTable, req: AgentRequest) -> 
 /// The self-correction path is attached by the adapter: the table and tool crate do not know the calling surface (no CLI vocabulary in the wording); without it the LLM retries with the same arguments.
 /// One exception, the input lease refusal (`CONFLICT` but not a target problem): the roster fixes nothing and the next step (again after release) is in the refusal wording itself
 /// (connectionless tail of `commands::admit_input`); roster guidance would send the caller after a nonexistent namesake.
+/// A launch refusal (`agent.spawn` blocked or raced — [`LAUNCH_REFUSAL`]) is the same kind of `CONFLICT`: the fix is
+///   in the listed library items, or a plain retry for a race, and the message already says which. Keyed on the
+///   message prefix on purpose — a deliberate exception to "never branch on the message" (command `error.rs`):
+///   a race carries no `args`, and the prefix is a constant our own table writes before any caller text.
 // ADR-0231
 fn refused(e: CommandError) -> ControlQueryResult {
-    let hint = if e.message().starts_with(INPUT_LOCKED_REFUSAL) {
+    let carries_its_next_step = e.message().starts_with(INPUT_LOCKED_REFUSAL)
+        || (e.code() == ErrorCode::Conflict && e.message().starts_with(LAUNCH_REFUSAL));
+    let hint = if carries_its_next_step {
         format!("{}.", e.message())
     } else {
         format!("{} — {}.", e.message(), recovery_for(e.code()))
@@ -153,6 +160,7 @@ fn refused(e: CommandError) -> ControlQueryResult {
     ControlQueryResult::Error {
         code: e.code().as_str(),
         hint,
+        args: e.args().cloned(),
     }
 }
 
@@ -187,6 +195,7 @@ fn unknown_verb(verb: &str) -> ControlQueryResult {
             "unknown verb '{verb}' — {}.",
             recovery_for(ErrorCode::UnknownCommand)
         ),
+        args: None,
     }
 }
 
@@ -238,6 +247,7 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
             preview(raw),
             recovery_for(ErrorCode::InvalidArgument)
         ),
+        args: None,
     }
 }
 
@@ -253,7 +263,7 @@ mod tests {
 
     fn error_of(result: ControlQueryResult) -> (&'static str, String) {
         match result {
-            ControlQueryResult::Error { code, hint } => (code, hint),
+            ControlQueryResult::Error { code, hint, .. } => (code, hint),
             other => panic!("must be a bounce: {other:?}"),
         }
     }
@@ -348,6 +358,26 @@ mod tests {
                 "there is no command that can be typed: {hint}"
             );
         }
+    }
+
+    /// The code's arguments ride to the `engram agent …` body untouched; the hint keeps its recovery line.
+    #[test]
+    fn a_rejection_carries_the_codes_args_next_to_the_hint() {
+        let args = serde_json::json!({"reasons": [{"code": "missing", "item": "a/b"}]});
+        let body = refused(
+            CommandError::of(ErrorCode::Conflict, "launch blocked")
+                .with_args(args.as_object().expect("object").clone()),
+        )
+        .into_json();
+
+        assert_eq!(body["code"], "CONFLICT");
+        assert_eq!(body["args"], args);
+        assert!(
+            body["hint"]
+                .as_str()
+                .is_some_and(|hint| hint.contains(&format!("`{CLI_EXE_NAME} "))),
+            "{body}"
+        );
     }
 
     /// The input lease refusal carries no roster guidance — `CONFLICT` but not a wrongly chosen target; roster guidance would send the caller after a nonexistent namesake. The next step is in the refusal wording.

@@ -497,7 +497,9 @@ pub const MCP_SERVER_NAME: &str = "engram";
 // ADR-0132
 pub const CLI_GROUP_MAIL: &str = "mail";
 
-/// The **silence limit** (seconds) the CLI endures on the control route — the upper bound of the daemon deadline.
+/// The CLI's **silence window** on a control route (seconds) for every call that is not launch-class — the upper bound of
+/// the daemon's ordinary seat deadline. A launch-class call (agent launches and the long library file commands — ADR-0419)
+/// waits [`LAUNCH_RELAY_CALLER_WAIT_SECS`] instead (ADR-0360, ADR-0369).
 ///
 /// ★Not 「a total budget」★: consumers put it into `set_read_timeout` (+`set_write_timeout`), so it fires when, after the request is sent,
 ///   **one read** receives not a byte within this time — a **continuous no-response interval**, not the whole round trip. Today the
@@ -515,6 +517,75 @@ pub const CLI_GROUP_MAIL: &str = "mail";
 /// ★Integer seconds★: `Duration` has a different grain from the other CLI vocabulary here, and wrapping per consumer keeps this a pure
 ///   **number**.
 pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
+
+// The launch time values (ADR-0360 decision 6). Whole seconds as `u64`, like `CLI_CONTROL_READ_TIMEOUT_SECS` — each
+// consumer wraps them in its own type. Internal constants: they become settings only once file-based settings loading
+// exists (tracking T-105). The two folder waits are the inputs; the reply bound and every launch wait are derived as
+// `const` sums of one base and one margin so the chain cannot drift (ADR-0369 — a literal launch wait is a defect).
+
+/// How long one launch waits, in total, for the folder IO whose failure blocks it — the library-root stat, the
+/// folder-entry stats, listings and file reads, `prepare`'s material reads. What has not answered when it is spent
+/// counts as unreadable and blocks the launch. 60 s = where the Windows SMB client gives up on a request by itself.
+// ADR-0360
+pub const LAUNCH_REQUIRED_FOLDER_WAIT_SECS: u64 = 60;
+
+/// The separate allowance, per launch, for folder IO that only feeds a notice or a best-effort value (working-folder
+/// canonicalize, the backend's own skill roots). Never taken from [`LAUNCH_REQUIRED_FOLDER_WAIT_SECS`]; what does not
+/// answer in it is skipped, never a block.
+// ADR-0360
+pub const LAUNCH_ADVISORY_FOLDER_WAIT_SECS: u64 = 2;
+
+/// The longest one launch may take to reply: the two folder waits + the resume early-exit window + the link
+/// backstop (both in `manager.rs`, after the folder checks — summed as an upper bound; a launch takes at most
+/// one of the two), plus a 5 s slack for parsing, locks, spawning and the reply (a failed link's 5 s teardown join
+/// falls inside it) = 85.
+// ADR-0360
+pub const LAUNCH_REPLY_BOUND_SECS: u64 = LAUNCH_REQUIRED_FOLDER_WAIT_SECS
+    + LAUNCH_ADVISORY_FOLDER_WAIT_SECS
+    + crate::manager::EARLY_EXIT_WINDOW.as_secs()
+    + crate::manager::LINK_RESOLUTION_BACKSTOP.as_secs()
+    + LAUNCH_REPLY_SLACK_SECS;
+
+/// The one margin of the launch-wait chain: the daemon's 1 s expiry sweep + its 2 s caller margin = 3 — the same
+/// quantity as two daemon↔shell hops. Every step of the chain adds exactly this; where waits nest, outer = inner + this
+/// (ADR-0360 decision 1 (b)).
+///
+/// ★A deliberate exception to the `CLI_CONTROL_READ_TIMEOUT_SECS` doc's clause 「do not write that arithmetic here again」★:
+/// the two terms restate the daemon's private `SWEEP_INTERVAL` · `CALLER_MARGIN` (agent cannot see the daemon),
+/// because the CLI and the shell need the derived values as constants. The pin is the daemon's
+/// `fits_caller_silence_window`, which checks (bound, caller wait) and (relay seat, relay caller wait) at compile time.
+// ADR-0369
+pub const LAUNCH_MARGIN_SECS: u64 = DAEMON_SWEEP_SECS + DAEMON_CALLER_MARGIN_SECS;
+
+/// How long a caller that waits **directly** on one launch waits: [`LAUNCH_REPLY_BOUND_SECS`] + [`LAUNCH_MARGIN_SECS`]
+/// = 88 — the shell's wait for `Spawn` · `SpawnByCwd` · `SpawnProfile`, also inside the `agent.spawnInto` relay.
+// ADR-0360
+// ADR-0369
+pub const LAUNCH_CALLER_WAIT_SECS: u64 = LAUNCH_REPLY_BOUND_SECS + LAUNCH_MARGIN_SECS;
+
+/// The daemon's seat for a relayed launch-class name (`agent.spawnInto`): the owner's inner wait
+/// [`LAUNCH_CALLER_WAIT_SECS`] + [`LAUNCH_MARGIN_SECS`] = 91.
+// ADR-0369
+pub const LAUNCH_RELAY_SEAT_SECS: u64 = LAUNCH_CALLER_WAIT_SECS + LAUNCH_MARGIN_SECS;
+
+/// The CLI's wait for every launch-class verb (agent launches and the long library file commands — ADR-0419): [`LAUNCH_RELAY_SEAT_SECS`] + [`LAUNCH_MARGIN_SECS`] = 94 — one value whether
+/// the daemon answers the launch itself or relays it.
+// ADR-0369
+pub const LAUNCH_RELAY_CALLER_WAIT_SECS: u64 = LAUNCH_RELAY_SEAT_SECS + LAUNCH_MARGIN_SECS;
+
+/// Parsing, locks, spawning and the reply itself inside [`LAUNCH_REPLY_BOUND_SECS`].
+const LAUNCH_REPLY_SLACK_SECS: u64 = 5;
+/// Restates daemon `CommandDeliveries::SWEEP_INTERVAL` (see [`LAUNCH_MARGIN_SECS`]).
+const DAEMON_SWEEP_SECS: u64 = 1;
+/// Restates daemon `CommandDeliveries::CALLER_MARGIN` (see [`LAUNCH_MARGIN_SECS`]).
+const DAEMON_CALLER_MARGIN_SECS: u64 = 2;
+
+// `as_secs` above drops any fraction, so both activation waits must be whole seconds.
+const _: () = assert!(
+    crate::manager::EARLY_EXIT_WINDOW.subsec_nanos() == 0
+        && crate::manager::LINK_RESOLUTION_BACKSTOP.subsec_nanos() == 0,
+    "an activation wait has a fraction of a second — LAUNCH_REPLY_BOUND_SECS would drop it"
+);
 
 /// The variable name used when carrying the **absolute path** of the CLI executable in the spawn env.
 ///
@@ -645,8 +716,12 @@ pub enum ToolGrant {
 ///
 /// ★Each field has a different consumer — 「the backend translates」 does not mean 「one backend writes all fields」★:
 ///   `token`·`send_exe`·`mail_allowed` are written by **the backend-shared injection** (`backend::inject_cli_entrance`);
-///   `config_path`·`priming_file`·`settings_file`·`grants` are translated into their own flags only by the
+///   `config_path`·`grants` are translated into their own flags only by the
 /// folder of the program that accepts them (grounds: the `config_path` doc below).
+///
+/// ★No priming file and no settings fragment ride here — do not add them back★: the launch materials carry the
+/// instructions and the one `--settings`, and a launch without materials carries neither.
+// ADR-0370
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
     /// The agent that was issued this endpoint and its incarnation — the lifetime unit (`(AgentId,epoch)`) of the `token` below as a
@@ -696,25 +771,9 @@ pub struct ControlEndpoint {
     ///   bring that translation back★ — Rust does not warn when a reader is gone, so this sentence is the only record of why it remained.
     // ADR-0133
     pub mail_allowed: bool,
-    /// ADR-0092 (receive-contract priming): **the absolute path of the priming MD file** to inject into the system prompt at spawn (if
-    ///   any). The daemon's `PrimingProvider` seam resolves and carries it — `None` if missing/unconfigured. backend/claude/ injects it as
-    ///   `--append-system-prompt-file <abs-path>`
-    /// (claude **reads the file directly** — daemon/agent do not read the content). Broker-injected data orthogonal to MCP, riding this
-    ///   descriptor the daemon already fills for every claude spawn instead of a separate threading path.
-    pub priming_file: Option<std::path::PathBuf>,
     /// The list of tools to pre-approve (ADR-0094 — the contract is `ToolGrant`). The daemon control channel fills the send entries (MCP
     ///   `eg_send` / `engram` CLI). An empty Vec makes the backend inject nothing (no permission flags = existing gate kept).
     pub grants: Vec<ToolGrant>,
-    /// S18 D (spec §6 allowedMcpServers measure): **the absolute path of a settings fragment file** for the spawned session only (if any).
-    ///   The daemon writes `<data_dir>/mcp-config/<id>-<epoch>.settings.json` at provision and deletes it at revoke; backend/claude/
-    ///   translates it to `--settings <abs-path>` (that flag
-    /// knowledge is there alone — ADR-0004).
-    ///
-    /// ★Needed (measured 2026-07-24)★: the user-global `allowedMcpServers: []` (= block everything) **applied to spawned agents as is**,
-    ///   hiding the engram MCP server from the tool list. This fragment allows the engram server only for that session — **the global
-    ///   settings file is never touched**. Same lifetime as
-    ///   config_path (created and discarded per epoch), so it rides the same descriptor.
-    pub settings_file: Option<std::path::PathBuf>,
 }
 
 impl ControlEndpoint {
@@ -777,21 +836,21 @@ impl std::error::Error for ProvisionError {}
 pub struct ControlChannelNeeds {
     /// Whether this backend **can consume the mcp-config file we make** (ADR-0099).
     ///
-    /// true → mcp-config + session settings fragment recorded + MCP endpoint bits. false → none of the three is made. ★Not "can it use
+    /// true → the MCP endpoint bits (the MCP send grant; `mail_allowed` false). false → none of them. ★Not "can it use
     ///   MCP"★ — a program turning MCP on by another mechanism also has this false (canonical decision: each backend folder).
     pub accepts_mcp_config: bool,
     /// Whether the daemon **will write the mcp-config file** for this spawn (`AgentBackend::writes_mcp_config_file`).
     ///
-    /// true → records `<data_dir>/mcp-config/<id>-<epoch>.json` (plaintext Bearer token) and the session settings fragment, and a failure
-    ///   of that write is **fail-closed** (spawn aborted). false → neither, and `config_path`·`settings_file` go out `None`.
+    /// true → the daemon writes `<data_dir>/mcp-config/<id>-<epoch>.json` (a plaintext Bearer token), and a failed
+    /// write is **fail-closed** (the spawn is aborted). false → no file, and `config_path` goes out as `None`.
     /// ★Do not **fold it into one field** with the field above★: that is the axis deriving the mail channel decision (`mail_allowed`);
     ///   this asks only **whether to write a plaintext token to disk**. 「MCP but does not read our file」 (codex) is the normal value of
     ///   that combination (canonical: the third-field item of the type doc).
     // ADR-0209
     pub writes_mcp_config_file: bool,
-    /// Whether this spawn **is assigned a mail channel** (`AgentBackend::uses_mail`). false → neither mail education (priming) nor the
-    ///   send grant is carried and the daemon refuses mail requests with these credentials. ★It still receives the control verbs and the
-    ///   CLI entry★ (last item of the type doc).
+    /// Whether this spawn **is assigned a mail channel** (`AgentBackend::uses_mail`). false → no send grant goes out, and the daemon
+    ///   refuses this credential's mail requests. Mail teaching is not decided here — the priming comes only from the launch materials
+    ///   (ADR-0370). ★It still receives the control verbs and the CLI entry★ (last item of the type doc).
     // ADR-0209
     pub uses_mail: bool,
 }
@@ -1033,6 +1092,28 @@ pub enum PtyError {
     // ADR-0291 R17
     #[error("agent store: {0}")]
     Store(crate::profile::StoreError),
+    /// The launch-material check blocked this launch — every reason hit. No process and no control channel were made.
+    // ADR-0334
+    #[error("{0}")]
+    LaunchBlocked(crate::launch::LaunchBlocked),
+    /// The checked launch input does not match what would be launched — the attachments · command · env changed twice during launch
+    /// preparation, the command · env of the copy handed to the spawn differ from the checked roster values, or the source of the
+    /// checked plan (a library file) disappeared or changed before the materials were prepared ([`crate::launch::PrepareError::Stale`]).
+    /// No process and no control channel were made; retrying with a freshly read copy succeeds. A source race happens after the
+    /// incarnation marker was drawn, so one marker is spent (the stored session id stays).
+    // ADR-0319
+    #[error(
+        "launch raced: the agent's launch inputs (presets or their library files, command or env) changed while it was being prepared — try again"
+    )]
+    LaunchRaced,
+    /// The agent's reservation is held by a working-folder change (`agent.setWorkspace`) — this launch started nothing (no process, no
+    /// control channel) and records no last failure. Retrying after that change starts it. A launch losing to another launch is not
+    /// this (it keeps the double-start answers below).
+    // ADR-0386
+    #[error(
+        "the agent's working folder is being changed (agent.setWorkspace) — nothing was started; start it again once that change is done"
+    )]
+    WorkingFolderChanging,
     // ★Do not turn duplicate spawn requests back into an error★: "already up / already launching" is **a request with nothing to do**,
     //   answered `Ok(manager::SpawnOutcome::Moot)`. As an error, every consumer carried a list of "this error is not a real failure" and
     //   each fix of that list missed one item and stamped a failure marker on a
@@ -1192,6 +1273,56 @@ pub trait StatusSink: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── launch time constants (ADR-0360) ──
+    #[test]
+    fn launch_time_constants_hold_their_values() {
+        assert_eq!(LAUNCH_REQUIRED_FOLDER_WAIT_SECS, 60);
+        assert_eq!(LAUNCH_ADVISORY_FOLDER_WAIT_SECS, 2);
+        assert_eq!(LAUNCH_REPLY_BOUND_SECS, 85);
+        assert_eq!(LAUNCH_CALLER_WAIT_SECS, 88);
+    }
+
+    /// ADR-0369: every launch wait is the previous step + the one margin, and every nested pair holds
+    /// outer ≥ inner + margin — so moving the base or the margin moves every wait and keeps the order.
+    #[test]
+    fn launch_waits_are_derived_from_one_base_and_one_margin() {
+        assert_eq!(
+            LAUNCH_MARGIN_SECS,
+            DAEMON_SWEEP_SECS + DAEMON_CALLER_MARGIN_SECS
+        );
+        assert_eq!(
+            LAUNCH_CALLER_WAIT_SECS,
+            LAUNCH_REPLY_BOUND_SECS + LAUNCH_MARGIN_SECS
+        );
+        assert_eq!(
+            LAUNCH_RELAY_SEAT_SECS,
+            LAUNCH_CALLER_WAIT_SECS + LAUNCH_MARGIN_SECS
+        );
+        assert_eq!(
+            LAUNCH_RELAY_CALLER_WAIT_SECS,
+            LAUNCH_RELAY_SEAT_SECS + LAUNCH_MARGIN_SECS
+        );
+        assert!(
+            LAUNCH_MARGIN_SECS > 0,
+            "a zero margin makes the order prose"
+        );
+        for (inner, outer) in [
+            (LAUNCH_REPLY_BOUND_SECS, LAUNCH_CALLER_WAIT_SECS),
+            (LAUNCH_CALLER_WAIT_SECS, LAUNCH_RELAY_SEAT_SECS),
+            (LAUNCH_RELAY_SEAT_SECS, LAUNCH_RELAY_CALLER_WAIT_SECS),
+        ] {
+            assert!(outer >= inner + LAUNCH_MARGIN_SECS, "({inner}, {outer})");
+        }
+        assert_eq!(
+            (
+                LAUNCH_MARGIN_SECS,
+                LAUNCH_RELAY_SEAT_SECS,
+                LAUNCH_RELAY_CALLER_WAIT_SECS
+            ),
+            (3, 91, 94)
+        );
+    }
 
     // ── Capabilities::compose — whether the sources merge into the right areas (ownership composition check) ──
     #[test]

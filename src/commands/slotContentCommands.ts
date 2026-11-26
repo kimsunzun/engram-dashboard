@@ -1,5 +1,5 @@
 // ADR-0064 / ADR-0060 / ADR-0011: empty·agent are core content types with no separate feature module
-//   (unlike ones with their own module, such as preset_palette=presetCommands and agent_list=agentCommands), so their
+//   (unlike agent_list=agentCommands, which has its own module), so their
 //   dedicated commands and contributions are gathered here in one place. Every item attaches to the menu only by command id reference (ADR-0064 invariant —
 //   no direct store calls from the menu).
 
@@ -38,16 +38,6 @@ register({
 })
 
 register({
-  id: 'slot.fill.presetPalette',
-  title: () => t('slot.fillPresetPalette'),
-  category: 'slot',
-  run: args => {
-    const { viewId, slotId } = requireCoords(args, 'slot.fill.presetPalette')
-    return useViewStore.getState().setSlotContent(viewId, slotId, { type: 'preset_palette' })
-  },
-})
-
-register({
   id: 'slot.fill.usage',
   title: () => t('slot.fillUsage'),
   category: 'slot',
@@ -65,8 +55,7 @@ register({
   title: () => t('agent.create'),
   category: 'slot',
   // ★spawn + assign to this slot★ (ADR-0011 + ADR-0035): spawnAgent is daemon authority, assignAgent is layout authority
-  //   invoke — the two authorities are separate. The folder dialog uses the same open({directory:true}) pattern as preset.add and
-  //   PresetPalette. async — passes the Promise on so the caller (cdp/menu) can await it.
+  //   invoke — the two authorities are separate. async — passes the Promise on so the caller (cdp/menu) can await it.
   run: async args => {
     const { viewId, slotId } = requireCoords(args, 'slot.createAgentHere')
     // Native OS folder picker window (outside the webview). directory+multiple:false → returns string | null.
@@ -98,8 +87,8 @@ register({
 })
 
 // group='content' — rendered above the common slot-ops.
-// ★"New content ▶" one-level submenu (ADR-0065)★: folds the content-filling items (tree · palette · usage) into one container to
-//   tidy the empty slot menu ("what goes into this area" = separating the content plane). Child order = tree → palette → usage.
+// ★"New content ▶" one-level submenu (ADR-0065)★: folds the content-filling items (tree · usage) into one container to
+//   tidy the empty slot menu ("what goes into this area" = separating the content plane). Child order = tree → usage.
 //   The commands stay directly callable as the registry single source (§5 unchanged) — the submenu is presentation only.
 //   An extension spot where future backend types (codex/gemini) attach as children.
 // ADR-0067: `slot.createAgentHere` was removed from this menu — spawning lives in the tree (reserved profile double-click + agent_list menu `agentlist.createAgent`); the definition stays for direct calls · possible future reuse.
@@ -111,14 +100,13 @@ registerSlotMenu('empty', [
     order: 10,
     children: [
       { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
-      { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
       { commandId: 'slot.fill.usage', group: 'content', order: 30 },
     ],
   },
 ])
 
 // ADR-0067: "Monitor agent" contribution — shown on empty·agent slots (assigns a running agent to the right-clicked slot).
-//   ★hideOn = ['agent_list','preset_palette','usage']★: on source slots (tree · palette) and the usage slot, "monitor an agent
+//   ★hideOn = ['agent_list','usage']★: on the source slot (tree) and the usage slot, "monitor an agent
 //   here" is meaningless (the content of those slots is itself UI). The universal '*' registration covers empty·agent together and only these types
 //   are taken out by subtraction (ADR-0065 hideOn — not an allowlist, keeps the common single source).
 registerSlotMenu('*', [
@@ -126,7 +114,7 @@ registerSlotMenu('*', [
     commandId: 'slot.assignRunningAgent',
     group: 'content',
     order: 5,
-    hideOn: ['agent_list', 'preset_palette', 'usage'],
+    hideOn: ['agent_list', 'usage'],
   },
 ])
 

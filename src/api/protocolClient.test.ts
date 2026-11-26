@@ -18,7 +18,7 @@ import {
 } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import type { Band } from '../../src-tauri/bindings/Band'
-import type { AgentInfo, AgentProfile, Preset, RestoreReport } from './types'
+import type { AgentInfo, AgentProfile, RestoreReport } from './types'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 
 class MockTransport implements Transport {
@@ -162,6 +162,9 @@ describe('request_id pending matching', () => {
     expect(sent.cwd).toBe('C:/work')
     // The picked word must be carried in the envelope — otherwise the daemon refuses (no default).
     expect(sent.backend).toBe('codex')
+    // The webview does not show `Spawned.notices` yet, so it must not ask the daemon to record them as shown
+    // (ADR-0348 — absent = false; TRD S25 step 20 §7-1, step 11 turns it on).
+    expect(sent).not.toHaveProperty('deliver_notices')
     t.control({ Spawned: { request_id: sent.request_id, agent: { id: 'a1' } } })
     expect(await p).toEqual({ id: 'a1' })
   })
@@ -284,64 +287,7 @@ describe('queued input commands (ADR-0231) — ListQueuedInputs · CancelQueuedI
   })
 })
 
-// ── preset CRUD (ADR-0061 — wire command/reply matching) ─────────────────────────────────────
-describe('preset CRUD (ADR-0061)', () => {
-  it('listPresets → sends ListPresets{request_id} + resolves on PresetList{request_id,presets}', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.listPresets()
-    await Promise.resolve()
-    const rid = t.lastSent<{ request_id: string }>('ListPresets')!.request_id
-    const presets = [{ id: 'pr1', cwd: 'C:/proj' }] as Preset[]
-    t.control({ PresetList: { request_id: rid, presets } })
-    expect(await p).toEqual(presets)
-  })
-
-  it('createPreset(cwd) → sends CreatePreset{cwd,request_id} + resolves void on Ack', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.createPreset('C:/work')
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; cwd: string }>('CreatePreset')!
-    expect(sent.cwd).toBe('C:/work')
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
-  it('deletePreset(id) → sends DeletePreset{preset_id,request_id} + resolves void on Ack', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.deletePreset('pr1')
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; preset_id: string }>('DeletePreset')!
-    expect(sent.preset_id).toBe('pr1')
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
-  it('renamePreset(id, name) → sends RenamePreset{preset_id,name,request_id} + resolves void on Ack', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.renamePreset('pr1', 'my preset')
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; preset_id: string; name: string | null }>('RenamePreset')!
-    expect(sent.preset_id).toBe('pr1')
-    expect(sent.name).toBe('my preset')
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
-  it('renamePreset(id, null) → sends name=null (clear the override)', async () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const p = c.renamePreset('pr1', null)
-    await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; preset_id: string; name: string | null }>('RenamePreset')!
-    expect(sent.name).toBeNull()
-    t.control({ Ack: { request_id: sent.request_id } })
-    await expect(p).resolves.toBeUndefined()
-  })
-
+describe('profile rename (wire command/reply matching)', () => {
   it('renameProfile(id, name) → sends RenameProfile{profile_id,name,request_id} + resolves void on Ack', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
@@ -1684,19 +1630,6 @@ describe('event routing (eventBus common surface)', () => {
     off()
     t.control({ ProfileListUpdated: { profiles: [{ id: 'p2' }] } })
     expect(seen).toEqual([profiles])
-  })
-
-  it('PresetListUpdated → the onPresetListUpdated cb receives presets (ADR-0061)', () => {
-    const t = new MockTransport()
-    const c = new ProtocolClient(t)
-    const seen: Preset[][] = []
-    const off = c.onPresetListUpdated((p) => seen.push(p))
-    const presets = [{ id: 'pr1', cwd: 'C:/proj' }] as Preset[]
-    t.control({ PresetListUpdated: { presets } })
-    expect(seen).toEqual([presets])
-    off()
-    t.control({ PresetListUpdated: { presets: [{ id: 'pr2', cwd: 'C:/x' }] } })
-    expect(seen).toEqual([presets])
   })
 
   it('does not piggyback on a broadcast AgentListUpdated while getAgents is in progress', async () => {

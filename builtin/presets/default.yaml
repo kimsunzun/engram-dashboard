@@ -1,0 +1,7 @@
+kind: preset
+version: 1
+description: Engram default — priming and default settings
+instructions:
+  - engram/priming
+settings:
+  - engram/settings/default

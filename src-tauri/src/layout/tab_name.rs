@@ -54,7 +54,6 @@ pub fn slot_label<'n>(
             .unwrap_or(tab_word(lang, TabWord::AgentUnknown))
             .to_owned(),
         SlotContent::AgentList => tab_word(lang, TabWord::AgentTree).to_owned(),
-        SlotContent::PresetPalette => tab_word(lang, TabWord::Presets).to_owned(),
         SlotContent::Usage {
             show_claude: _,
             show_codex: _,
@@ -102,7 +101,6 @@ mod tests {
         assert_eq!(tab_word(Lang::Ko, TabWord::EmptySlot), "빈 칸"); // hangul-ok: the Korean UI table
         assert_eq!(tab_word(Lang::Ko, TabWord::AgentUnknown), "에이전트"); // hangul-ok: the Korean UI table
         assert_eq!(tab_word(Lang::Ko, TabWord::AgentTree), "에이전트 트리"); // hangul-ok: the Korean UI table
-        assert_eq!(tab_word(Lang::Ko, TabWord::Presets), "프리셋"); // hangul-ok: the Korean UI table
         assert_eq!(tab_word(Lang::Ko, TabWord::Usage), "사용량"); // hangul-ok: the Korean UI table
         assert_eq!(tab_word(Lang::Ko, TabWord::Foreign), "알 수 없는 내용"); // hangul-ok: the Korean UI table
     }
@@ -112,7 +110,6 @@ mod tests {
         assert_eq!(tab_word(Lang::En, TabWord::EmptySlot), "Empty slot");
         assert_eq!(tab_word(Lang::En, TabWord::AgentUnknown), "Agent");
         assert_eq!(tab_word(Lang::En, TabWord::AgentTree), "Agent tree");
-        assert_eq!(tab_word(Lang::En, TabWord::Presets), "Presets");
         assert_eq!(tab_word(Lang::En, TabWord::Usage), "Usage");
         assert_eq!(tab_word(Lang::En, TabWord::Foreign), "Unknown content");
     }
@@ -148,13 +145,11 @@ mod tests {
             "빈 칸",           // hangul-ok: the Korean UI table
             "에이전트",        // hangul-ok: the Korean UI table
             "에이전트 트리",   // hangul-ok: the Korean UI table
-            "프리셋",          // hangul-ok: the Korean UI table
             "사용량",          // hangul-ok: the Korean UI table
             "알 수 없는 내용", // hangul-ok: the Korean UI table
             "Empty slot",
             "Agent",
             "Agent tree",
-            "Presets",
             "Usage",
             "Unknown content",
         ] {
@@ -185,20 +180,12 @@ mod tests {
             "에이전트 트리" // hangul-ok: the Korean UI table
         );
         assert_eq!(
-            slot_label(Lang::Ko, &SlotContent::PresetPalette, no_names),
-            "프리셋" // hangul-ok: the Korean UI table
-        );
-        assert_eq!(
             slot_label(Lang::En, &SlotContent::Empty, no_names),
             "Empty slot"
         );
         assert_eq!(
             slot_label(Lang::En, &SlotContent::AgentList, no_names),
             "Agent tree"
-        );
-        assert_eq!(
-            slot_label(Lang::En, &SlotContent::PresetPalette, no_names),
-            "Presets"
         );
     }
 
@@ -274,7 +261,6 @@ mod tests {
         for content in [
             SlotContent::Empty,
             SlotContent::AgentList,
-            SlotContent::PresetPalette,
             SlotContent::Usage {
                 show_claude: true,
                 show_codex: true,
@@ -383,9 +369,9 @@ mod tests {
         let view = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         assert_eq!(name_of(&mgr, view), "빈 칸"); // hangul-ok: the Korean UI table
         let slot = tree::first_slot_id(&mgr.views[&view].layout);
-        mgr.set_slot_content(view, slot, SlotContent::PresetPalette)
+        mgr.set_slot_content(view, slot, SlotContent::AgentList)
             .unwrap();
-        assert_eq!(name_of(&mgr, view), "프리셋"); // hangul-ok: the Korean UI table
+        assert_eq!(name_of(&mgr, view), "에이전트 트리"); // hangul-ok: the Korean UI table
     }
 
     // Default names (「View N」 · 「Popup N」 · 「Tab」) are not made — every newly standing tab is auto-named.

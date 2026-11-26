@@ -31,7 +31,8 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 - 사용자가 직접 읽는 것만 한국어로 쓴다 — 대화 보고 · HTML 보고서 · 지시서(CLAUDE.md·`.claude/worker-rules.md`·스킬·스킬 바인딩).
 - 앱 화면 문구는 영어가 원본이다(`src/i18n/en.ts` · 셸 `src-tauri/src/ui_text.rs`). 한국어는 같은 키의 번역(`ko.ts`)이고 설정 `ui.language` 로 바꾼다. 새 문구는 두 언어를 같이 넣는다(ADR-0372 · 0373).
-- 그 밖은 전부 영어로 쓴다 — 코드 주석 · `docs/` 아래 md 문서(조사 보고서 · ADR · step-log 포함) · 커밋 메시지(제목 · 본문 · 머지 커밋). 한국어로 요청받아도 같고, 옛 히스토리가 한국어여도 같다.
+- 그 밖은 전부 영어로 쓴다 — 코드 주석 · 로그 메시지 · `docs/` 아래 md 문서(조사 보고서 · ADR · step-log 포함) · 커밋 메시지(제목 · 본문 · 머지 커밋). 한국어로 요청받아도 같고, 옛 히스토리가 한국어여도 같다.
+- 로그 메시지는 서술하지 않고 누구나 알아볼 수 있게 짧게 쓴다 — 형식 = `docs/reference/logging-conventions.md`. 기존 한국어 로그는 한꺼번에 영어로 바꾼다(tracking T-108).
 - 주변이 한국어여도 새 글은 영어로 쓴다.
 - 고치는 주석·문단은 통째로 영어로 다시 쓴다. 이름·경로·가리키는 절 이름만 바꾼 문단은 원문 언어로 둔다.
 
@@ -41,6 +42,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **코어 격리** — 에이전트 런타임(agent crate)은 Tauri 도 전송 방식도 모른다. 출력·상태는 코어가 정의한 계약으로만 흐른다. (ADR-0003)
 - **백엔드 확장** — 에이전트 백엔드 전용 지식(claude 의 `--session-id`·`--resume` 등)은 agent crate 의 `backend` 에만 둔다. manager 는 dispatch 만 부르고 transport 는 백엔드를 모른다. (ADR-0004)
 - **플랫폼 중립** — 운영 코드의 OS 분기는 `platform` crate 안에만 두고 부르는 쪽에 `cfg!(windows)` 를 흩뿌리지 않는다(ADR-0266). 시험 파일을 통째로 `#![cfg(windows)]` 로 막지 않는다(ADR-0230 결정 2).
+- **최소한만 막기** — 백엔드(claude·codex)가 스스로 처리하는 것은 그쪽 규칙에 맡기고, 우리는 실행이 깨지거나 보안 구멍이 되는 것만 막는다.
 - **LLM-우선 제어** — 모든 기능은 LLM으로 제어할 수 있어야 한다. 기존 표면(데몬 버스 · 프론트 `__engramCmd`) 위에 얹고 두 번째 표면을 만들지 않는다. 새 UI에는 LLM 경로를 같이 만들고, 모양은 `docs/reference/llm-command-conventions.md`를 따른다. (ADR-0055 · 0307)
 
 ## 모듈
@@ -55,6 +57,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩(워크스페이스 의존 0).
 - **command** — 명령 버스 도구(명령 0개 — 명령은 생산자 옆에서 선언).
 - **messaging** — 에이전트 간 우편 커널(워크스페이스 의존 0, 포트 trait 로만 접합).
+- **asset-library** — 프리셋 라이브러리. 이름 붙은 마운트 폴더들(가상 루트 하나) 아래 지시서·스킬·설정·프리셋 파일을 읽고 검사·해석해 에이전트 실행 재료를 만든다(Tauri 0 · 네트워크 0).
 - **base** · **platform** — 잎 crate. 범용 도우미 · OS 에 따라 갈리는 운영 코드.
 - **transport** — 재사용 전송 lib. 셸의 데몬 연결(`daemon_client/link/` · 구동 = `daemon_client/connection.rs`)과 데몬의 접속 받기(`daemon/src/link/` · 연결 포트 = `daemon/src/conn_port.rs`)가 그 위에서 돈다.
 

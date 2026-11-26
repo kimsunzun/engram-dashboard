@@ -16,18 +16,21 @@ launch/release/
 
 # Runtime data of the release distribution (`data/` next to the executable — ADR-0134). Never commit it, for the same reason:
 #   daemon\run\ holds the 256-bit WS token (daemon.json) and the tokens of the spawn attachment files (mcp-config\),
-#   and daemon\state\agents.json holds the profiles (may include plaintext env).
+#   and daemon\state\agent-profiles.json holds the profiles (may include plaintext env) (old version = daemon\state\agents.json).
 #
 # ★Do not block it with a single folder-name line (`data/`) (do not bring it back)★: since the ADR-0134 rename the name is common, so it would
 #   quietly swallow unrelated data folders too — ignoring is invisible, so a broad rule is worse than none.
 # ★But do not delete these either★: the assembly output paths (release/ · launch/release/ · target/ above) are already covered, but
 #   unzipping the distribution zip at **an arbitrary place** inside a tracked folder or running build-release.ps1 elsewhere with -OutDir
 #   lands outside those paths. This part aims precisely at the secret locations only.
-# ★Do not drop the trailing `*` of `agents.json*`★: the `.corrupt-*` copies carry the same plaintext env.
+# ★Do not drop the trailing `*` of `agent-profiles.json*` · `agents.json*`★: the `.corrupt` · `.corrupt-*` copies and the atomic-write
+#   temp files (`.tmp<pid>.<n>`) carry the same plaintext env.
+# ★Do not delete the old-version `agents.json*` line either★: the new version neither reads nor deletes that file (ADR-0314 decision 5), so it stays in the folder.
 # ★`daemon/run/` is a folder rule★ (ADR-0264 decision 7 — the only exception to the file-name principle of ADR-0136 decision 3)
 #   — everything that holds a token (daemon.json · mcp-config\) is under it, and the path is specific, so it does not swallow
 #   unrelated folders.
 **/data/daemon/run/
+**/data/daemon/state/agent-profiles.json*
 **/data/daemon/state/agents.json*
 # Secret files of the old flat layout — the code no longer reads or deletes them (ADR-0264 decision 5), but they stay listed so leftover tokens · plaintext env
 #   do not show up as untracked and get committed by mistake.

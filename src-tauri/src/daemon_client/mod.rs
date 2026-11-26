@@ -38,6 +38,7 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 pub use connection::HandshakeError;
+pub use connection::{LAUNCH_CALLER_WAIT, LAUNCH_MARGIN_SECS, LAUNCH_REPLY_BOUND_SECS};
 use events::{DaemonEvents, TauriEmitter};
 // The assembly that discards notifications is harness-only (`events::NoDaemonEvents` doc) — it does not exist in production builds at all.
 #[cfg(test)]

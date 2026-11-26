@@ -17,6 +17,7 @@ pub mod data_dir;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 mod file_hooks;
+pub mod identity;
 pub mod instance;
 mod link;
 #[cfg(test)]
@@ -31,11 +32,12 @@ mod test_doubles;
 pub mod usage_service;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
+use engram_dashboard_agent::commands::LibraryCommandHost;
+use engram_dashboard_agent::launch::{LaunchPorts, StdLaunchFs};
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::CLI_EXE_NAME;
@@ -48,6 +50,13 @@ use crate::conn_port::FrameFanout;
 use connection_core::MultiViewState;
 use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
+use engram_dashboard_asset_library::backends::AgentBackends;
+use engram_dashboard_asset_library::config::LibraryConfig;
+use engram_dashboard_asset_library::folder::{
+    BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP,
+};
+use engram_dashboard_asset_library::store::FsStore;
+use engram_dashboard_asset_library::{LibraryService, LibraryValues};
 use link::server::{ConnRegistry, Listening};
 use status_fanout::DaemonStatusSink;
 use usage_service::clock::OsUsageClock;
@@ -69,15 +78,34 @@ use crate::portfile::DAEMON_FILE;
 
 // ── data dir / token ──────────────────────────────────────────────────────────────
 
-fn resolve_data_dir() -> PathBuf {
-    data_dir::default_data_dir()
-}
-
 /// Security: do not print the return value to logs (it is written only to daemon.json).
 pub fn generate_token() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf)?;
     Ok(engram_dashboard_base::text::hex_lower(&buf))
+}
+
+/// The root generation a run's library service starts at ([`LibraryStart::root_generation_base`]): random below 2^52,
+/// so the base plus a run's mount changes stays an exact JSON number and a generation kept from an earlier run does not
+/// match. Should the OS source fail (the boot token draws from it first and stops the daemon then), std's per-process
+/// random hash keys stand in — never the clock.
+// ADR-0381
+pub fn root_generation_base() -> u64 {
+    const BELOW: u64 = 1 << 52;
+    let mut buf = [0u8; 8];
+    let drawn = match getrandom::getrandom(&mut buf) {
+        Ok(()) => u64::from_le_bytes(buf),
+        Err(e) => {
+            tracing::warn!(
+                "root generation base: OS random source failed; using std hash keys: {e}"
+            );
+            use std::hash::{BuildHasher, Hasher};
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+        }
+    };
+    drawn % BELOW
 }
 
 // ── control plane CLI location search (ADR-0086 step 2 · F1) ─────────────────────────────────
@@ -138,7 +166,7 @@ fn init_logging_and_panic_hook(layout: &DataLayout) -> Option<PathBuf> {
 /// Why tie them (load-bearing): the manager carries `DaemonStatusSink` → `Arc<dyn FrameFanout>` inside it, so a manager made with
 /// `build_daemon_wiring(A)` passed into `run_accept_loop(.., registry B)` compiles. Connections register in B while state · list · restore
 /// notifications go to A and reach no client — an empty map is 0 iterations, with not even a failure log, and the frontend decides terminal by
-/// list events (ADR-0005), so every agent looks alive forever. Lease/profile/preset broadcasts vanish the same way.
+/// list events (ADR-0005), so every agent looks alive forever. Lease/profile broadcasts vanish the same way.
 /// A mismatched pair is representable at every place that takes both a parameter receiving the registry and a parameter carrying the
 /// fanout, directly or transitively (`manager` → status sink; `handlers` → factory → `AgentConnections.fanout`). Enumerating paths always
 /// missed one, so "it does not take the fanout type" is not a criterion. Today the rule catches the entry points outside the assembly
@@ -156,6 +184,12 @@ struct DaemonWiring {
     registry: ConnRegistry,
     /// The service the `manager`'s status sink chain feeds — the connection layer subscribes and ⟳s on the same one.
     usage: Arc<UsageService>,
+    /// The library service plugged in as `manager`'s launch-kit source — the same one answers the library commands
+    /// ([`DaemonWiring::library_commands`]) — with `manager` plugged into it as its profile-edit port. `None` = the
+    /// Noop kits (the test server). Production also reads it for the first-start step and the boot scan
+    /// ([`build_daemon_wiring`]).
+    // ADR-0311
+    library: Option<Arc<LibraryService>>,
 }
 
 impl DaemonWiring {
@@ -168,6 +202,16 @@ impl DaemonWiring {
             self.manager.clone(),
         ))
     }
+
+    /// The library port of the command table — the service `manager` launches through, so the bus edits the library
+    /// the launches read; with no service (the test server), [`control::commands::NoLibrary`].
+    // ADR-0386
+    fn library_commands(&self) -> Arc<dyn LibraryCommandHost> {
+        match &self.library {
+            Some(library) => library.clone(),
+            None => Arc::new(control::commands::NoLibrary),
+        }
+    }
 }
 
 fn build_daemon_wiring(
@@ -178,23 +222,132 @@ fn build_daemon_wiring(
 ) -> DaemonWiring {
     let state_dir = layout.daemon_state_dir();
     let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
-    let preset_store = Arc::new(FilePresetStore::new(state_dir));
     let scratch_root = layout.usage_probe_dir();
     // The safety of this sweep depends on timing: after taking the instance lock (no other daemon can be querying in the folder) and before any
     //   scheduler or query starts. Moved before the lock or after [`build_usage_service`], it could delete a live query's folder.
     engram_dashboard_agent::usage::sweep_stale_scratch(&scratch_root);
-    build_daemon_wiring_with_store(
+    // The launch folders left by an earlier daemon go on the same timing: after the instance lock, and before the
+    //   library service is plugged in below (boot restore is off, so nothing launches before). Plugged first, a launch
+    //   could have its fresh folder removed.
+    let launch_root = layout.launch_dir();
+    engram_dashboard_asset_library::launch::sweep_launch_dir(&launch_root);
+    let start = LibraryStart {
+        config: engram_dashboard_asset_library::config::load(&state_dir),
+        default_root: layout.default_library_root(),
+        daemon_id: identity::load_or_create(&state_dir),
+        root_generation_base: root_generation_base(),
+    };
+    let wiring = build_daemon_wiring_with_store(
         profile_store,
-        preset_store,
         UsageInputs {
             probes: engram_dashboard_agent::backend::usage_probes().to_vec(),
             spawner: Arc::new(OsProbeSpawner),
             threads: Arc::new(OsProbeThreads),
             scratch_root,
         },
+        Some(LaunchInputs {
+            launch_root,
+            builtin_dir: data_dir::find_builtin_dir(),
+            start,
+        }),
         control,
         flush_tx,
         idle_coalescer,
+    );
+    // After the service is built and before `run()` sets the command table, so no command meets a first start
+    //   halfway; production only — the test server builds no service. The step logs its own failure or unsaved root.
+    //   Then the boot scan starts on every start, whatever the first start answered, and is never waited for: the
+    //   daemon does not walk the library before it is reachable (catalog readers wait for the walk at the entrance).
+    // ADR-0375
+    // ADR-0381
+    // ADR-0382
+    if let Some(library) = &wiring.library {
+        let outcome = library.first_start();
+        tracing::debug!(?outcome, "library first start");
+        library.start_boot_scan();
+    }
+    wiring
+}
+
+/// What the launch kits take from outside the assembly — production passes it ([`build_daemon_wiring`]); the test
+/// server passes none and keeps the Noop kits.
+struct LaunchInputs {
+    /// The volatile launch folder (`DataLayout::launch_dir`).
+    launch_root: PathBuf,
+    /// The built-in assets folder (`data_dir::find_builtin_dir`); `None` = none could be found.
+    builtin_dir: Option<PathBuf>,
+    start: LibraryStart,
+}
+
+/// The mount setting, the default place, the identity and the root generation base a library service starts with
+/// ([`LibraryValues::config`] · [`LibraryValues::default_root`] · [`LibraryValues::daemon_id`] ·
+/// [`LibraryValues::root_generation_base`]).
+pub struct LibraryStart {
+    /// `asset_library::config::load` over the daemon state folder — read before the service is built.
+    pub config: LibraryConfig,
+    /// `DataLayout::default_library_root`.
+    pub default_root: PathBuf,
+    /// `identity::load_or_create`.
+    pub daemon_id: String,
+    /// [`root_generation_base`], drawn once per run.
+    pub root_generation_base: u64,
+}
+
+/// The home folder and environment a library service reads the native skill roots through
+/// ([`LibraryValues::home`] · [`LibraryValues::env`]).
+pub struct LibraryHost {
+    pub home: Option<PathBuf>,
+    pub env: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
+
+impl LibraryHost {
+    /// The daemon process's own home folder and environment — what production launches read.
+    pub fn process() -> Self {
+        LibraryHost {
+            home: engram_dashboard_platform::env::home_dir(),
+            env: Arc::new(|name| std::env::var(name).ok()),
+        }
+    }
+}
+
+/// The library service the daemon launches through, over the production folder waits. `builtin_dir` = the built-in
+/// assets folder (`None` = there is none), `launch_root` = the volatile launch folder, `start` = the root setting read
+/// from `library.json` and the daemon identity. Building it does no disk work beyond the built-ins; the first-start
+/// step is the caller's ([`build_daemon_wiring`]). The one builder for production wiring and the harness bin
+/// `roundtrip-smoke`, so the two cannot drift.
+// ADR-0311
+// ADR-0360
+// ADR-0368
+// ADR-0370
+// ADR-0375
+pub fn build_library_service(
+    registry: Arc<ProfileRegistry>,
+    builtin_dir: Option<PathBuf>,
+    launch_root: PathBuf,
+    host: LibraryHost,
+    start: LibraryStart,
+) -> LibraryService {
+    LibraryService::new(
+        LibraryValues {
+            registry,
+            backends: Arc::new(AgentBackends),
+            config: start.config,
+            default_root: start.default_root,
+            daemon_id: start.daemon_id,
+            root_generation_base: start.root_generation_base,
+            builtin_dir,
+            launch_root,
+            home: host.home,
+            env: host.env,
+        },
+        Arc::new(FsStore),
+        BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StdFolderOps),
+            Arc::new(ThreadSpawn),
+        ),
     )
 }
 
@@ -209,8 +362,8 @@ struct UsageInputs {
 /// The store-injecting form of build_daemon_wiring — tests slot in an in-memory store to isolate from disk/Embedded.
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
-    preset_store: Arc<dyn PresetStore>,
     usage_inputs: UsageInputs,
+    launch_inputs: Option<LaunchInputs>,
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
@@ -227,7 +380,6 @@ fn build_daemon_wiring_with_store(
         idle_coalescer,
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
 
     let profiles_cb = profiles.clone();
     let tracker = Arc::new(SessionTracker::new(
@@ -239,17 +391,36 @@ fn build_daemon_wiring_with_store(
     ));
     tracker.start();
 
-    let manager = Arc::new(AgentManager::new_with_control(
-        status_sink,
-        profiles,
-        presets,
-        tracker,
-        control,
-    ));
+    let manager = AgentManager::new_with_control(status_sink, profiles.clone(), tracker, control);
+    let (manager, library) = match launch_inputs {
+        Some(inputs) => {
+            let library = Arc::new(build_library_service(
+                profiles,
+                inputs.builtin_dir,
+                inputs.launch_root,
+                LibraryHost::process(),
+                inputs.start,
+            ));
+            let manager = manager.with_launch_ports(LaunchPorts {
+                kits: library.clone(),
+                fs: Arc::new(StdLaunchFs),
+            });
+            (manager, Some(library))
+        }
+        None => (manager, None),
+    };
+    let manager = Arc::new(manager);
+    // ADR-0380: the manager goes into the service as its profile-edit port right here, before any command table can
+    //   reach the service; weak, as the manager already holds the service as its launch-kit source.
+    if let Some(library) = &library {
+        let port: Weak<AgentManager> = Arc::downgrade(&manager);
+        library.plug_profile_edit(port);
+    }
     DaemonWiring {
         manager,
         registry,
         usage,
+        library,
     }
 }
 
@@ -324,6 +495,7 @@ async fn run_accept_loop(
         manager,
         registry,
         usage,
+        library: _,
     } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn crate::conn_port::ConnectionHandlerFactory> =
@@ -374,8 +546,10 @@ async fn run_accept_loop(
     server.run(listening, stop).await;
 
     // ── command round trip cleanup (ADR-0154) ───────────────────────────────────────────────────
-    // Waiting for the reaper makes shutdown bounded: on its way out that task answers every remaining seat (`CommandDeliveries::drain`), releasing
-    //   the delivery tasks' waits at once; otherwise they stay until the deadline (`CommandDeliveries::DEFAULT_DEADLINE`).
+    // ★Waiting for the sweeper is what bounds the shutdown★: on its way out it answers every remaining seat
+    //   (`CommandDeliveries::drain`) and those answers free the delivery tasks **at once**. Without the wait the seats
+    //   and tasks live on after "stopped" is logged, until each seat's own deadline (7 s ordinary, up to 91 s for a
+    //   launch — ADR-0360).
     // It comes here once regardless of the exit reason — three exit branches (StopDaemon · Ctrl-C · sender gone), and Ctrl-C does not touch the daemon shutdown watch.
     sweeper.stop().await;
 }
@@ -386,7 +560,7 @@ async fn run_accept_loop(
 pub async fn run() -> Result<(), i32> {
     // 0) data_dir resolution comes before logging because the file log lives in that folder. It is pure (env lookup + path assembly), so no
     //    lines are lost; reversing it would send the startup failures of 1)~2) to stdout only, which goes nowhere in release.
-    let layout = DataLayout::new(resolve_data_dir());
+    let layout = DataLayout::resolve();
     let data_dir = layout.root().to_path_buf();
 
     // 0.1) file log → panic hook.
@@ -543,7 +717,8 @@ pub async fn run() -> Result<(), i32> {
         messaging_slot.clone(),
         command_table_slot.clone(),
         command_bus.clone(),
-        // ADR-0285: the help body source is the same anchor (install location) as the priming below; built here so the server does not build it inside (tests put in a known body).
+        // ADR-0285: the help body source is anchored at the install location — it is built here so the server does not
+        //   build it inside (a test passes a known body).
         control::help::HelpSource::from_install_root(),
     )
     .await
@@ -551,14 +726,11 @@ pub async fn run() -> Result<(), i32> {
         Ok(handle) => {
             let url = handle.url.clone();
             let send_exe = locate_send_exe();
-            let priming: Arc<dyn control::priming::PrimingProvider> =
-                Arc::new(control::priming::FilePrimingProvider::from_install_root());
             let channel = Arc::new(control::DaemonControlChannel::new(
                 control_registry.clone(),
                 url,
                 mcp_dir,
                 send_exe,
-                priming,
             ));
             (channel, Some(handle))
         }
@@ -592,6 +764,7 @@ pub async fn run() -> Result<(), i32> {
         roster_broadcast_slot.clone(),
         Arc::new(multiview.clone()),
         wiring.usage.clone(),
+        wiring.library_commands(),
     )));
 
     // 6.4) idle gate assembly — turn observation is loaded directly by the core from the output pump, so nothing to wire here.
@@ -812,8 +985,6 @@ async fn start_test_server_inner(
     //   control channel (Noop below), so a new standalone registry serves only the accept loop — the same Arc, so the value dispatch wrote
     //   is observable for that server's lifetime (production shares control_registry).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
-    // No test verifies preset persist — add a store-injecting form if needed (the preset unit is verified in isolation in agent).
-    let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
     // WS tests do not use the control channel → Noop (control channel integration tests are on the control::mcp_server side).
     let control: Arc<dyn engram_dashboard_agent::types::ControlChannel> =
         Arc::new(engram_dashboard_agent::types::NoopControlChannel);
@@ -825,13 +996,14 @@ async fn start_test_server_inner(
     //   tests of the usage wire are in `agent_conn` with a service carrying fake probers.
     let wiring = build_daemon_wiring_with_store(
         store,
-        preset_store,
         UsageInputs {
             probes: Vec::new(),
             spawner: Arc::new(OsProbeSpawner),
             threads: Arc::new(OsProbeThreads),
             scratch_root: std::env::temp_dir(),
         },
+        // ADR-0311: real kits stay out of the WS tests — tests that need them build `LibraryService` themselves.
+        None,
         control,
         flush_tx.clone(),
         idle_coalescer.clone(),
@@ -849,6 +1021,7 @@ async fn start_test_server_inner(
         roster_broadcast_slot,
         Arc::new(multiview.clone()),
         wiring.usage.clone(),
+        wiring.library_commands(),
     )));
     // This server does not wire the MCP control plane (Noop above), so the accept loop is the only consumer of the bus; the assembly uses the same function as production.
     let (command_bus, command_sweeper) = command_delivery::CommandBus::new(
@@ -936,30 +1109,6 @@ impl ProfileStore for MemProfileStore {
     }
 }
 
-/// The preset version of `MemProfileStore` — stands in for production's `FilePresetStore`.
-#[cfg(feature = "test-support")]
-#[derive(Default)]
-struct MemPresetStore {
-    saved: std::sync::Mutex<Vec<engram_dashboard_agent::preset::Preset>>,
-}
-
-#[cfg(feature = "test-support")]
-impl PresetStore for MemPresetStore {
-    fn save(
-        &self,
-        presets: &[engram_dashboard_agent::preset::Preset],
-    ) -> Result<(), engram_dashboard_agent::profile::StoreError> {
-        *self.saved.lock().expect("mem preset store poisoned") = presets.to_vec();
-        Ok(())
-    }
-    fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
-        self.saved
-            .lock()
-            .expect("mem preset store poisoned")
-            .clone()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,9 +1172,517 @@ mod tests {
     }
 
     #[test]
+    fn root_generation_bases_are_random_below_2_pow_52() {
+        let bases: Vec<u64> = (0..4).map(|_| root_generation_base()).collect();
+        assert!(bases.iter().all(|&base| base < 1 << 52), "{bases:?}");
+        assert!(bases.windows(2).any(|pair| pair[0] != pair[1]), "{bases:?}");
+    }
+
+    #[test]
     fn tokens_are_unique() {
         let a = generate_token().unwrap();
         let b = generate_token().unwrap();
         assert_ne!(a, b);
+    }
+
+    /// The production text of `lib.rs` up to its test module.
+    fn production_source() -> &'static str {
+        include_str!("lib.rs")
+            .split("mod tests {")
+            .next()
+            .expect("production part")
+    }
+
+    /// The production text of one function — from its signature to the next top-level `fn`.
+    fn body_of(signature: &str) -> &'static str {
+        let production = production_source();
+        let start = production
+            .find(signature)
+            .unwrap_or_else(|| panic!("`{signature}` is not in the production part"));
+        let rest = &production[start + signature.len()..];
+        let end = rest.find("\nfn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// ★The boot sweep runs before the library service is plugged in★ — moved after it, a launch could have its fresh
+    /// folder removed; no runtime test sees that (boot restore is off, so nothing launches at boot), only this one.
+    #[test]
+    fn the_boot_sweeps_before_the_plug() {
+        let boot = body_of("fn build_daemon_wiring(");
+        let sweep = boot
+            .find("sweep_launch_dir(&launch_root)")
+            .expect("the boot sweep of the launch folder");
+        let plug = boot
+            .find("build_daemon_wiring_with_store(")
+            .expect("the assembly that plugs the library");
+        assert!(sweep < plug, "the sweep runs after the plug");
+        assert!(
+            body_of("fn build_daemon_wiring_with_store(").contains(".with_launch_ports("),
+            "the assembly no longer plugs the launch kits"
+        );
+    }
+
+    /// ★The boot path never walks the library★ (ADR-0382): neither `build_daemon_wiring` nor the assembly it calls,
+    /// `build_daemon_wiring_with_store`, calls a catalog reader (each would run or wait for the first scan before the
+    /// daemon is reachable), and the boot scan starts right after the first start, unconditionally — not only when the
+    /// first start published. `build_daemon_wiring` hard-codes the real store, so only the source shows this; the runtime
+    /// side is the production-wiring tests below.
+    #[test]
+    fn the_boot_scan_starts_after_the_first_start_and_the_boot_path_reads_no_catalog() {
+        let boot = body_of("fn build_daemon_wiring(");
+        let assembly = body_of("fn build_daemon_wiring_with_store(");
+        for reader in [
+            ".first_scan_join(",
+            ".refresh(",
+            ".list(",
+            ".folders(",
+            ".read(",
+            ".resolve_",
+        ] {
+            assert!(!boot.contains(reader), "the boot path calls `{reader}`");
+            assert!(!assembly.contains(reader), "the assembly calls `{reader}`");
+        }
+        let first = boot.find(".first_start()").expect("the first-start step");
+        let scan = boot.find(".start_boot_scan()").expect("the boot scan");
+        assert!(first < scan, "the boot scan starts before the first start");
+        let between = &boot[first..scan];
+        for branch in ["if ", "match ", "else"] {
+            assert!(
+                !between.contains(branch),
+                "the boot scan depends on the first start's outcome: {between}"
+            );
+        }
+    }
+
+    /// ★The manager is plugged into the library as its profile-edit port before any command table is set★
+    /// (ADR-0380): the assembly plugs it right after it wraps the manager, and `run` builds the wiring before it sets
+    /// the command table. Plugged after the table, an early agent-preset command would answer
+    /// `profile-edit-unavailable`; no runtime test orders the two, only this one.
+    #[test]
+    fn the_profile_edit_port_is_plugged_before_the_command_table_is_set() {
+        let assembly = body_of("fn build_daemon_wiring_with_store(");
+        let wrapped = assembly
+            .find("Arc::new(manager)")
+            .expect("the assembly wraps the manager");
+        let plugged = assembly
+            .find(".plug_profile_edit(")
+            .expect("the assembly plugs the profile-edit port");
+        assert!(
+            wrapped < plugged,
+            "the port is plugged before the manager is wrapped"
+        );
+        let run = body_of("pub async fn run(");
+        let wiring = run
+            .find("build_daemon_wiring(")
+            .expect("`run` builds the wiring");
+        let table = run
+            .find("command_table_slot.set(")
+            .expect("`run` sets the command table");
+        assert!(
+            wiring < table,
+            "the command table is set before the wiring is built"
+        );
+    }
+
+    /// ★Both assemblies give the command table the wiring's library port★ (ADR-0386): production `run` and the test
+    /// server pass `DaemonWiring::library_commands` — the kept service, or `NoLibrary` when there is none. A table
+    /// built with another port would edit a library the launches do not read; only the source shows which port `run`
+    /// passes (the runtime side is the test below).
+    #[test]
+    fn both_assemblies_give_the_command_table_the_wirings_library_port() {
+        for signature in ["pub async fn run(", "async fn start_test_server_inner("] {
+            let body = body_of(signature);
+            let table = body
+                .find("make_daemon_table(")
+                .unwrap_or_else(|| panic!("`{signature}` builds the command table"));
+            let call = &body[table..table + body[table..].find(")));").expect("the call ends")];
+            assert!(
+                call.contains("wiring.library_commands()"),
+                "`{signature}` passes another library port: {call}"
+            );
+        }
+    }
+
+    /// ★The library port of the production wiring is the kept service★: a mount added through the port is a mount the
+    /// service the manager launches through reports. Only mounts are judged for overlap, so a folder inside the data
+    /// folder is a mount like any other (ADR-0400 decision 10).
+    #[test]
+    fn the_production_library_port_is_the_kept_service() {
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let wiring = production_wiring(&layout);
+        let library = wiring
+            .library
+            .clone()
+            .expect("production plugs the library");
+        wait_boot_scan(&library);
+        let team = std::env::temp_dir().join(format!("engram-team-{}", uuid::Uuid::new_v4()));
+        let port = wiring.library_commands();
+
+        let answer = port
+            .add_mount("team", &team.display().to_string(), true)
+            .expect("add a mount through the port");
+        let inside = temp.join("inside");
+        port.add_mount("inside", &inside.display().to_string(), true)
+            .expect("a folder inside the data folder is a mount like any other");
+
+        let kept = library.status();
+        drop(wiring);
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&team);
+        let named: Vec<(&str, &std::path::Path)> = kept
+            .mounts
+            .iter()
+            .map(|mount| (mount.name.as_str(), mount.folder.as_path()))
+            .collect();
+        assert!(named.contains(&("team", team.as_path())), "{named:?}");
+        assert!(named.iter().any(|(name, _)| *name == "inside"), "{named:?}");
+        assert_eq!(answer.root_generation + 1, kept.root_generation);
+    }
+
+    /// The debug launch-block hook is gone with the real kits (its env vars included).
+    #[test]
+    fn the_debug_launch_block_hook_is_gone() {
+        let production = production_source();
+        for symbol in ["qa_block", "QaBlockKits", "ENGRAM_QA_BLOCK"] {
+            assert!(!production.contains(symbol), "{symbol}");
+        }
+    }
+
+    /// ★The production assembly plugs the real kits★ (WS tests run the Noop kits, so nothing else sees this): built
+    /// over a temp data folder, it sweeps what an earlier daemon left in the launch folder, and the plugged service
+    /// launches a plain claude agent with the built-in default preset (`engram/default`) from the repo `builtin\` — a real plan whose merged instructions file,
+    /// in this launch's volatile folder, is the shipped priming. No process is spawned.
+    #[test]
+    fn the_production_wiring_plugs_the_library_with_the_builtin_priming() {
+        use engram_dashboard_agent::launch::LaunchKitSource;
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, AgentProfile};
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let leftover = layout.launch_dir().join("stale-0");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("instructions.md"), "old").unwrap();
+        let work = temp.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let wiring = production_wiring(&layout);
+        let leftover_gone = !leftover.exists();
+        let library = wiring
+            .library
+            .clone()
+            .expect("production plugs the library");
+        wait_boot_scan(&library);
+
+        let profile = AgentProfile::new(
+            "wired".into(),
+            AgentCommand::Claude {
+                extra_args: Vec::new(),
+                output_format: AgentOutputFormat::StreamJson,
+            },
+            work.clone(),
+            Vec::new(),
+            false,
+        );
+        let scope = library.begin_launch();
+        let plan = library
+            .check_in(&scope, &profile)
+            .expect("the built-in default preset passes");
+        let kit = library
+            .prepare_in(&scope, plan, profile.id, 1)
+            .expect("prepared");
+        let written = kit
+            .instructions_file
+            .as_deref()
+            .map(std::fs::read_to_string)
+            .transpose()
+            .unwrap();
+        let volatile = kit.volatile_dir.clone();
+        library.release(profile.id, 1);
+        wiring.manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(leftover_gone, "the boot sweep did not run");
+        assert!(kit.plan.real && kit.plan.include_priming, "{:?}", kit.plan);
+        assert_eq!(
+            volatile,
+            Some(layout.launch_dir().join(format!("{}-1", profile.id)))
+        );
+        let priming = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../builtin/instructions/priming.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            Some(engram_dashboard_asset_library::launch::merge_instructions(
+                Some(&priming),
+                &[]
+            ))
+        );
+        assert!(kit.instructions_hash.is_some());
+    }
+
+    /// ★The production assembly reads the mount setting and the identity from the state folder and runs the first
+    /// start★: over a fresh data folder the default place `<data>\default_library` is created, `library.json` holds the
+    /// mount `default_library` at `default`, the kept service publishes it, and its status carries the id
+    /// `identity.json` holds. A second assembly over the same folder keeps both, and starts at another root generation
+    /// base: after the same number of mount changes, the first run's generation is stale.
+    #[test]
+    fn the_production_wiring_runs_the_first_start_over_the_state_folder() {
+        use engram_dashboard_asset_library::{MountRow, MountState};
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let state = layout.daemon_state_dir();
+        let extra = std::env::temp_dir().join(format!("engram-extra-{}", uuid::Uuid::new_v4()));
+        // `kept` = a generation from an earlier run, tried after one mount change of this run (the first run's
+        //   first start made one).
+        let status_of = |layout: &DataLayout, kept: Option<u64>| {
+            let wiring = production_wiring(layout);
+            let library = wiring
+                .library
+                .as_ref()
+                .expect("production plugs the library");
+            // The first run's boot scan follows its first start; the second run's is a normal start's.
+            wait_boot_scan(library);
+            let kept_accepted = kept.map(|kept| {
+                library
+                    .add_mount("extra", &extra, true)
+                    .expect("add a mount");
+                library
+                    .change_at(Some(kept), |_, _, _| ((), Vec::new()))
+                    .is_ok()
+            });
+            let status = library.status();
+            wiring.manager.shutdown_all();
+            (status, kept_accepted)
+        };
+        let (first, _) = status_of(&layout, None);
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.join("library.json")).unwrap())
+                .unwrap();
+        let identity: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.join("identity.json")).unwrap())
+                .unwrap();
+        let library_made = temp.join("default_library").is_dir();
+        let (second, kept_accepted) = status_of(&layout, Some(first.root_generation));
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&extra);
+
+        assert!(library_made);
+        assert_eq!(
+            config,
+            serde_json::json!({ "schema_version": 2, "mounts": [{ "name": "default_library", "path": "default" }] })
+        );
+        assert_eq!(layout.default_library_root(), temp.join("default_library"));
+        assert_eq!(
+            first.mounts.first(),
+            Some(&MountRow {
+                name: "default_library".to_owned(),
+                folder: temp.join("default_library"),
+                default: true,
+                builtin: false,
+                state: MountState::Ok,
+            })
+        );
+        assert_eq!(
+            first
+                .mounts
+                .last()
+                .map(|row| (row.name.as_str(), row.builtin)),
+            Some(("engram", true))
+        );
+        assert_eq!(
+            identity["daemon_id"].as_str(),
+            Some(first.daemon_id.as_str())
+        );
+        assert_ne!(second.root_generation, first.root_generation);
+        assert_eq!(
+            kept_accepted,
+            Some(false),
+            "a generation kept from the earlier run is stale"
+        );
+        assert_eq!(
+            (second.mounts.first(), second.daemon_id),
+            (first.mounts.first(), first.daemon_id),
+            "the next start reads both back"
+        );
+    }
+
+    /// ★The production library writes agent attachments through the very manager the wiring keeps★ (ADR-0380): with
+    /// the cell empty the body would refuse `profile-edit-unavailable`, and a port over another registry would leave the
+    /// wiring's roster unmoved. A Default-slot detach needs no library root.
+    #[test]
+    fn the_production_wiring_plugs_the_manager_as_the_profile_edit_port() {
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, AgentProfile};
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let work = temp.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let wiring = production_wiring(&layout);
+        let library = wiring
+            .library
+            .as_ref()
+            .expect("production plugs the library");
+        wait_boot_scan(library);
+        let created = wiring
+            .manager
+            .try_create_agent(AgentProfile::new(
+                "port".into(),
+                AgentCommand::Claude {
+                    extra_args: Vec::new(),
+                    output_format: AgentOutputFormat::StreamJson,
+                },
+                work,
+                Vec::new(),
+                false,
+            ))
+            .expect("create the agent");
+        let before = wiring
+            .manager
+            .agent_snapshot(created.id)
+            .map(|p| p.default_preset);
+        let detached =
+            library.detach_preset(created.id, &["engram/default".to_owned()], true, None);
+        let after = wiring
+            .manager
+            .agent_snapshot(created.id)
+            .map(|p| p.default_preset);
+        wiring.manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        let view = detached.expect("the detach goes through the plugged port");
+        assert!(!view.default_preset);
+        assert_eq!((before, after), (Some(true), Some(false)));
+    }
+
+    /// Waits (at most 10 s, then fails) until the boot scan `build_daemon_wiring` started has applied the first scan —
+    /// nothing else scans in these tests — so no detached walk outlives the test's temp folder.
+    fn wait_boot_scan(library: &LibraryService) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while library.numbers().swap_ins == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the boot scan never applied a scan"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// The production assembly over `layout`. ★Built inside a log capture★ — a boot log callsite is then hit only inside
+    /// one ([`log_capture`] "Observation conditions" ①).
+    fn production_wiring(layout: &DataLayout) -> DaemonWiring {
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wiring, _logged) = log_capture::capture_loud(|| {
+            build_daemon_wiring(
+                layout,
+                Arc::new(engram_dashboard_agent::types::NoopControlChannel),
+                flush_tx,
+                Arc::new(messaging_host::IdleCoalescer::new()),
+            )
+        });
+        wiring
+    }
+
+    /// ★The production manager launches through the very library service the wiring keeps★ (the Noop kits, or a
+    /// second service, would pass every other non-ignored test): a claude agent with a library preset whose mount is
+    /// not registered (a corrupt `library.json` leaves the mounts unknown) is not refused by the library — the preset
+    /// is skipped (ADR-0387 · ADR-0400 decision 19) and the launch gets as far as the spawn, which fails on the working
+    /// folder; once the kept service registers the mounts `team` and then `library` (`addMount`), a preset in
+    /// `library` nesting a broken preset in `team` is refused with the library's row for that file — the
+    /// manager resolves across the two mounts of the kept service. A cwd that does not exist — no process is spawned.
+    #[test]
+    fn the_production_manager_launches_through_the_kept_library_service() {
+        use engram_dashboard_agent::launch::BlockReason;
+        use engram_dashboard_agent::manager::NoticeDelivery;
+        use engram_dashboard_agent::profile::{
+            AgentCommand, AgentOutputFormat, AgentProfile, AttachedPreset,
+        };
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let library_root = temp.join("library");
+        let team_root = std::env::temp_dir().join(format!("engram-team-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&library_root).unwrap();
+        std::fs::create_dir_all(&team_root).unwrap();
+        std::fs::create_dir_all(layout.daemon_state_dir()).unwrap();
+        std::fs::write(layout.daemon_state_dir().join("library.json"), "not json").unwrap();
+        std::fs::write(
+            library_root.join("P.yaml"),
+            "kind: preset\nversion: 1\npresets:\n  - team/bad.yaml\n",
+        )
+        .unwrap();
+        std::fs::write(team_root.join("bad.yaml"), "kind: preset\nversion: [\n").unwrap();
+        let wiring = production_wiring(&layout);
+        let profile = || {
+            let mut profile = AgentProfile::new(
+                "wired-preset".into(),
+                AgentCommand::Claude {
+                    extra_args: Vec::new(),
+                    output_format: AgentOutputFormat::StreamJson,
+                },
+                temp.join("no-such-folder"),
+                Vec::new(),
+                false,
+            );
+            profile.presets = vec![AttachedPreset {
+                path: "library/P.yaml".to_string(),
+            }];
+            profile
+        };
+
+        let without_mounts = wiring
+            .manager
+            .create_and_activate(&profile(), NoticeDelivery::Withheld)
+            .expect_err("the spawn fails on the working folder");
+        let added = wiring.library.as_ref().map(|l| {
+            l.add_mount("team", &team_root, false)
+                .and_then(|_| l.add_mount("library", &library_root, false))
+                .map(|added| added.status.mounts.len())
+        });
+        let refused = wiring
+            .manager
+            .create_and_activate(&profile(), NoticeDelivery::Withheld)
+            .expect_err("the launch is refused");
+        let listed = wiring.manager.list_agents().len();
+        wiring.manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp);
+        let _ = std::fs::remove_dir_all(&team_root);
+
+        // The spawn is the first step that needs the working folder (Windows answers `ERROR_DIRECTORY`, os error 267).
+        assert!(
+            matches!(
+                without_mounts.error,
+                engram_dashboard_agent::types::PtyError::SpawnFailed(_)
+            ),
+            "a preset in no known mount does not block (its items are skipped); the spawn fails on the missing working folder: {:?}",
+            without_mounts.error
+        );
+        assert_eq!(listed, 0, "no process was spawned");
+        assert!(
+            matches!(added, Some(Ok(3))),
+            "the kept service did not take both mounts (two plus the built-in): {added:?}"
+        );
+        assert!(!refused.created, "the refused launch was added");
+        let with_mounts = match refused.error {
+            engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => blocked.reasons,
+            other => panic!("not the library's block: {other:?}"),
+        };
+        assert!(
+            with_mounts.iter().any(|reason| matches!(
+                reason,
+                BlockReason::Broken { item, reason, .. }
+                    if item == "team/bad.yaml" && reason.code == "yaml-syntax"
+            )),
+            "{with_mounts:?}"
+        );
+        assert!(
+            !with_mounts
+                .iter()
+                .any(|reason| matches!(reason, BlockReason::LibraryUnavailable { .. })),
+            "the manager does not see the kept service's mounts: {with_mounts:?}"
+        );
     }
 }

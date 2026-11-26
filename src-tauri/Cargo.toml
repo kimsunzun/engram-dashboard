@@ -54,8 +54,9 @@ snap-overlay = ["engram-dashboard-platform/snap-overlay"]
 # icon from .ico into RGBA to make the color/gray pair — no separate image crate needed).
 tauri = { version = "2", features = ["tray-icon", "image-ico"] }
 tauri-plugin-opener = "2"
-# Adding a preset path = native folder picker dialog (an OS window outside the webview). The frontend PresetPalette right-click "Add"
-#   calls it via open({directory:true}) of @tauri-apps/plugin-dialog. Only dialog:allow-open is granted (default.json).
+# Native folder picker dialog (an OS window outside the webview) — the frontend's agent creation calls it via
+#   open({directory:true}) of @tauri-apps/plugin-dialog. Only dialog:allow-open is granted (default.json · popup.json). The command-refusal box also uses
+#   this plugin's Rust API (the registration line in `src/lib.rs`).
 tauri-plugin-dialog = "2"
 # single-instance: ADR-0029 (daemon-only) — the app is a global single instance as the daemon client (plugin always registered).
 tauri-plugin-single-instance = "2"

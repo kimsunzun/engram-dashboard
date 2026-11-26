@@ -91,7 +91,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 
 | 모듈 | 명령 |
 |---|---|
-| base · command · protocol · messaging | `cargo test -p engram-dashboard-<이름>` |
+| base · command · protocol · messaging · asset-library | `cargo test -p engram-dashboard-<이름>` |
 | platform · agent · daemon | `cargo test -p engram-dashboard-<이름> -- --test-threads=4` |
 | cli | `cargo test -p engram-dashboard-cli --bins --test engram_cli -- --test-threads=4` |
 | transport | `cargo test -p engram-dashboard-transport` · 그 줄에 `--all-features` · `cargo check -p engram-dashboard-transport --features ws` — 셋 다 |
@@ -121,14 +121,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 
 | 레인 | 경로 |
 |---|---|
-| claude | `crates/engram-dashboard-agent/src/backend/claude/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-daemon/src/control/**` · `crates/engram-dashboard-messaging/src/**` · `crates/engram-dashboard-daemon/tests/control_send.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` |
-| codex | `crates/engram-dashboard-agent/src/backend/codex/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-agent/tests/backend_contract.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` |
+| claude | `crates/engram-dashboard-agent/src/backend/claude/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-daemon/src/control/**` · `crates/engram-dashboard-messaging/src/**` · `crates/engram-dashboard-daemon/tests/control_send.rs` · `crates/engram-dashboard-daemon/tests/launch_kits_live.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-platform/src/shell.rs` · `crates/engram-dashboard-asset-library/src/**` · `builtin/**` · `crates/engram-dashboard-daemon/src/lib.rs` |
+| codex | `crates/engram-dashboard-agent/src/backend/codex/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-agent/tests/backend_contract.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-agent/tests/codex_launch_live.rs` · `crates/engram-dashboard-daemon/tests/launch_kits_live.rs` · `crates/engram-dashboard-platform/src/shell.rs` · `crates/engram-dashboard-asset-library/src/**` · `builtin/**` · `crates/engram-dashboard-daemon/src/lib.rs` |
 
 claude 레인 — 첫 줄의 이름 = CI `--skip` 목록에서 `#[ignore]` 가 아닌 것(목록이 바뀌면 여기도 고친다):
 
 ```bash
 cargo test -p engram-dashboard-daemon --test control_send -- --test-threads=4 --exact c2_live_mid_turn_send_parks_and_delivers_after_turn_end control_send_delivery_observation_records_bytes_and_correlated_ids control_send_relays_wrapped_line_to_json_agent control_send_revoked_sender_still_delivers_observation mcp_send_message_tool_happy_and_error
 cargo test -p engram-dashboard-agent --test usage_probe_smoke -- --ignored --test-threads=1 claude_
+cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --test-threads=1 --nocapture claude_
 ```
 
 codex 레인:
@@ -136,7 +137,11 @@ codex 레인:
 ```bash
 cargo test -p engram-dashboard-agent --test usage_probe_smoke -- --ignored --test-threads=1 codex_
 cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test-threads=4
+cargo test -p engram-dashboard-agent --test codex_launch_live -- --ignored --test-threads=1 --nocapture
+cargo test -p engram-dashboard-daemon --test launch_kits_live -- --ignored --test-threads=1 --nocapture codex_
 ```
+
+- `codex_launch_live` 와 `launch_kits_live` 의 `codex_` 는 사용자의 실제 `~/.codex` 에 대화를 하나씩 남긴다 — 출력에 찍힌 그 id 를 보고에 싣는다. `launch_kits_live` 의 `claude_` 는 턴마다 사용자의 실제 `~/.claude/projects/` 아래 세션 기록을 남긴다 — 남겼다고 보고에 싣는다. 둘 다 지우지 않는다(지우는 것은 사용자 몫).
 
 ### 비용 없는 `#[ignore]` 레인
 

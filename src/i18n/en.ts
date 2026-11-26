@@ -1,7 +1,7 @@
 // ADR-0372: the source UI string table — namespaced `key → English text`. Its type is the key and placeholder contract
 //   (`StringKey`, `Placeholders` in `index.ts`); `ko.ts` must have exactly these keys and, per key, the same placeholder set.
 //
-// Namespace = UI domain, one level deep (tab/slot/agent/preset/common …).
+// Namespace = UI domain, one level deep (tab/slot/agent/common …).
 // Labels use sentence-style capitalization ("Close tab"). Placeholder grammar: `WORD_PLACEHOLDER` in `index.ts`.
 // Punctuation: complete sentences (messages, tooltips, notices, body text) end with a period; labels, buttons, menu items, titles, fragments, values ending in outside text (`{err}`, `{url}`) and values embedded into other values (`{status}`, `{sentence}`) do not.
 // `slot.foreignContent` must equal the shell's `Foreign` tab-name word. The shell test `foreign_word_is_the_one_the_frontend_shows`
@@ -35,7 +35,6 @@ export const en = {
     close: 'Close',
     resolveSpatial: 'Resolve spatial target',
     fillAgentList: 'Open agent tree',
-    fillPresetPalette: 'Open preset palette',
     fillUsage: 'Open usage limits',
     newContent: 'New content', // ADR-0065 "New content ▶" submenu container label.
     renderModeSet: 'Set render mode',
@@ -96,7 +95,7 @@ export const en = {
     treeLabel: 'Agent tree',
     emptyList: 'No agents — right-click to create one.',
     rowActivate: 'Activate (spawn)', // Reserved row.
-    rowCancelReserved: 'Delete', // Reserved row — same word as preset.deleteBtn.
+    rowCancelReserved: 'Delete', // Reserved row.
     rowOpen: 'Open', // Running row.
     rowKill: 'Stop', // Running row.
     rowRename: 'Rename', // Running/reserved row (ADR-0061).
@@ -131,16 +130,6 @@ export const en = {
     rename: 'Rename agent', // LLM control — RenameProfile.
     cancelQueuedInput: 'Remove queued input from the list', // ADR-0231 — the same command as the list ✕.
     interrupt: 'Interrupt response',
-  },
-  preset: {
-    create: 'Create preset',
-    list: 'List presets',
-    delete: 'Delete preset', // Value reused by the PresetPalette row delete aria-label.
-    add: 'Add',
-    rename: 'Rename', // Value reused by the PresetPalette row right-click menu.
-    label: 'Presets',
-    empty: 'No presets — right-click and choose "Add" to pick a folder.',
-    deleteBtn: 'Delete',
   },
   /**
    * Usage-limit slot. The daemon and the wire carry only status codes and numbers; the text is
@@ -319,7 +308,6 @@ export const en = {
   /** Native OS dialog titles — user-visible text outside the webview. */
   dialog: {
     pickAgentCwd: 'Select agent working directory',
-    pickPresetPath: 'Select preset path',
   },
   common: {
     emptySlot: '- Empty -',

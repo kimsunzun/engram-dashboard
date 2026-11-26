@@ -3,7 +3,7 @@
 /**
  * Slot occupant = typed union (ADR-0060).
  *
- * Later content kinds (FileTree/ControlPanel) are added as variants, and user customization (a preset button set) is expressed not as a new
+ * Later content kinds (FileTree/ControlPanel) are added as variants, and user customization is expressed not as a new
  * variant but as config data inside a variant (prevents enum explosion — the key insight of ADR-0060).
  *
  * ★Invariant (ADR-0060)★: the `Agent` variant holds **only the binding (the agent_id reference string)** of a daemon agent —
@@ -11,4 +11,4 @@
  * The epoch (incarnation marker, ADR-0163) is also outside the layout tree (owned by agentStore) — the trigger for re-subscription is not this field but
  * observation of the authoritative roster (ADR-0164 decision 8).
  */
-export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "preset_palette" } | { "type": "usage", show_claude: boolean, show_codex: boolean, };
+export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "usage", show_claude: boolean, show_codex: boolean, };

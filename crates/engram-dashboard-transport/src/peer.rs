@@ -173,6 +173,8 @@ enum PeerOp<W: Wire> {
     Request {
         out: W::Out,
         reply: oneshot::Sender<Result<W::In, RequestError>>,
+        /// `None` = [`Policy::request_timeout`] ([`Peer::request_in`]).
+        reply_deadline: Option<Duration>,
     },
     Notify {
         out: W::Out,
@@ -300,7 +302,7 @@ impl<W: Wire> Peer<W> {
     /// ★Not an `async fn` — do not revive it★: the generation must be read at the call; an `async fn` body runs on first poll and would read a newer generation.
     pub fn request(&self, out: W::Out) -> impl Future<Output = Result<W::In, RequestError>> + '_ {
         let generation = self.generation();
-        self.request_in(generation, out)
+        self.request_in(generation, out, None)
     }
 
     /// Waits for the reply — ★goes out only on the `generation` connection★ (TRD 3 §3-0 ③). If that connection is not operating (dropped · re-attached)
@@ -310,10 +312,17 @@ impl<W: Wire> Peer<W> {
     ///
     /// ★The first poll queues the request (or ends the call) before the first wait★ — a consumer may poll once to place it ahead of what it queues next and await the
     /// reply elsewhere (the shell driver's registration); keep every check and the push before the reply wait.
+    ///
+    /// `reply_deadline` = how long this request waits for its reply once it is written; `None` = [`Policy::request_timeout`].
+    /// The clock starts when the supervisor places it in the pending table (just before the write), and an expiry
+    /// reports this request's own value ([`RequestError::TimedOut`] · [`TransportEvent::RequestTimedOut`]). There is no
+    /// wait for the connection here — an unbound call fails at once (above).
+    // ADR-0369
     pub async fn request_in(
         &self,
         generation: Generation,
         out: W::Out,
+        reply_deadline: Option<Duration>,
     ) -> Result<W::In, RequestError> {
         if self.flushing() {
             return Err(RequestError::Disconnected {
@@ -328,7 +337,11 @@ impl<W: Wire> Peer<W> {
         let (tx, rx) = oneshot::channel();
         let cmd = PeerCmd {
             generation,
-            op: PeerOp::Request { out, reply: tx },
+            op: PeerOp::Request {
+                out,
+                reply: tx,
+                reply_deadline,
+            },
         };
         match self.inner.data_tx.try_send(cmd) {
             Ok(()) => {}
@@ -843,6 +856,12 @@ impl<W: Wire> Drop for RosterExit<W> {
     }
 }
 
+/// One request in the pending table — what wakes it and how long it was given, which its expiry reports.
+struct Waiting<In> {
+    reply: oneshot::Sender<Result<In, RequestError>>,
+    after: Duration,
+}
+
 struct Supervisor<W: Wire> {
     id: PeerId,
     mode: Mode,
@@ -851,7 +870,7 @@ struct Supervisor<W: Wire> {
     handshake: Arc<dyn Handshake>,
     policy: Policy,
     machine: Machine,
-    pending: Pending<W::Tag, oneshot::Sender<Result<W::In, RequestError>>>,
+    pending: Pending<W::Tag, Waiting<W::In>>,
     /// A held piece is also held carrying its own byte share (counted as the window share) and the generation of the connection that carried it.
     streams: Streams<W::StreamKey, Received<W::In>>,
     inbound: mpsc::Sender<Charged<Incoming<W>>>,
@@ -1526,9 +1545,9 @@ impl<W: Wire> Supervisor<W> {
         if !self.paused && now.saturating_duration_since(self.last_rx) >= self.policy.idle_timeout {
             return Some(Input::LinkLost(DisconnectCause::Idle));
         }
-        let after = self.policy.request_timeout;
         for (tag, slot) in self.pending.expire(now) {
-            let _ = slot.send(Err(RequestError::TimedOut { after }));
+            let after = slot.after;
+            let _ = slot.reply.send(Err(RequestError::TimedOut { after }));
             self.emit(TransportEvent::RequestTimedOut {
                 peer: self.id.clone(),
                 tag,
@@ -1571,23 +1590,28 @@ impl<W: Wire> Supervisor<W> {
             }
             PeerOp::Close { .. } => Some(Input::Close),
             PeerOp::DropLink { cause } => Some(Input::LinkLost(cause)),
-            PeerOp::Request { out, reply } => {
+            PeerOp::Request {
+                out,
+                reply,
+                reply_deadline,
+            } => {
                 let Some(tag) = self.wire.request_tag(&out) else {
                     let _ = reply.send(Err(RequestError::NotARequest));
                     return None;
                 };
-                let deadline = self.clock.now() + self.policy.request_timeout;
-                match self.pending.insert(tag, reply, deadline) {
-                    Insert::Retired(reply) => {
-                        let _ = reply.send(Err(RequestError::TagRetired));
+                let after = reply_deadline.unwrap_or(self.policy.request_timeout);
+                let deadline = self.clock.now() + after;
+                match self.pending.insert(tag, Waiting { reply, after }, deadline) {
+                    Insert::Retired(slot) => {
+                        let _ = slot.reply.send(Err(RequestError::TagRetired));
                         return None;
                     }
                     Insert::Collided {
                         displaced,
                         rejected,
                     } => {
-                        let _ = displaced.send(Err(RequestError::Superseded));
-                        let _ = rejected.send(Err(RequestError::TagRetired));
+                        let _ = displaced.reply.send(Err(RequestError::Superseded));
+                        let _ = rejected.reply.send(Err(RequestError::TagRetired));
                         return None;
                     }
                     Insert::Placed => {}
@@ -1642,7 +1666,7 @@ impl<W: Wire> Supervisor<W> {
         }
         if let Some(tag) = reply {
             if let Some(slot) = self.pending.take(&tag) {
-                let _ = slot.send(Ok(msg));
+                let _ = slot.reply.send(Ok(msg));
                 return None;
             }
             // A late reply to a retired number is dropped silently by design (ADR-0181 decision 4); any other number was never requested — report.
@@ -1958,7 +1982,7 @@ impl<W: Wire> Supervisor<W> {
         let generation = self.machine.generation();
         // ★The pending table is sent★ — entries were written just before (`on_cmd`) and passed the generation comparison.
         for (_, slot) in self.pending.drain() {
-            let _ = slot.send(Err(RequestError::Disconnected {
+            let _ = slot.reply.send(Err(RequestError::Disconnected {
                 generation,
                 cause,
                 sent: true,
@@ -2883,6 +2907,58 @@ mod tests {
         );
     }
 
+    /// ADR-0369: a request that carries its own reply deadline outlives the policy's, one without it keeps the policy's,
+    /// and each expiry (error and event) reports the duration that request waited.
+    #[tokio::test]
+    async fn a_per_request_deadline_outlives_the_policy_and_its_expiry_reports_its_own_duration() {
+        let (mut h, _endpoint) = live().await;
+        let policy = Policy::default().request_timeout;
+        let own = Duration::from_secs(20);
+        assert!(own > policy);
+        let g = h.peer.generation();
+        let peer = h.peer.clone();
+        let long = tokio::spawn(async move {
+            peer.request_in(
+                g,
+                TestOut::Request {
+                    tag: 1,
+                    body: "long".into(),
+                },
+                Some(own),
+            )
+            .await
+        });
+        let short = spawn_request(&h.peer, 2);
+        settle().await;
+        h.drain();
+
+        h.clock.advance(policy);
+        settle().await;
+        assert_eq!(
+            joined(short).await,
+            Err(RequestError::TimedOut { after: policy }),
+            "no deadline of its own = the policy's"
+        );
+        assert!(!long.is_finished(), "its own deadline has not passed");
+
+        h.clock.advance(own - policy);
+        settle().await;
+        assert_eq!(
+            joined(long).await,
+            Err(RequestError::TimedOut { after: own })
+        );
+        let reported: Vec<(u64, Duration)> = h
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                TransportEvent::RequestTimedOut { tag, after, .. } => Some((tag, after)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reported, vec![(2, policy), (1, own)]);
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+    }
+
     #[tokio::test]
     async fn a_reply_that_arrives_after_the_timeout_is_dropped_and_the_tag_is_retired() {
         let (mut h, endpoint) = live().await;
@@ -3040,6 +3116,7 @@ mod tests {
                     tag,
                     body: format!("body{tag}"),
                 },
+                None,
             )
             .await
         })
@@ -3056,6 +3133,7 @@ mod tests {
                 tag: 7,
                 body: "body7".into(),
             },
+            None,
         ));
         assert!(
             poll_immediate(asked.as_mut()).await.is_none(),
@@ -3181,6 +3259,7 @@ mod tests {
                     body: "stale".into(),
                 },
                 reply,
+                reply_deadline: None,
             }))
             .is_ok());
         assert!(data
@@ -5093,6 +5172,7 @@ mod tests {
                         body: "raced".into(),
                     },
                     reply,
+                    reply_deadline: None,
                 },
             })
             .unwrap_or_else(|_| panic!("the outbound queue must have room"));

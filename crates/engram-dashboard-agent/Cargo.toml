@@ -20,7 +20,7 @@ test-harness = []
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 # `mask_secrets` of `transport::stdio` — the old `crate::logging` moved to the leaf crate (ADR-0175 decision 1).
 #   The general helpers `path::normalize_spelling` (typed cwd) · `time::now_epoch_ms` (profile times) also come from here (ADR-0269).
-#   The data-file rules of agents.json · presets.json (`file` — read decision · atomic write · damaged copy · temp sweep) also
+#   The data-file rules of the profile file (`file` — read decision · atomic write · damaged copy · temp sweep) also
 #   come from here (ADR-0291).
 #   Lock poison recovery (`sync::lock` etc. — ADR-0275) also comes from here. The super-
 #   trait `time::Clock` of the leftover cleanup clock `LeftoverClock` and the production implementation `time::SystemClock` (ADR-0275 decision 6) also come from here.
@@ -35,7 +35,7 @@ engram-dashboard-base = { path = "../engram-dashboard-base" }
 #   the weak handle the leftover cleanup receives (`group::GroupRef` — wrapped by `transport::process_group`) · launching without a window
 #   (`spawn::hide_console_window`) · the tree root of the usage query and its kill handle · the 「missing program」 decision
 #   (`spawn::{prepare_tree_root, TreeRoot, MissingProgramCheck}`) also come from here (ADR-0275). Tests also use the default shell
-#   (`shell::default_shell`). The OS share the agents.json · presets.json store hands to base `file` (`fs::{retry_busy,
+#   (`shell::default_shell`). The OS share the profile store hands to base `file` (`fs::{retry_busy,
 #   sync_dir}`) and the liveness decision of the owner of leftover temp files (`process::pid_alive`) also come from here (ADR-0291).
 engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +50,13 @@ ts-rs = "10"   # the declaration macro puts the TS derive on argument/return str
 #   RFC 3339 parsing stands without features, and the clock and time zone database (`clock`) are not needed. It is a version already in the lock file
 #   (the daemon already links it through `rmcp`) — no new package is pulled in.
 chrono = { version = "0.4", default-features = false }
+# The codex hook trust hash (`backend/codex/hook_assembly.rs` — codex hashes each hook handler with sha256). A version
+#   already in the lock file (asset-library links it) — no new package (ADR-0420).
+sha2 = "0.10"
+# Parse-only reading of a codex settings asset's raw `-c hooks…` values (`backend/codex/hook_assembly.rs`, the codex
+#   backend only). No writer, no schema check: the line writer is Engram's own (ADR-0359, amended by ADR-0420). A
+#   version already in the lock file — no new package.
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 
 # Turns on the harness-only executor (`engram_dashboard_command::testing::block_on`) only in test builds —
 #   the feature request is only in the dev graph, so it is not unified into production binaries.

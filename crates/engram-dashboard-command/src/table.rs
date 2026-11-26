@@ -214,6 +214,7 @@ impl CommandTable {
                     .iter()
                     .map(|arg| arg.to_string())
                     .collect(),
+                deadline: e.spec.deadline,
             })
             .collect()
     }
@@ -391,6 +392,7 @@ mod tests {
         args_type: "PingArgs",
         ok_type: "PingOk",
         agent_args: &[],
+        deadline: crate::DeadlineClass::Ordinary,
     };
 
     /// A declaration holding both integer and real fields — checks here that the table fits arguments by looking at the schema.
@@ -411,6 +413,7 @@ mod tests {
         args_type: "NumbersArgs",
         ok_type: "NumbersOk",
         agent_args: &[],
+        deadline: crate::DeadlineClass::Ordinary,
     };
     /// A declaration holding both required and omittable fields — checks here that the entry screening tells the two apart.
     static ENTRANCE: CommandSpec = CommandSpec {
@@ -428,6 +431,7 @@ mod tests {
         args_type: "EntranceArgs",
         ok_type: "EntranceOk",
         agent_args: &[],
+        deadline: crate::DeadlineClass::Ordinary,
     };
     static DECLARED: &[&CommandSpec] = &[&PING, &NUMBERS, &ENTRANCE];
 
@@ -475,6 +479,7 @@ mod tests {
             args_type: "OtherPingArgs",
             ok_type: "OtherPingOk",
             agent_args: &[],
+            deadline: crate::DeadlineClass::Ordinary,
         };
         static COLLIDING: &[&CommandSpec] = &[&PING, &OTHER_PING];
 
@@ -520,6 +525,7 @@ mod tests {
             args_type: "BrokenArgs",
             ok_type: "BrokenOk",
             agent_args: &[],
+            deadline: crate::DeadlineClass::Ordinary,
         };
         static WITH_BROKEN: &[&CommandSpec] = &[&BROKEN];
 
@@ -547,6 +553,7 @@ mod tests {
             args_type: "BrokenOkArgs",
             ok_type: "BrokenOkOk",
             agent_args: &[],
+            deadline: crate::DeadlineClass::Ordinary,
         };
         static WITH_BROKEN_OK: &[&CommandSpec] = &[&BROKEN_OK];
 
@@ -623,6 +630,7 @@ mod tests {
             args_type: "MarkedArgs",
             ok_type: "MarkedOk",
             agent_args: &["target", "after"],
+            deadline: crate::DeadlineClass::Ordinary,
         };
         static MARKED_DECLARED: &[&CommandSpec] = &[&MARKED, &PING];
 
@@ -651,6 +659,51 @@ mod tests {
             .find(|d| d.name == "fixture.ping")
             .expect("unmarked command");
         assert!(plain.agent_args.is_empty());
+    }
+
+    /// ★The seat and the client's wait read one declaration★ (ADR-0369): for every registered decl, the class field the
+    /// daemon sizes the seat by equals the class its `help` states, which the CLI reads.
+    #[test]
+    fn every_decl_carries_the_class_its_help_states() {
+        static SPAWN: CommandSpec = CommandSpec {
+            name: "fixture.spawn",
+            effect: Effect::Write,
+            since: 1,
+            summary: "launch fixture",
+            args_schema: "{\"type\":\"object\",\"properties\":{}}",
+            ok_schema: "{\"type\":\"object\",\"properties\":{}}",
+            errors: &[],
+            args_type: "SpawnArgs",
+            ok_type: "SpawnOk",
+            agent_args: &[],
+            deadline: crate::DeadlineClass::Launch,
+        };
+        static WITH_LAUNCH: &[&CommandSpec] = &[&SPAWN, &PING];
+
+        let mut table = CommandTable::new(WITH_LAUNCH);
+        table.insert("fixture.spawn", handler()).expect("insert");
+        table.insert("fixture.ping", handler()).expect("insert");
+
+        let decls = table.decls();
+        assert_eq!(decls.len(), 2);
+        for decl in &decls {
+            let help: serde_json::Value = serde_json::from_str(&decl.help).expect("help is JSON");
+            assert_eq!(
+                decl.deadline,
+                crate::DeadlineClass::of_schema_entry(&help),
+                "{}",
+                decl.name
+            );
+        }
+        let class_of = |name: &str| {
+            decls
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.deadline)
+                .expect("registered")
+        };
+        assert_eq!(class_of("fixture.spawn"), crate::DeadlineClass::Launch);
+        assert_eq!(class_of("fixture.ping"), crate::DeadlineClass::Ordinary);
     }
 
     #[test]

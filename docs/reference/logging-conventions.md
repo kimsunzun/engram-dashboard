@@ -29,7 +29,9 @@ One-line reading: **data at risk/unrecoverable (error) → odd but safe fallback
 
 ## Format
 
-- **Message = one line in English (what happened)**.
+- **Message = one short line in English, plain and simple so anyone can read it** (user 2026-11-13 — 「대신에 서술이 아니라 누구나 알아볼 수 있게 심플하게 구성해야겠지.」 · earlier the same day 「로그 메세지는 AI체로 하지 말아야되는거 알지?」): what happened and what the code did. Code names a developer greps for (function · type · constant · reason code) over descriptions; no narrative or explanatory prose, no literal translation of internal concepts.
+  - Example: `작업 폴더 canonicalize 실패, 프로필 경로로 진행` → `cwd canonicalize failed; using profile path`.
+- **Logs are English and are not localized** (user 2026-11-13 — 「로그는 그냥 영어.」, the answer to whether log text gets translated).
 - **Identifiers and numbers go into structured fields (key=val)** — they become filter and search keys, so do not interpolate them into the message. `%`=Display, `?`=Debug.
   - Example: `tracing::info!(agent = %profile.id, epoch, ?mode, "agent spawned");`
 - **Error detail (`: {e}`) may be interpolated at the end of the message** (de-facto) — "no interpolation" applies only to *identifiers and numbers* (agent · epoch · pid · conn), and `{e}` is the exception.

@@ -1,10 +1,10 @@
-//! The data folder — finding the root · the write check that creates the folder · install location · the daemon-side layout ([`DataLayout`]).
+//! The data folder — finding the root and which rule found it ([`default_data_root`]) · the write check that creates
+//! the folder · the install location · the daemon's layout ([`DataLayout`], which also computes the library root
+//! setting's default place from that rule).
 //!
 //! ★The root rule and the places of `daemon.json` · `logs\` are defined here★ — the shell does not depend on the daemon crate in production, so it keeps its own copy of those three, and tests tie that the two copies give the same paths (ADR-0271 decision 4 · ADR-0282 decision 3). Change the rule and the shell copy together, or the shell looks for `daemon.json` in a folder the daemon does not use.
 //!
-// hangul-ok-begin
-//! ★The OS split is only inside [`default_data_dir`]★ — the layout is only `Path::join` (CLAUDE.md platform-neutrality rule).
-// hangul-ok-end
+//! ★The OS split lives only in [`default_data_root`]★ — the layout is `Path::join` only (CLAUDE.md platform-neutrality rule).
 //!
 //! ★The names of the layout are a disk contract★ — renaming leaves existing folders' data unread, and no code moves it (ADR-0264 — old data is discarded).
 // ADR-0271
@@ -16,7 +16,7 @@ use crate::portfile::DAEMON_FILE;
 use engram_dashboard_base::writable::{probe_write_in, retry_if_vanished};
 
 // ★ENGRAM_DATA_DIR override (test isolation escape hatch — not a deployment knob)★:
-//   - The only use = data isolation for integration tests: the real-process test (`tests/ws_e2e.rs`) sends the daemon to a temp directory instead of polluting the production `<repo>/.engram-dev` with daemon.json/agents.json.
+//   - The only use = data isolation for integration tests: the real-process test (`tests/ws_e2e.rs`) sends the daemon to a temp directory instead of polluting the production `<repo>/.engram-dev` with daemon.json and the profile file.
 //   - Not a deployment customization knob — the deployed data location is fixed under the executable folder (ADR-0134). Do not use it as "a way for the user to change the data folder".
 //   - ★Since ADR-0134★ the data folder is the single-instance scope, so splitting this env splits the instance too.
 //   - It takes effect only on a daemon launched inheriting the parent environment — a WMI-launched daemon does not inherit it (the launching shell documents that limit).
@@ -33,15 +33,35 @@ const LOCAL_DATA_DIR: &str = ".engram-dev";
 const RELEASE_DATA_DIR: &str = "data";
 
 const DAEMON_DIR: &str = "daemon";
-/// What the program writes and reads again on the next run (roster · presets).
+/// What the program writes and reads again on the next run (roster).
 const STATE_DIR: &str = "state";
 /// What may be thrown away (lock + connection file · spawn attachment files holding tokens · temp folders).
 const RUN_DIR: &str = "run";
 const LOGS_DIR: &str = "logs";
 const MCP_CONFIG_DIR: &str = "mcp-config";
 const USAGE_PROBE_DIR: &str = "usage-probe";
+const LAUNCH_DIR: &str = "launch";
+const LIBRARY_DIR: &str = "default_library";
 
-/// The data directory of the engram processes (ADR-0024/0029).
+/// The data folder [`default_data_root`] finds — the path only.
+pub fn default_data_dir() -> PathBuf {
+    default_data_root().0
+}
+
+/// Which rule found the data folder — the library root setting's default place depends on it
+/// ([`DataLayout::default_library_root`]).
+// ADR-0375
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataRootOrigin {
+    /// `ENGRAM_DATA_DIR`, or a folder handed to [`DataLayout::new`].
+    Given,
+    /// The debug rule: `<repo>\.engram-dev` or its fallbacks.
+    Dev,
+    /// The release rule: `<exe>\data` or its fallback.
+    Release,
+}
+
+/// The engram process's data folder (ADR-0024/0029) and the rule that found it.
 ///
 /// Priority:
 /// 1. `ENGRAM_DATA_DIR` (set + non-empty) → that path as is (test isolation escape hatch — not a deployment knob).
@@ -49,9 +69,9 @@ const USAGE_PROBE_DIR: &str = "usage-probe";
 /// 3. Release (`not(debug_assertions)`): `data/` under the executable folder ([`release_data_dir`]). Deleting the distribution folder leaves no trace — fully portable (ADR-0134 decision 1).
 ///
 /// Never panics: it always returns a PathBuf.
-pub fn default_data_dir() -> PathBuf {
+pub fn default_data_root() -> (PathBuf, DataRootOrigin) {
     if let Some(path) = data_dir_env_override() {
-        return path;
+        return (path, DataRootOrigin::Given);
     }
 
     #[cfg(debug_assertions)]
@@ -59,15 +79,14 @@ pub fn default_data_dir() -> PathBuf {
         // ★Why an exe-based walk-up★: the daemon is launched by WMI Win32_Process.Create and does not inherit the parent's cwd (a WmiPrvSE child), so cwd cannot be trusted. Dev build outputs are under the same repo's target/, so walking up from any exe converges on the same root.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(root) = find_workspace_root(&exe) {
-                return root.join(LOCAL_DATA_DIR);
+                return (root.join(LOCAL_DATA_DIR), DataRootOrigin::Dev);
             }
             if let Some(dir) = exe.parent() {
-                return dir.join(LOCAL_DATA_DIR);
+                return (dir.join(LOCAL_DATA_DIR), DataRootOrigin::Dev);
             }
         }
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(LOCAL_DATA_DIR)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        (cwd.join(LOCAL_DATA_DIR), DataRootOrigin::Dev)
     }
 
     #[cfg(not(debug_assertions))]
@@ -75,12 +94,11 @@ pub fn default_data_dir() -> PathBuf {
         // The exe path is the only trustworthy reference under a WMI spawn — same reason as the debug walk-up.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                return release_data_dir(dir);
+                return (release_data_dir(dir), DataRootOrigin::Release);
             }
         }
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(RELEASE_DATA_DIR)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        (cwd.join(RELEASE_DATA_DIR), DataRootOrigin::Release)
     }
 }
 
@@ -128,20 +146,49 @@ pub fn ensure_data_dir_writable(dir: &Path) -> Result<(), DataDirUnwritable> {
     })
 }
 
-/// The absolute path of the install/repo root resolved from the exe (any build mode) — the trusted base the daemon attaches relative resources to (e.g. ADR-0092 priming `prompts/agent-priming.md`).
+/// The **install / repo root** resolved from the exe, as an absolute path (any build mode) — the trusted base the
+/// daemon joins relative install resources onto (`HelpSource::from_install_root` reads the `prompts/` help text from
+/// it; [`find_builtin_dir`] resolves on the same anchor).
 ///
-/// Same shape as default_data_dir's debug/release branches:
-///   - Walk up from the exe to the workspace root (`.git` or `Cargo.toml [workspace]`) — development: `<repo>`.
-///   - No root: the exe directory (release: where the bundled exes and resources are co-located).
-///   - No exe: None (the caller handles it — priming then yields None).
-/// Always absolute: current_exe gives an absolute path and walk-up/parent preserve it.
+/// Resolution (same shape as the debug/release split of `default_data_dir`):
+///   - walk up from the exe to the workspace root (`.git` or a `Cargo.toml` with `[workspace]`) and take it (dev:
+///     `<repo>` — any exe under target/debug converges on the repo root);
+///   - no root found → the exe's folder (release: the bundled exes are co-located, and so are the resources);
+///   - the exe path cannot be read → `None` (the caller decides — `engram help` then reads only an absolute
+///     `ENGRAM_HELP_FILE`).
+/// ★Absolute★: `current_exe` returns an absolute path and the walk-up / parent keep it absolute.
 pub fn find_install_root() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    if let Some(root) = find_workspace_root(&exe) {
+    install_root_of(&std::env::current_exe().ok()?)
+}
+
+fn install_root_of(exe: &Path) -> Option<PathBuf> {
+    if let Some(root) = find_workspace_root(exe) {
         return Some(root);
     }
     exe.parent().map(|p| p.to_path_buf())
 }
+
+/// The distribution's built-in asset folder (`engram/…` — the asset library's `builtin_dir` value):
+/// `<install root>\builtin`, on the same anchor as [`find_install_root`] — the repo root for a dev build, the exe's
+/// folder for a release (the release zip puts `builtin\` beside the exes). An install resource, not data, so
+/// `ENGRAM_DATA_DIR` does not move it. `None` = the exe path cannot be read; whether the folder exists is not checked
+/// (the asset library stands in for what it cannot read).
+// ADR-0092
+// ADR-0361
+// ADR-0368
+// TRD S25 step-17
+pub fn find_builtin_dir() -> Option<PathBuf> {
+    builtin_dir_of(&std::env::current_exe().ok()?)
+}
+
+fn builtin_dir_of(exe: &Path) -> Option<PathBuf> {
+    install_root_of(exe).map(|root| root.join(BUILTIN_DIR))
+}
+
+/// The built-in folder's name under the install root — `scripts/build-release.ps1` ships a folder of this name beside
+/// the exes.
+// ADR-0368
+const BUILTIN_DIR: &str = "builtin";
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut cur: Option<&Path> = if start.is_dir() {
@@ -170,25 +217,61 @@ fn is_workspace_root(dir: &Path) -> bool {
     }
 }
 
-/// The daemon-side layout of one data folder (`root`). It only computes paths and never looks at the disk, except [`ensure_daemon_dirs`](Self::ensure_daemon_dirs).
+/// The daemon's layout of one data folder (`root`), with the rule that found it. It only computes paths and never
+/// looks at the disk — the one exception is [`ensure_daemon_dirs`](Self::ensure_daemon_dirs); nothing here creates
+/// the default library place.
 ///
 /// ★Shell folders (`shell\…` · `webview\`) are not here★ — the shell holds them in its own layout (ADR-0271 decision 4).
 ///
-/// ★File names used by only one store are not kept here★: `agents.json` · `presets.json` are owned by each store and attached inside the directory it was given — keeping them here would make that store (agent crate) know the daemon.
+/// ★File names used by only one store are not kept here★: the profile file name is owned by its store and attached inside the directory it was given — keeping it here would make that store (agent crate) know the daemon.
 // ADR-0264
 // ADR-0271
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataLayout {
     root: PathBuf,
+    origin: DataRootOrigin,
 }
 
 impl DataLayout {
+    /// A layout over a data folder given directly ([`DataRootOrigin::Given`]).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::with_origin(root, DataRootOrigin::Given)
+    }
+
+    pub fn with_origin(root: impl Into<PathBuf>, origin: DataRootOrigin) -> Self {
+        Self {
+            root: root.into(),
+            origin,
+        }
+    }
+
+    /// The layout over [`default_data_root`] — the daemon's production entry point.
+    pub fn resolve() -> Self {
+        let (root, origin) = default_data_root();
+        Self::with_origin(root, origin)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn origin(&self) -> DataRootOrigin {
+        self.origin
+    }
+
+    /// The library root setting's default place (the asset library's `default_root`), the folder `default_library`:
+    /// beside the data folder for the release rule (`<dist>\default_library`), inside it otherwise. Decided by the rule
+    /// that found the folder, never by its name.
+    // ADR-0312
+    // ADR-0375
+    pub fn default_library_root(&self) -> PathBuf {
+        let place = match (self.origin, self.root.parent()) {
+            (DataRootOrigin::Release, Some(dist)) => dist.join(LIBRARY_DIR),
+            _ => self.root.join(LIBRARY_DIR),
+        };
+        // A relative data folder (a relative `ENGRAM_DATA_DIR`) is made absolute against the working folder, so a
+        //   mount at the default place compares equal and the first start never publishes a relative folder.
+        std::path::absolute(&place).unwrap_or(place)
     }
 
     pub fn daemon_state_dir(&self) -> PathBuf {
@@ -210,6 +293,12 @@ impl DataLayout {
 
     pub fn usage_probe_dir(&self) -> PathBuf {
         self.daemon_run_dir().join(USAGE_PROBE_DIR)
+    }
+
+    /// The launch materials' volatile folder — one `<id>-<epoch>` folder per live agent (the asset library's
+    /// `launch_root`), swept at daemon boot.
+    pub fn launch_dir(&self) -> PathBuf {
+        self.daemon_run_dir().join(LAUNCH_DIR)
     }
 
     /// The log folder the daemon and the shell share (separate files per process — ADR-0264 decision 2). The shell has a copy too.
@@ -309,14 +398,77 @@ mod tests {
         let prev = std::env::var_os(DATA_DIR_ENV);
         let want = std::env::temp_dir().join("engram-daemon-resolve-override-test");
         std::env::set_var(DATA_DIR_ENV, &want);
-        let got = crate::resolve_data_dir();
+        let got = DataLayout::resolve();
         match &prev {
             Some(v) => std::env::set_var(DATA_DIR_ENV, v),
             None => std::env::remove_var(DATA_DIR_ENV),
         }
         assert_eq!(
-            got, want,
+            got.root(),
+            want,
             "with ENGRAM_DATA_DIR set, it must be isolated to that path"
+        );
+        assert_eq!(got.origin(), DataRootOrigin::Given);
+        assert_eq!(got.default_library_root(), want.join("default_library"));
+    }
+
+    /// The debug rule is the branch a test build takes with no override; its default library place is inside the
+    /// data folder (`<repo>\.engram-dev\default_library`). Only computed — the real folder is never touched.
+    #[test]
+    fn the_debug_rule_puts_the_default_library_inside_the_data_folder() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var_os(DATA_DIR_ENV);
+        std::env::remove_var(DATA_DIR_ENV);
+        let got = DataLayout::resolve();
+        if let Some(v) = &prev {
+            std::env::set_var(DATA_DIR_ENV, v);
+        }
+        assert_eq!(got.origin(), DataRootOrigin::Dev);
+        assert_eq!(
+            got.default_library_root(),
+            got.root().join("default_library")
+        );
+    }
+
+    /// The default place follows the rule that found the data folder, not the folder's name: a release `data` folder
+    /// puts it beside, a given or debug folder named `data` keeps it inside, and a release folder with another name
+    /// still puts it beside.
+    #[test]
+    fn the_default_library_place_follows_the_origin_never_the_folder_name() {
+        // An absolute place on every OS, so the comparisons below are not made absolute against the working folder.
+        let dist = &std::env::temp_dir().join("portable").join("engram");
+        let release = DataLayout::with_origin(release_data_dir(dist), DataRootOrigin::Release);
+        assert_eq!(release.default_library_root(), dist.join("default_library"));
+        let renamed = DataLayout::with_origin(dist.join("elsewhere"), DataRootOrigin::Release);
+        assert_eq!(renamed.default_library_root(), dist.join("default_library"));
+        for origin in [DataRootOrigin::Given, DataRootOrigin::Dev] {
+            let named_data = DataLayout::with_origin(dist.join("data"), origin);
+            assert_eq!(
+                named_data.default_library_root(),
+                dist.join("data").join("default_library"),
+                "{origin:?}"
+            );
+        }
+        assert_eq!(
+            DataLayout::new(dist.join("data")).origin(),
+            DataRootOrigin::Given
+        );
+    }
+
+    /// A relative data folder (a relative `ENGRAM_DATA_DIR`) gives an absolute default place, against the working
+    /// folder. Only computed.
+    #[test]
+    fn a_relative_data_folder_gives_an_absolute_default_library_place() {
+        let got = DataLayout::new("relative-data").default_library_root();
+        assert!(got.is_absolute(), "{got:?}");
+        assert_eq!(
+            got,
+            std::env::current_dir()
+                .unwrap()
+                .join("relative-data")
+                .join("default_library")
         );
     }
 
@@ -446,6 +598,64 @@ mod tests {
     }
 
     #[test]
+    fn a_dev_build_finds_builtin_at_the_repo_root() {
+        let root = unique_tmp("builtin-dev");
+        let deps = root.join("target").join("debug").join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let got = builtin_dir_of(&deps.join("engram-dashboard-daemon.exe")).unwrap();
+        assert_eq!(got, root.join("builtin"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Assumes no `.git` / `[workspace]` marker above the temp dir, as find_workspace_root_none_when_no_marker does —
+    // with TEMP inside a checkout the walk-up finds that checkout and this test fails.
+    #[test]
+    fn a_release_finds_builtin_beside_the_exe() {
+        let root = unique_tmp("builtin-release");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let got = builtin_dir_of(&root.join("engram-dashboard-daemon.exe")).unwrap();
+        assert_eq!(
+            got,
+            root.join("builtin"),
+            "no marker above — the exe's folder"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The release puts the built-in folder beside the exes under the name this daemon looks for
+    /// (`$BuiltinDirName` in `scripts/build-release.ps1` = [`BUILTIN_DIR`]) — the direction no other test sees: the
+    /// tests above pin the daemon side only, so renaming the script's folder alone stays green there, and the release
+    /// daemon then finds no built-in folder and every built-in stands in (ADR-0361).
+    // TRD S25 step-17
+    #[test]
+    fn the_release_ships_builtin_under_the_folder_name_the_daemon_reads() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/build-release.ps1"),
+        )
+        .unwrap();
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$BuiltinDirName "))
+            .expect("`$BuiltinDirName = '...'` line");
+        let names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+        assert_eq!(names, [BUILTIN_DIR], "{line}");
+    }
+
+    #[test]
+    fn find_builtin_dir_hangs_off_the_install_root() {
+        let got = find_builtin_dir().expect("current_exe is readable under test");
+        assert_eq!(
+            Some(got),
+            find_install_root().map(|root| root.join("builtin"))
+        );
+    }
+
+    #[test]
     fn is_workspace_root_distinguishes_markers() {
         let base = unique_tmp("is");
         let git_dir = base.join("g");
@@ -489,6 +699,10 @@ mod tests {
         assert_eq!(
             l.usage_probe_dir(),
             root.join("daemon").join("run").join("usage-probe")
+        );
+        assert_eq!(
+            l.launch_dir(),
+            root.join("daemon").join("run").join("launch")
         );
         assert_eq!(l.logs_dir(), root.join("logs"));
     }

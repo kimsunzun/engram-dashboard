@@ -1,7 +1,7 @@
 # ADR-0209: Mail authorization splits its axis with uses_mail — MCP is the official path and the CLI is a mirror
 
-- 상태: 확정 (2026-09-19, basis: commit `75bdfda` · 2 user decisions on 2026-09-18)
-- 관련: CLAUDE.md 「백엔드 확장」 · ADR-0133(marker + single derivation point) · ADR-0132(control plane CLI) · ADR-0128(hard unification of the channel) · ADR-0004(the backend states its own facts) · `crates/engram-dashboard-agent/src/backend/mod.rs:451` · `crates/engram-dashboard-agent/src/backend/codex/mod.rs:240` · `crates/engram-dashboard-daemon/src/control/mod.rs:179` · step-log S21
+- 상태: 확정 (2026-09-19, basis: commit `75bdfda` · 2 user decisions on 2026-09-18) · 부분 폐기 by ADR-0370 (uses_mail priming split anchor)
+- 관련: CLAUDE.md 「백엔드 확장」 · ADR-0133(marker + single derivation point) · ADR-0132(control plane CLI) · ADR-0128(hard unification of the channel) · ADR-0004(the backend states its own facts) · `crates/engram-dashboard-agent/src/backend/mod.rs:451` · `crates/engram-dashboard-agent/src/backend/codex/mod.rs:240` · `crates/engram-dashboard-daemon/src/control/mod.rs:179` · step-log S21 · Amended by ADR-0370 (uses_mail priming split anchor)
 
 ## 맥락
 

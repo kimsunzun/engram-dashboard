@@ -10,11 +10,32 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-138 | asset-library test `a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` failed once under full workspace load (stat count 3, expected 4) | Bug | Not started · seen in local QA 2026-11-26 · passed on rerun and at the base |
+| T-137 | S25 step 22 P4 — a lone `hooks.json` delete now asks; a `SKILL.md` arriving in a referenced hook folder asks nothing | Main | Decision pending (user) — current: delete asks, arrival does not |
+| T-136 | S25 step 22 O7 — the post-open hook verdict of a boot-restored codex JSON agent (and of a Withheld caller) is only logged, at info | Main | Decision pending (user) — current: info |
+| T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Decided direction — first client-stage slot, read-only, plugin-shaped (T-109) |
+| T-134 | Agent backends as external modules others can add | Main | Idea — waiting for trigger (after S25) |
+| T-133 | S25 step 10b — a writing library command repeated after the CLI's long wait ran out can overlap the first (extra staging) | Main | Recorded — closing it is outside 10b |
+| T-132 | S25 step 9b U5 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-130 | S25 step 9b U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-129 | S25 step 9b U4a review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-126 | S25 step 9b U3 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-122 | Step-21 U4b — a stopped rename: tokens confirmed before the stop still pass when the plan of what is left is the confirmed one | Main | Closed 2026-11-23 — user: keep as is (ADR-0407) |
+| T-121 | Step-21 U4a / U4b review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched |
+| T-120 | T-112 review recommendations left unfixed (rare cases) | Main | Recorded — revisit when the code is touched (user 2026-11-20: minor items need not be shown) |
+| T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | Main | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
+| T-110 | Launch waiting cue — ADR-0181 decision 5 never built; launch waits grow to 88 s in S25 step 8 | Main | Deferred by the user to the UI work (2026-11-15) |
+| T-109 | The S25 library screen as a plugin-shaped extension (public surfaces only); a plugin system later | Main | Waiting for trigger — S25 client stage (steps 11–13 TRD) · user 2026-11-14 |
+| T-104 | Library file watcher — show files changed outside Engram without a refresh | Main | Deferred by the user (2026-11-11) — target = UI step 13 or later |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | Main | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | Main | Deferred to the multi-daemon topic (user 2026-11-10) |
 | T-84 | Update system — replace a version-mismatched daemon | Main | Not started — deferred by the user (ADR-0356) |
 | T-81 | Split the tray out of the app (client) process | Main | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
 | T-77 | LLM control — remaining gaps (moved from todo) | Main | Waiting for trigger — close each gap when its feature is touched |
+| T-75 | Criterion for separating the shell · webview inner structure (hexagonal, etc.) | Main | To do — after the preset topic (S25) |
+| T-74 | A fixed identity per library file (relink candidates) | Main | Later thought — after using S25 |
+| T-73 | Library export · import that bundles along dependencies | Main | Deferred beyond S25 — S25 leaves the place to fit it |
+| T-72 | Favorites · collections + move log | Main | Deferred beyond S25 — implement after using it |
 | T-66 | Window chrome · name (Chrome-style title bar · window number reuse · window title) | Main | In progress — `v0.5.0/feat/window-chrome` (S26) · U1–U9 implemented · U10 docs landed (2026-10-26) · manual GUI check by a person 2026-10-26 (S13 · S14 passed) · remaining = push · CI · master merge |
 | T-65 | Slot docking LLM commands (`tab.dock` · `layout.get`) | Main | In progress — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 implemented · pushed (`2710e14f` CI running) · `/qa standard` PASS · remaining = U4 docs commit · GUI measurement · master merge · the seven TRD §11 decisions need user confirmation |
 | T-49 | Slot-side activation of a stopped agent · full resume | Main | Deferred — after the storage work |
@@ -29,8 +50,12 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-11 | Per-child permission scope (R7) | Main | Deferred — remote stage |
 | T-9 | claude process pooling | Main | Deferred |
 | T-6 | cwd workspace validation | Main | Deferred — operations stage |
+| T-124 | base `write_atomic` opens its temp with `File::create` — a link planted at the temp name is followed and its target truncated | Bug | Not started · pre-existing · found by the S25 step 9b U2a review |
+| T-123 | `LibraryService::rewrite_in` does not re-check the file before its write — an outside edit between its read and write is lost | Bug | Not started · pre-existing · found by the S25 step 9b TRD (R11) |
 | T-114 | Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state | Bug | Kept as is (user decision) — fails only while Esc is held; rerun it |
 | T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | Bug | Open — not reproduced; found by S35 review |
+| T-115 | codex `backend_contract` Q10 counts a pre-existing process as a survivor when its dead parent's PID was reused | Bug | Open — flaky, environmental · found by S25 step 9a U1b QA (2026-11-18) |
+| T-111 | A stopping daemon releases its instance lock before its launch bodies finish — a successor's boot sweeps can remove an in-progress launch folder | Bug | Open — theoretical path, found in the S25 step 8 review |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | Bug | Open — user decision on the default |
 | T-52 | Graceful daemon stop returned `Timeout` | Bug | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
 | T-45 | Duplicate spawn names · codex shown as claude | Bug | Deferred — bundled with the id switch |
@@ -40,7 +65,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-41 | Esc does nothing during a hook in the first turn | Bug | Not started · reproduced 3/6 |
 | T-35 | Reconnect timing test fails intermittently | Bug | Not started |
 | T-20 | Delete during wake-up → revives | Bug | Deferred |
-| T-21 | Agent started during shutdown is missed | Bug | Deferred |
+| T-21 | Agent started during shutdown is missed | Bug | Deferred — the gap grows from S25 step 8 |
 | T-30 | No `in_flight_targets` backstop | Bug | Registered preventively · follow-up = clear this axis (useless after S29 · amend ADR-0142 first) |
 | T-31 | Someone else delivers first → 「대기 중」 reply | Bug | Deferred |
 | T-32 | No serialization of registry broadcasts | Bug | Not started · T-16 is a prerequisite |
@@ -49,7 +74,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-53 | Spawning — a grandchild that started before being put in the group | Bug | Not started · theoretical path |
 | T-54 | Four permanent `taskkill /T` callers | Bug | Not started · pre-existing risk |
 | T-55 | Atomic write ignores a folder sync failure and reports 「썼다」 | Porting | Not started · not applicable on Windows |
-| T-56 | Five codex terminal real-CLI contract tests fail | Bug | Not started · pre-existing · cause not identified |
+| T-56 | Five codex terminal real-CLI contract tests fail | Bug | Start-screen wait raised 45 s → 120 s (`a55195b4`, user 2026-11-12); codex lane `backend_contract` 11/11 PASS at 120 s (S25 step 7 P5 QA) — whether to close is open |
 | T-57 | Late reap × failed activation → `auto_restore=true` on a dead agent | Bug | Not started · theoretical path · harmless for now because boot auto-restore is OFF |
 | T-58 | Menu-originated command · preset change failures are not shown on screen | Bug | Not started · pre-existing (frontend) |
 | T-59 | Flake where the Job member list does not become complete within 4 tries because of 「멤버 수 ≠ 명단 수」 | Bug | Not started · pre-existing (platform) · observed once in CI |
@@ -57,6 +82,30 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | Bug | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
 | T-83 | Daemon test `ws_e2e case09_slow_consumer_closed_others_unaffected` fails intermittently | Bug | Not started · flaky (3 failures 2026-11-09~10) |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | Bug | Not started · pre-existing · left out of 3-3 (replace-only scope, user 2026-11-10) |
+| T-94 | A claude that exits right after launch is answered "started" with no failure mark | Bug | Not started · known limit of S25 step 20 (ADR-0348 decision 6) |
+| T-95 | A pass-through `--settings` (or instructions / snapshot flag) in claude `extra_args` replaces the one Engram passes | Bug | Not started · pre-existing (Noop fragment too) · found by S25 step 5 review |
+| T-96 | No cap on the number of claude `--add-dir` pairs vs the cmd.exe 8191-character line | Bug | Not started · theoretical path · found by S25 step 5 review |
+| T-101 | `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion` | Bug | Not started · pre-existing · theoretical path · found by S25 step 5 review · widened by S25 step 6 (`text_is_cli_safe`, codex cwd guard) |
+| T-102 | Codex pass-through `extra_args` are not guarded on the cmd line (odd `"` · cmd metachars) | Bug | Not started · pre-existing · recorded decision (S25 step 6 TRD R10) |
+| T-103 | Noop codex terminal `--cd` is not checked for cmd metachars (`C:\Work\R&D` runs `D`) | Bug | Not started · pre-existing · found by S25 step 6 review |
+| T-87 | Noop codex terminal budget is not an upper bound (shim line, resolved `cmd.exe` path, quote doubling) | Bug | Not started · latent (priming 1.3 KB vs ~7.8k window) · found by S25 step 6 review |
+| T-88 | Non-npm codex shims (pnpm · npm ≤ 6 · yarn v1) put `%*` inside `IF ( )` — an unquoted `)` in a `-c` line could break it | Bug | Unverified (from memory) · found by S25 step 6 review |
+| T-89 | Codex first-turn delivery is confirmed by the turn window, not by `clientUserMessageId` | Bug | Not started · theoretical path · found by S25 step 6 review |
+| T-90 | A mismatched-turnId echo on our thread consumes the codex first-turn report with `false` | Bug | Not started · theoretical path (safe direction) · found by S25 step 6 review |
+| T-91 | Codex `thread/resume` deprecation notice — upstream may change resume semantics | Bug | Watch · found by S25 step 6 measurements (TRD R9) |
+| T-97 | The daemon's `stopping` latch is per connection — a second `StopDaemon` on another connection does not join | Bug | Not started · pre-existing (master S21) · no harm found · found by the master-merge review |
+| T-98 | An in-flight create can outlive the single-instance guard and write the roster after it is released | Bug | Not started · pre-existing · rare ordering · found by the master-merge review |
+| T-99 | A spawn during daemon stop leaves an asleep agent with a last-failure mark | Bug | Recorded, not planned (「최소한만 막기」) · pre-existing · found by the master-merge review |
+| T-106 | S25 step 7 asset-library — review findings recorded, not fixed (races, edge answers, cost) | Bug | Recorded, not planned (user 2026-11-12 review-fix criterion) · theoretical paths · found by the step-7 code reviews (P5–P9) |
+| T-117 | S25 step 9a library edit — review findings recorded, not fixed | Bug | Recorded, not planned · user 2026-11-19 |
+| T-107 | S25 step 7 asset-library — test names that overclaim, placements no test pins, two log lines not reworded | Minor feature · cleanup | Not started · found by the step-7 code reviews and QA (P4 · P5 · P9) |
+| T-108 | Convert the existing Korean log messages to English (one batch) | Minor feature · cleanup | Not started · user decision 2026-11-13 — the convention changed now, the existing lines later in one batch |
+| T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | Minor feature · cleanup | Not started · found by S25 step 6 review |
+| T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | Minor feature · cleanup | Not started · found by S25 step 6 QA |
+| T-119 | A JSON array argument from Windows PowerShell 5.1 loses its inner quotes (CLI refuses it) | Bug | Not started · pre-existing · found by the step-10a live check |
+| T-118 | Improve the agent priming's content (10a only translates it) | Minor feature · cleanup | Waiting for trigger — after S25 step 10a · user 2026-11-19 |
+| T-116 | Drop the CI Hangul check (ADR-0383) once the English habit has settled | Minor feature · cleanup | Waiting for trigger — after S25 · user 2026-11-19 |
+| T-100 | CLAUDE.md 「최소한만 막기」 — add 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 | Minor feature · cleanup | Waiting for trigger — the next CLAUDE.md revision |
 | T-71 | Do not point at tracking numbers — just delete when resolved | Minor feature · cleanup | To do — later as an issue |
 | T-70 | Criterion for guessing the version ahead of a branch — 0.5.0 side if it is a feature | Minor feature · cleanup | To do — later as an issue |
 | T-69 | Step number convention — an S number for each new topic | Minor feature · cleanup | Partly done · remaining = minor commit prefixes |
@@ -73,6 +122,111 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-137. S25 step 22 P4 — lone hooks.json delete asks; a SKILL.md arriving in a referenced hook folder asks nothing
+- **Status:** decision pending (user) — held by the P4 reviewers (lead, risk, Codex) 2026-11-26; committed with the current behaviour (ADR-0424 decision 5).
+- **Case 1:** deleting a lone `hooks.json` of a referenced hook folder (the hook then vanishes) now answers `delete-unconfirmed` with the plan, as a lone `SKILL.md` does (ADR-0339) — beyond ADR-0420 decision 14 (rename / move / merge). Options: keep asking (main's recommendation — the same reason as SKILL.md) · let a delete go without asking.
+- **Case 2:** a `SKILL.md` moved or merged into a referenced hook folder turns it into a skill; the hook's references then read not found and nothing asks. Options: ask (same refusal shape) · keep as is (rare; main's recommendation — record only).
+
+### T-136. S25 step 22 O7 — the post-open hook verdict is only logged, at info
+- **Status:** decision pending (user) — TRD trd-hook-components.md §9.3 O7; held by the P3 reviewers (lead, risk) 2026-11-26; committed with run notices logged at info (ADR-0420 amendment of 2026-11-26).
+- **Case:** after a codex JSON thread opens, Engram checks `hooks/list` and raises `codex-hooks-untrusted` run notices (not-listed, untrusted, disabled, foreign, unchecked). A launch with a caller gets them in its reply; a boot restore and a Withheld caller (WS Spawn / SpawnProfile) only log them, at info — below the release default (warn), so nothing is written. The `foreign` verdict is the only run-time sign of a hook riding Engram's trust. `restore_all` has no production caller today, so the boot path is dormant.
+- **Options:** log run notices at warn (cheap; main's recommendation — matches logging-conventions for an anomaly) · surface them in the restore status / problem list · keep info.
+
+### T-135. S25 client stage — a structure view of the whole reference graph
+- **Status:** idea, recorded 2026-11-26 for the client-stage screen discussion. User: 「언리얼 위젯 리플랙션? 같이 연결되있는 트리구조를 따로 볼 수 있게 하는게 좋을것같은데」 · 「추가적으로 하는거임. 기존은 그대로 있고. … 전체적인 구조가 보이도록」.
+- **What:** an additional view (existing screens unchanged) showing agents → attached presets → nested presets → instructions / skills / hooks / settings / folder entries, both directions (what uses this item), with the launch-problem overlay (skipped, blocking, tag-filtered). Analogues: Unreal Reference Viewer (node graph), Widget Reflector (hierarchy tree).
+- **Main's proposal (not decided):** tree first, "view as graph" second. Candidates (no graph library in package.json today): React Flow `@xyflow/react` + ELK.js layout · Cytoscape.js · a tree list (e.g. react-arborist). The server already walks references (asset-library `refs.rs` closure, `used_by`, `ListRow.references`) but no command returns the whole graph — a `library.graph`-style LLM command would come with the view (CLAUDE.md 「LLM-우선 제어」). Convention check (how other apps do such views) at the screen discussion. User 2026-11-26: the whole graph visible, click focuses one node (「전체 연결도 볼 수 있고 클릭하면 해당것만 포커싱」), automatic arrangement, open source does the rest — Engram mainly feeds the data. Main's default for that check: React Flow (`@xyflow/react`) + an automatic layered layout (ELK.js `layered` or dagre — left-to-right agents → presets → items, as Unreal's Reference Viewer), click = highlight the node and its direct links and dim the rest + fit view, depth limit / collapse / minimap for large graphs; alternative Cytoscape.js. Licenses unverified (ELK.js believed EPL-2.0) — check at the screen TRD.
+
+### T-134. Agent backends as external modules others can add
+- **Status:** idea, recorded 2026-11-24 during the step-22 design. User: 「나중에는 백엔드만 모듈로 빼서 다른사람도 확장할 수 있게 지원해주면 좋을듯?」
+- **Today:** per-backend knowledge lives only in agent `backend/claude` and `backend/codex` behind ports (ADR-0004, ADR-0334, ADR-0367 — adding a backend needs no asset-library change), but backends are compiled into Engram, so adding one means editing Engram's source.
+- **Open:** the module form (separate executable + protocol, or loaded plugin), what the port contract becomes as a public API, versioning. Related: T-109 (the library screen as a plugin-shaped extension).
+- **Added 2026-11-26 (step-22 GUI check):** backend surfaces are not uniform — session id, resume, hook injection, context usage and launch notices each look different per backend, so every live check (scene H1: launch → hook markers → kill + resume → session and context continue with presets re-applied → user config untouched) is written again per backend and mode. Gemini, Grok and API backends are coming. User: 「통일이 안되있어. 나중에 한번 정리해야될것같은데 결국 유저가 스스로 모델을 dll 로 추가할 수 있는? 시스템을 가지면 좋을것같은데.」 Direction to weigh: one backend contract, with one shared live scenario every backend runs; user-added backends (DLL or similar) on that contract.
+
+### T-133. S25 step 10b — a repeated writing command can overlap the first after the CLI's wait runs out
+- **Status:** recorded 2026-11-24 from the step-10b TRD review (risk, lead, Codex) — outside 10b; the help tells the agent not to repeat.
+- **Case:** on `/control/call` the daemon's own commands run on the spot with no delivery seat, no reply bound and no request-id guard. Under the Launch class the CLI waits 94 s, then prints `CONNECT_FAILED` "read failed" while the command keeps running. A move / copy repeated in that window makes a second staging copy; the repeated move then finds the source gone (`source-changed`) and keeps a temp-named staging only the user can remove; a repeated copy trashes its staging or, under keepBoth, places a second copy.
+- **Options:** a seat (request-id guard) for the daemon's own writing commands on the control route — it must keep the shell-only gate shut on purpose: the seat machine gives a connectionless caller a synthetic `ConnId`, which would make `caller` `Some` at `call_daemon_command` (ADR-0419) · a service refusal of an operation overlapping a running one on the same paths · keep (help line only).
+
+### T-132. S25 step 9b U5 review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-24 at the U5 commit — minor items. Rules of the unit: ADR-0408, ADR-0409.
+- **Items:** (1) the bundle-id form is checked on the address, not on the name on disk — on a case-insensitive volume a crafted address reaches a foreign folder of another spelling (no view produces it; restore the same); (2) restoring an empty-folder fallback row has no test; (3) the read-only junction test makes its link with Windows `attrib` (an OS-specific step in a platform-neutral crate; returns early where the command does not exist); (4) an address through a link answers `not-found` on the record path for a non-root and on the fallback path, where TRD §3.2 says `remaining {path-through-link}`; (5) `judge_in_files`'s message says the record "cannot be read" when it is missing; (6) no per-row log for a remaining row; (7) the view-vs-empty-all test parks the view under the 5 s `IO_LIMIT` (a slow runner could flake).
+
+### T-130. S25 step 9b U4b review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-24 at the U4b commit — minor items. Decisions of the unit: ADR-0417.
+- **Items:** (1) `stage`'s links-inside branch names any entry existing at the generated temp path as this call's staging (ownership from a stat, not from creation — a temp-name collision could name someone's leftover); (2) the "nothing answers → own folder" fallback also applies under `skip` / none (could refuse instead); (3) no test for the equal-identity branch on volumes without 8.3 names, nor that the hold no longer probes the source; (4) a destination folder removed between the check and the staging answers `not-found` of the item; (5) answer args use the canonical `engram` spelling while `CopyItem.path` keeps the given one; (6) `Copied.trashed` is an `Option`, `Moved.trashed` a `Vec`; (7) in one call an overwrite can trash an earlier item's fresh copy; (8) a copy name follows the client's spelling; (9) a read-only installed built-in gives a read-only copy; (10) a copy into an alias spelling is keyed under the alias until the next scan (moves the same); (11) no test turns red when only the spelling into-itself check of `copy_items` is broken (the disk check also refuses the plain descendant case — QA mutation survived).
+
+### T-129. S25 step 9b U4a review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-24 at the U4a commit — minor items. Decisions of the unit: ADR-0416.
+- **Items:** (1) every no-follow open queries `FileAttributeTagInfo`; a redirector refusing that query fails every copy from it (query only when the attributes show a reparse point); (2) `detach-refs-invalid` can hide a crossing item's own answer (wider than T-126 (3)); (3) `not_copied` names an entry whose bytes were copied when only its metadata pass failed; (4) a Unix FIFO in the source blocks the copy's open (no `O_NONBLOCK`); (5) `stage` maps a vanished destination folder to `not-found` of the source; (6) the probe fails where the user may remove but not create folders; (7) the staging is not re-listed in the hold, and no folder sync precedes trashing the original; (8) a volume whose file ids change between reads makes every attempt `source-changed`; (9) a mount change during the copy keeps the staging without a client `root_generation` but trashes it with one; (10) a fallback trash row of a staging no longer carries its intended name; (11) no test breaks the destination `.trash` between the copy and the hold for a staged item that is not an overwrite (QA mutation survived at the in-hold re-check's destination half).
+
+### T-126. S25 step 9b U3 review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-24 at the U3 commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0415.
+- **Items:** (1) no test pins that S's leftover catalog range stays when the empty-only removal of S fails (the next scan restores it anyway); (2) a merge that moved nothing answers done; (3) `detach-refs-invalid` replaces the per-item answers of the whole call; (4) an overwrite's newcomer takes the displaced entry's spelling, and a merge into a different-case folder rewrites D's catalog spelling (cosmetic); (5) 8.3 short names and case-insensitive Unix aliases are not folded (library-wide).
+
+### T-122. Step-21 U4b — tokens confirmed before a stop pass when the plan of what is left is the confirmed one
+- **Status:** closed 2026-11-23 — user 「그대로 둬.」: kept as is (ADR-0407, rejected alternative). Raised by U4b review round 6 (hold); ADR-0407 decision 2, the `rename.rs` header and the `library.renameMount` doc already describe it.
+- **Case:** a confirmed rename stops at a file failure (the generation is not raised). If every file it wrote is edited to refer to the old mount name again and nothing else changes, the plan of what is left equals the confirmed plan (the digest pins paths, not content), so the old tokens rewrite those files again without a fresh confirmation. Only files in the confirmed set are touched, so ADR-0405 decision 1 holds.
+- **Options:** accept it (reviewer and main lean this way — content was never pinned, even without a stop) · or raise the generation when a stop has written files (changes what the generation means).
+
+### T-121. Step-21 U4a / U4b review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-22 at the U4a commit — minor items, fixed when their code is touched or they show up in use. Decisions of the unit: ADR-0402.
+- **Items** (TRD `docs/process/S25-preset-library/trd-library-mounts.md`, asset-library):
+  - A launch blocked by a needed dead mount also lists later healthy mounts as "not checked" (it stopped before checking them).
+  - `unreadable_mounts` re-stats every unusable mount on each relink; `preset_add`'s folders branch stats before its entrance refusal.
+  - The read budget is shared across agents in a tree view (U2b design — by intent).
+  - A caller with no budget left can start the run's only load-time overlap judgement; every ask answers `not checked`, so mounts are judged on spelling for the whole run (junction overlaps missed until restart). One-line guard: do not start the judgement with zero left. User 2026-11-22: not worth fixing now.
+  - Right after start, a row's `why` says "not checked (budget spent)" while the load-time check is still running; an add / relocate whose budget the check ate refuses `library-root-unusable` about the new folder instead of naming the dead mount.
+  - No test for a short-budget waiter timing out on the load judgement or for recovery after a panicked judgement (exactly one replacement runner).
+  - Every mount stat locks the judgement state mutex to read a flag; an `AtomicBool` / `OnceLock` fast path would avoid it (negligible today).
+  - The test `a_first_scan_starved_by_the_load_judgement_records_nothing_and_walks_the_healthy_mount_on_a_fresh_budget` no longer exercises a starved scan (name over-promises); no gate-level test pins that a `None` stat records nothing in `seen` (a mutant recording it survives). Done in U4b (test renamed, gate test added).
+- **U4b additions** (recorded 2026-11-23 at the U4b commit; decisions of the unit: ADR-0405, ADR-0407):
+  - A held mount's `why` keeps the other mount's old name after that mount is renamed.
+  - A file deleted outside Engram is stat'ed once per rename until the next scan.
+  - A rename touching a dead share can take longer than the CLI wait; U5 help should say to read `library.status` after a timeout.
+  - Two held mounts on one folder can pass the rename-repeat folder check.
+- **U5 additions** (recorded 2026-11-23 at the U5 commit):
+  - `path.rs` `NotUnderRoot` error text still says "library root" (raised by `MountPath::from_disk` — "mount folder" is right).
+  - `help.rs` mount-names loop in the new help test repeats the count-pin loop (harmless).
+  - Live scenes L4–L6: an assert failing before `kill_and_reap` leaves the child running (same pattern in all three).
+  - `codex_l6_…` expects codex's skills list in a rollout developer message (measured on codex-cli 0.163 — research M2); a codex change there fails it for a version reason.
+  - With an unreachable share registered, `library.status` / `library.refresh` take about the 5 s stat limit (other commands unaffected — TRD R3).
+### T-120. T-112 review recommendations left unfixed (rare cases)
+- **Status:** recorded 2026-11-20 at the T-112 freeze — the user does not need minor review items shown (「사소한거? 는 내가 알 필요없지?」); fix one when its code is touched or it shows up in use.
+- **Items** (TRD `docs/process/S25-preset-library/trd-launch-skip-missing.md`, code at `7ea7441d`):
+  - A spent budget (`NOT_CHECKED`) or an access-denied share root is reported as `share not reachable` by the share probe (`folder.rs` `stat_all`); the launch still blocks, but the `why` is wrong and `agent.setWorkspace` marks a denied share as clearable.
+  - `remembered_connection` (platform `fs.rs`) counts `ERROR_NO_NETWORK` and other query failures as "no connection", so a remembered mapping whose drive type is 0/1 could read as absent when the network stack itself is down — unmeasured.
+  - `share_root` (`GetDriveTypeW`, `WNetGetConnectionW`) runs on the caller's thread outside the `BoundedIo` budget and is not cached (TRD R12) — not measured for a remembered but disconnected mapping (cannot be created on the QA machine); unmapped letters took < 40 ms.
+  - `ProblemRow` / `AgentPresetsView.problems` say a launch refuses on every non-skipped row; a ④ row for a root that exists but whose first scan keeps failing is shown while a launch runs (handed to step 13).
+  - The once-per-agent fingerprint compares `via` as a set (`notice_fingerprint` sorts arrays), so a reversed preset chain for the same missing item is not shown again (documented).
+  - An absent claude folder entry whose path the command line cannot carry still blocks with `folder-path-cli-unsafe` (split by kind — TRD c1).
+### T-110. Launch waiting cue — ADR-0181 decision 5 never built
+- **Status:** deferred — user 2026-11-15 「일단 나중에 UI할때 함께하고」; the requirement itself: 「뭐가됐건 기다리면 뭔가 기다리는 사인이 있어야되는데 이건 관용으로 확인하고 맞추면 될듯?」 — match the convention.
+- **Fact (code at `5b79b821`):** the only human launch path (double-click a reserved row in `src/components/agent/AgentList.tsx` → `activateReserved` → `spawnProfile`) already shows a row pending state from 0 s until the reply settles (`beginInFlight` / `busyIds`, `statusGlyph.ts` `rowPhase` → `'pending'`, `PENDING_GLYPH` spinning, 「진행 중…」, row dimmed, menu disabled). No ~1 s delay, no elapsed time, no cancel. Command-registry launches (`agent.spawn`, `agent.spawnInto`, `slot.createAgentHere`) show nothing. ADR-0181 decision 5 (a 「기다리는 중」 cue at ~1 s, separate from give-up) has no implementation and no ADR records the row spinner.
+- **Why now:** S25 step 8 (ADR-0369) raises the shell's launch wait from 30 s to 88 s (+ up to 30 s while the connection opens), so the gap between the cue and give-up grows.
+- **Convention (light check 2026-11-15, sources = public repos' default branches):** an action on a list item shows its cue on that item, immediately, with the action disabled (Podman Desktop `ContainerActions.svelte` STARTING spinner · Portainer `StartButton.tsx` 「Starting...」 · GitHub Desktop `push-pull-button.tsx` · Wave Terminal `connstatusoverlay.tsx` 「Connecting to …」); framework indicators wait 150–300 ms with a minimum display time (VS Code `progressService.ts`, IntelliJ `ProgressUIUtil.kt` 300 ms). Failure shows on the same item with the error text and often Retry (Podman, Wave, Orca mobile); Portainer uses a toast. Long waits: most add nothing; some add Cancel (VS Code `cancellable`, IntelliJ status bar), a live elapsed timer (paseo `turn-footer.tsx`) or 「taking longer than expected」 + Retry (Orca mobile). Guideline: Nielsen — past 10 s give progress and a way to interrupt.
+- **Next:** at the UI work, check the convention (delay before showing, inline vs global, long-wait handling, give-up message) and align the row cue and the command-path launches with it.
+
+### T-109. The S25 library screen as a plugin-shaped extension; a plugin system later
+- **Status:** waiting for trigger — S25 client stage (steps 11–13 TRD). User 2026-11-14: 「결국 작업은 llm이 하는거고 UI는 보여주고 유저가 조작할 수 있는 확장기능? 개념으로 가면 좋지 않나 해서.」 · 「일단 대강 저장해두고 어디까지 할지는 UI 구현때 보자고.」
+- **Already decided:** the daemon's library features are always on and the screen is a package that can be turned off (parent TRD `docs/process/S25-preset-library/trd.md` §1-7 — user 2026-10-29 「데몬은 디폴트로 제공하는거고 UI는 그냥 패키지? 형식으로 온오프」); every feature is LLM-controllable on the daemon bus / `__engramCmd` (CLAUDE.md 「LLM-우선 제어」).
+- **Proposal discussed (main, not decided):** build the library screen only on public surfaces (daemon bus commands, `__engramCmd`, slot registration) — no screen-only shortcuts — so it is a plugin in shape; extract a plugin API from that boundary later. Not now: install / isolation / permissions / distribution / API versioning of third-party plugins (one consumer is too few to design the API). Missing axes for a general plugin system noted: event subscription (hooks), declarative contributions (menus · keys · settings), server-side extension (backends / daemon commands without rebuild), isolation and permissions, API stability. Content-level extension (presets · skills) already covers much of what users would want (main's judgment).
+- **Next:** when the client-stage TRD is written, decide how far to go; check whether the steps 11–13 design already uses only public surfaces.
+- **User 2026-11-26 (direction):** before the full screens, a read-only structure viewer slot (T-135) comes first — main edits through `engram` commands, the user watches in the viewer. From now on slots are plugins in shape so users can contribute and share later (「계속 내가 지원할게 아니라서 유저들이 참여해서 공유할 수 있게」): frontend = add slots, backend = register models / commands (T-134). The plugin system itself is a separate topic; until then every new slot is built only on public surfaces (daemon bus commands, `__engramCmd`, slot registration), its code in one folder, the app runs with it off. In-app slot, not a standalone page. The slots gather in one place as a **default plugin pack** (user 2026-11-26: 「디폴트 플러그인 팩 같은 느낌으로 한곳에 모을거거든? 사용량 같은것도 거기에 있어야겠지.」) — the structure viewer, the library screens, and the existing usage display (`src/store/usageStore.ts` and its slot content) belong in it; moving the existing usage display there is part of the plugin topic, not this step.
+
+### T-105. Launch folder wait as an advanced setting
+- **Status:** deferred — user 2026-11-11 「어 나중에 한다고 치고」 (ADR-0360 decision 6 · Rejected alternatives "User settings for the waits now").
+- **Fact:** the launch folder waits (60 s required · 2 s advisory) are internal constants in agent `crates/engram-dashboard-agent/src/types.rs` (`LAUNCH_REQUIRED_FOLDER_WAIT_SECS` · `LAUNCH_ADVISORY_FOLDER_WAIT_SECS`, beside `CLI_CONTROL_READ_TIMEOUT_SECS`); the launch reply bound (85 s) and the launch caller wait (88 s) are derived from them and from two activation constants in agent `manager.rs` (S25 step 7 TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-10). Engram has no file-based settings loading for such values — the only settings are the shell's UI keys (ADR-0265).
+- **Next:** later, a generic settings-file loading mechanism lives in `base` (domain-free file loading, which fits ADR-0269); the setting values live in files — one common settings file or per-crate settings files, decided then. User 2026-11-11: 「파일 읽어노는 구조? 자체는 base에 있고, 설정은 공용 설정으로 할지 crate 당 설정으로할지 어쨋든 파일로 빠지는거잖아.」 Once that exists, expose the launch folder wait as an advanced setting read from that file instead of the agent constant. The derived values must follow it (the reply bound, the caller wait, the `fits_caller_silence_window` check, the shell's pinned copy), so the setting cannot be a plain constant swap. Nothing moves to `base` before then.
+- **Also (user 2026-11-12):** the asset-library read cap (16 MiB, passed to the store by P7 — S25 step 7) is one of these values: 「이런것도 설정으로 다 빠져야됨.」 The settings file should carry internal tunables of this kind generally, not only the launch waits.
+- **Other internal values of the same kind in the asset-library code (S25 step 7, checked 2026-11-13 — listed, not decided):** `crates/engram-dashboard-asset-library/src/lib.rs` `LIBRARY_READ_CAP` (16 MiB — the read cap above); `folder.rs` `READ_CAP` (16 MiB — a folder-entry file read), `IO_LIMIT` (5 s — a read computation's folder budget and the advisory join cutoff, ADR-0360 decision 4), `READ_ADVISORY_WAIT` (1 s — a read computation's advisory allowance) and `LIST_CAP` (= agent `launch.rs` `FOLDER_LISTING_CAP`, 10,000 entries — also the number in the `folder-listing-partial` sentence).
+- **When a wait becomes a setting (S25 step 7 P6 review, recorded, not fixed):** the folder budgets add the wait to `Instant::now()`; a huge configured value would overflow `Instant` — the setting needs an upper bound (or a checked add) when it lands.
+
+### T-104. Library file watcher — show files changed outside Engram without a refresh
+- **Status:** deferred — a separate feature, after S25 step 7; target = the UI step (S25 step 13) or later. User 2026-11-11, when confirming B31 as is: a file watcher later, as its own feature.
+- **Fact (design, S25 step 7 TRD `docs/process/S25-preset-library/trd-asset-library.md` §10-2 B31 · §6):** the in-memory `Catalog` changes only through scans (first scan, `library.refresh`, root change), Engram's own changes, `check`'s late merge and `list`'s safety net — and the late merge never removes. So a file deleted outside Engram stays in the library list until a refresh. A file added outside Engram may appear earlier — when a launch check reads it (a positive late merge) or `list` meets it as one unknown path (the safety net) — but otherwise also waits for a refresh (TRD §6 「Conditional late merge」). A launch is not affected: `check` reads the attached files fresh and blocks on a missing one.
+- **Next:** when picked up, decide the watcher (OS notifications vs polling), how its events enter `Catalog` under the step-7 rules (class A per-item writes, sequenced removals — ADR-0324), what happens on a network or removable root, and what the screen shows.
 
 ### T-86. Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon
 - **Status:** deferred to the multi-daemon topic, together with the tray work — user 2026-11-10: 「어차피 멀티데몬할때 트레이도 개선해야되니 나중에 다시 오픈하자」.
@@ -104,6 +258,31 @@ Full text before the simplification (investigation records · reverted attempts 
 - **No window position · size · snap commands** — window state (`window.minimize` · `maximize` · `unmaximize` · `raise` etc.) and tab moves (`tab.move` · `tab.dock` · `tab.detach`) are bus commands, but window position and size are human OS gestures only. ADR-0302 · ADR-0303 decision 4 · ADR-0304.
 - **Global handles outside the bus** — handles other than `__engramCmd` remain. Do not list them here; find them with `rg ").__ENGRAM_|).__engram" src/ -g '!*.test.*'` (`__engramCmd` in the output is the formal surface, the rest are gaps). A handle's own comment is not evidence of whether it is a gap.
 - Keybinding remapping = T-42.
+### T-75. Criterion for separating the shell · webview inner structure — what goes inside · outside by hexagonal (ports · adapters) or similar
+- **Status:** to do — investigate and decide separately after the preset · library topic (S25) (user 2026-10-20 「나중에 셸이나 웹뷰도 핵사고날 기준으로 분리해야될것같긴한데 기준을 어떻게 세워야될지 모름」 · 「트래킹에 적어놔」).
+- **Fact:** the crate-boundary side (T-47) has progressed, but there is no criterion for how to split the **inside** of the shell (`src-tauri`) · webview (`src/`). Places already going that way = the shell's layout apply service (behind a transport-neutral service · `layout_apply` tests) · the webview's `agentClient` single control surface (transport seam).
+- **To do:** ① set the criterion — starting point = `docs/research/crate-split-checklist-2026-10-20.md` (split decision table) + the 「무엇을 모르는가」 axis (rust-analyzer) + comparing candidates such as hexagonal · clean · functional core/imperative shell ② check it against the shell · webview ③ user decision → ADR.
+- **Related:** T-47 (crate boundaries — the outer boundary) · CLAUDE.md 「코어 격리」 · 「LLM-우선 제어」 (the frontend only renders).
+
+### T-74. A fixed identity per library file — a way to find relink candidates so references do not rely only on the place (path)
+- **Status:** later thought — look again after using the S25 library (user 2026-10-31 「일단 이건 이대로 두고 나중에 생각하자」 · `.claude/handoff/attachments/20261019-briefing-review-decisions-log.md` G38).
+- **Fact:** the identity of an S25 reference is its place (the path from the top of the library) (`docs/process/S25-preset-library/prd.md` R3). An in-app move · rename moves the file and then fixes the referencing presets · agents one by one, with no work journal — if it is cut off midway, some references stay on the old path as 「찾을 수 없음」 and one [다시 연결] fixes them (same PRD R17 · R19). Something moved outside (Explorer) takes the same path. The scan does not look for relink candidates and propose them (same PRD R19 · D10).
+- **To do:** compare using candidates for recovering files moved outside — OS file identity (NTFS object ID — kept by `ReplaceFile` · NTFS only) · hashes (partial hash + size — digiKam style · not checked by main) — as relink candidates → user decision. It is not a means to change the overwrite policy — ADR-0339 decided that (overwrite = delete + rename). Side files (sidecar `.meta` · `.uid` style) and ids inside files are not candidates — we do not put our data into files (main 2026-11-01 M109 — on the premise of the user question 「우리만의 데이터를 삽입 못하면서」) (user 2026-11-01 「메타파일은 하지말고」 · G61 · ADR-0339 (E)). ★Reviving it reopens PRD R19 「훑기는 후보를 찾아 제안하지 않는다」★.
+- **Basis:** `docs/research/multi-file-rename-crash-safety-practice-2026-10-31.md` (no tool found that guards a multi-file rename with a journal · designs that do not rewrite references = Unreal redirectors · Unity GUIDs (uncertain)) · `docs/research/favorites-follow-rename-practice-2026-10-30.md` (only the OS level, using file-system ids, follows changes outside the app) · `docs/research/external-file-reference-tracking-2026-11-01.md` (the mechanism (what it points with) and the overwrite policy are separate · the object ID survives `ReplaceFile` · OS identity · hashes are for recovery after an outside move).
+- **Related:** T-72 (collections — a design that uses a move log because files have no fixed id) · same PRD R3 · R17 · R19 · ADR-0339 (references on overwrite · delete — side files rejected).
+
+### T-73. Library export · import that bundles along dependencies
+- **Status:** deferred beyond S25 — a feature that should exist, so S25 leaves the place to fit it (user 2026-10-31 「참조쪽은 나중에 구현하자. 일단 기본부터 구현 근데 있어야되는기능은 맞으니 연결해서 구현하면 될듯」 · review decision log G37).
+- **Fact:** the library is one root (`docs/process/S25-preset-library/prd.md` R7 · G36). The way to share = export the needed files with their root-relative paths as they are and import them on the receiving side at the same paths — the Unreal 「Migrate」 · Unity 「Export Package + dependencies」 style (main-session knowledge · not researched · G36). For now the whole folder is handed over or a part is copied by hand, and missing references are 「찾을 수 없음 · 다시 연결」 (same PRD R7 · R19). There is no way to use an outside folder in place — it is copied · cloned into the library (G37).
+- **To do:** S25 builds reference following (preset → instructions · skills · settings · contained presets, excluding the built-in `engram:/` — what reference counts · the delete confirmation list · relink use) as a reusable function of asset-library. This item adds on top of it packing (bundle shape) · conflict handling on import (different content at the same path) · commands · screen. Before starting, a peer survey (check Migrate · Export Package for real — CLAUDE.md 「참조 구현」).
+- **Related:** same PRD §2 「S25 뒤로 미룬 것」 · R7 · the old non-goal 「내보내기 · 가져오기」 (decision memo 104).
+
+### T-72. Favorites · collections + move log — revive what was cut from S25 after using it
+- **Status:** deferred beyond S25 — implement after using the library for a while (user 2026-10-31 「그냥 즐겨찾기 일단 뺄까? 추후 구현하는걸로. 일단 좀 써보자」 · review decision log G34).
+- **Fact:** what was cut = collections (the built-in 「기본」 · 「+ 새 컬렉션」 · target collection · ★ · stored on this PC only — old `docs/process/S25-preset-library/prd.md` R16) · eight shell `collection.*` commands · the daemon move log (`library-moves.json` · `library.moves` command · record id · cursor · truncation — old M10 · flow ⑥) · collection deletion (P9). Already decided as starting points for reviving = collections are client-side — several UIs can attach, so each holds its own · a fixed id given by the daemon is rejected (files are plain text — G33) · 「기본」 cannot be deleted or renamed (G4) · create · rename follow the file rules (G3) · delete removes only the list and does not go through `.trash` (P9). Relink (same PRD R19) is not affected.
+- **To do:** design starting point = a bounded move log numbered per library root (old path → new path) + a cursor held by the client (G34) — precedent shape = change feeds (OneDrive delta · Drive changes · Dropbox cursor) · Kafka-style offsets. If the log was truncated and the cursor is too stale, that line is 「찾을 수 없음 · 다시 연결」 — with no ids, a rescan cannot tell where the old path went (research). The bound (1,000 entries in the old proposal) is our choice (no peer publishes one — research).
+- **Basis:** `docs/research/favorites-follow-rename-practice-2026-10-30.md` (convention = a fixed id, or the side that renames fixes them directly · no peer found where another store pulls a bounded move log — a rare shape) · `docs/research/change-feed-sync-practice-2026-10-30.md` (all five peers use the 「클라이언트가 커서를 쥐고 그 뒤를 당긴다」 frame · peers are id-based, we use path pairs) · earlier decisions = review decision log G3 · G4 · P9 · M10 · G33 · G34.
+- **Related:** T-74 (a fixed identity per file) · same PRD R16 (only the number kept) · §2 「S25 뒤로 미룬 것」.
 
 ### T-66. Window chrome · name — Chrome-style title bar · reuse of visible window numbers · window title
 - **Status:** In progress — `v0.5.0/feat/window-chrome` (S26 · 2026-10-23~) · PRD edition 0.5 · TRD edition 0.3 (`docs/process/S26-window-chrome/trd.md`) · U1–U9 implementation committed (`4cefce48` … `c7295bdb`) · U10 docs = ADR-0300~0306 · CLAUDE.md · step-log · help body text (2026-10-26) · each unit went through `/review code full` and QA — except that U8a part 1 · U8b · U9 were committed locally before review and the review fixes were added in later commits · QA standard for U2 · U3b = CI · from U8a part 2 on, local `/qa standard` on 2026-10-26 (U8a part 2 `bca0686e` · U8a + U8b `49b64836` · U9 `c7295bdb` · U10 `cf26db3d` — all PASS) (CI green only up to U7b `24782701` — U8a onward has not been pushed yet · based on the local ref 2026-10-26) · ★GUI (`/qa full`) is PARTIAL — the session was locked, so it could not be measured to the end★ · manual GUI check by a person 2026-10-26 (the user · mostly dark) = S13 · S14 · AC13 · AC22 · new window at the cursor position passed → U8b measurement gate passed (`TOP_GAP` · drop area unchanged) · AC23 Alt+Space could not be seen because PowerToys Run on this PC intercepts it (not an app defect) · details = step-log S26. 2026-10-23 line: PRD edition 0.4 (user decisions applied · before review) · slot docking was merged first without T-66 (`c60797a6`). Old line: planned — right after slot docking (TRD edition 7 U7) (user decision 2026-10-17) · included in the final merge. Removing the title bar and distinguishing windows continue right after the slot docking implementation (user 2026-10-20 — 「그거하고 탭바 제거하는거하고 현재 구현 끝나고 이어서 진행할거.」).
@@ -201,6 +380,29 @@ Full text before the simplification (investigation records · reverted attempts 
 
 ## Bug
 
+### T-138. asset-library test counts a stat that may not have happened yet
+- **Status:** not started — seen once in the local QA of the step-22 CI fix (2026-11-26, full `cargo test --workspace`); passed in two reruns on the same tree and once at the base `f7cbdac2`. Not caused by that fix (its change is in the platform crate's test module).
+- **Case:** `tests::a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` (asset-library `src/lib.rs`) asserts `ops.stats_of("/lib") == 4`; got 3: `panicked at crates\engram-dashboard-asset-library\src\lib.rs:5991:9: assertion left == right failed, left: 3, right: 4`. The stats run through `BoundedIo` on spawned threads (`ThreadSpawn`), so the count can be read before one of them has counted — timing-dependent (inferred from the test's own comment and setup, not traced). ADR-0038.
+- **Repro:** `cargo test -p engram-dashboard-asset-library -- --exact tests::a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` — fails only sometimes, under load.
+- **Next:** make the test wait for the walk's stat threads (or count only what the resolve path awaits) instead of reading the counter at once.
+
+### T-124. base `write_atomic` opens its temp with `File::create`
+- **Status:** not started — pre-existing; found by the S25 step 9b U2a review (Codex). 9b's exclude-line write uses its own create-new temp instead.
+- **Case:** `write_atomic` / `copy_atomic` (base `file.rs`) write to `<name>.tmp<pid>.<n>` opened with `File::create`, which follows a link already standing at that name and truncates its target. The temp name is predictable; whoever can write the folder can plant the link first.
+- **Next:** open the temp with `create_new` and draw another temp name on `AlreadyExists`.
+
+### T-123. `LibraryService::rewrite_in` does not re-check the file before its write
+- **Status:** not started — pre-existing; recorded from the S25 step 9b TRD risk R11 (`docs/process/S25-preset-library/trd-file-operations.md` §10).
+- **Case:** `rewrite_in` (asset-library) takes a preset file's tag and bytes, rewrites the references, then writes. It does not compare the file's tag again right before the write, so an edit made outside Engram between the read and the write is overwritten. Every reference walk uses it (relink, mount rename, and the 9b delete-detach / move / rename walks).
+- **Next:** compare the tag again just before the write (inside the same hold) and answer the item as changed if it differs.
+
+### T-115. codex `backend_contract` Q10 counts a pre-existing process as a survivor (stale parent PID)
+- **Status:** open — flaky, environmental; 「넘어감(잠정)」 in the S25 step 9a U1b QA (2026-11-18), user not asked yet.
+- **Symptom:** `cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test-threads=4 --exact q10_shutdown_empties_the_process_tree` failed once: `[Q10 codex] … 생존=[41176]`, panic at `backend_contract.rs:2533` 「codex: shutdown 뒤에도 [41176] 가 살아 있다」. It passed at the baseline commit `a8ea6cb1` right after.
+- **Facts:** the change under test did not touch the agent crate (and agent does not depend on it); PID 41176 was `vctip.exe` (MSVC telemetry) created before the QA run, whose ParentProcessId 42092 was a PID in the codex tree during the test.
+- **Likely cause (unverified):** the survivor check walks parent PIDs and counts a process whose dead parent's PID was reused by a codex child — the same class as T-54.
+- **Next:** decide whether the Q10 survivor check should compare creation times (child created after the root) before counting a descendant.
+
 ### T-114. Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state
 - **Status:** kept as is (user decision, 2026-11-18) — found in S38 QA; predates S38.
 - **Symptom:** `crates/engram-dashboard-platform/src/input.rs` `input::portable_tests::escape_reads_up_when_nobody_holds_it` asserts `!escape_down()`, which reads `GetAsyncKeyState(VK_ESCAPE)` — the physical key right now. It failed once in a local full regression on an interactive desktop and passed minutes later on the same tree (likely a user keypress; not proven). CI is not affected (no one types there).
@@ -210,6 +412,12 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Status:** open — not reproduced on screen (S35 code review, 2026-11-17). Predates S35.
 - **Suspicion:** `AgentList` defines `NodeRenderer` inside its render and passes it to react-arborist `<Tree>` as children; the rename draft is `AgentList` state, so every keystroke re-renders `AgentList` and creates a new `NodeRenderer` identity. If react-arborist mounts it as a component, the row and its rename input remount per keystroke, which could reset the caret or break Korean IME composition. A UI-language switch re-renders the same way.
 - **Check first:** rename an agent in the tree typing Korean; watch the caret and composition. If it reproduces, stabilize the renderer identity (e.g. a stable component reading changing values from context or refs).
+
+### T-111. A stopping daemon releases its instance lock before its launch bodies finish
+- **Status:** open — theoretical path (S25 step 8 U3 code review, lens reviewer; no live occurrence).
+- **Fact:** the instance guard is a local of daemon `lib.rs` `run()` and drops when `run()` returns; the `#[tokio::main]` runtime is dropped after that and waits for detached `spawn_blocking` launch bodies (`connection_core.rs` `SpawnByCwd`). So a stop during a launch lingers **without** the lock — a few seconds today, up to about 20 s for a codex JSON link backstop, about 62–85 s once library presets land. The spawn path has no `shutting_down` check, so a launch finishing after `shutdown_all` can register a session nobody reaps.
+- **Effect:** a successor daemon started within the linger runs its boot sweeps (`usage::sweep_stale_scratch`, asset-library `launch::sweep_launch_dir`), which assume nobody else uses those folders once the lock is held — it can remove the predecessor's in-progress `launch\<id>-<e>\`, or a folder created after the sweep stays until the boot after next.
+- **Options:** keep the guard alive until the runtime has dropped (delays a successor — user-visible on restart) · stop new launch bodies once shutdown starts · accept. Step-8 TRD K11 records the corrected linger.
 
 ### T-78. In-app codex terminal on codex 0.163.0 — alt-screen and mouse tracking
 - **Status:** open — the S21 TRD §6-F default (`--no-alt-screen` or not) is a user decision; reopen it with the evidence below.
@@ -271,6 +479,7 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Symptom:** `shutdown_all` sets `shutting_down` and snapshots the session list, but a session inserted after that **does not die.** If an offloaded spawn lands late, the child remains even after the daemon goes down.
 - **Why it was not fixed now:** There is no flag accessor, and even if one were made, the **check-then-insert gap would remain.** A daemon-side mitigation (shutting the control server down first) was also considered but rejected because it reverses the documented shutdown order and does not actually close the gap.
 - **What is needed:** Block the insert with the flag **inside the session write lock** that `shutdown_all` snapshots, or track control tasks and join them before `shutdown_all`.
+- **What S25 widens (2026-11-01 · S25 step 4 P4a review):** the spawn path does not look at `shutting_down`, so a spawn started before `shutdown_all` can finish after it (same as now). From step 8 (plugging in real materials) on, the launch preprocessing check (`crates/engram-dashboard-agent/src/manager/prelaunch.rs`) can wait for the library lock, so that gap gets longer by as much.
 
 ### T-30. `in_flight_targets` has no fail-open backstop
 - **Status:** Deferred (registered preventively — there is no reachable stall path in the current code).
@@ -331,6 +540,7 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Problem:** The codex terminal rows q4 · q5 · q8 · q11 · q12 of `cargo test -p engram-dashboard-agent --test backend_contract -- --ignored` fail. The screen does not advance past `model: loading … directory: loading`, so the startup modal · composer (`Ask Codex to do anything`) does not appear (the same when run one at a time). At the top of the screen there is a codex warning 「could not create PATH aliases: Refusing to create helper binaries under temporary dir …」 — it may be because the test's sandbox home is under %TEMP% (presumption · codex-cli 0.156.1).
 - **Next:** Measure again with the sandbox home outside %TEMP% · if that does not work, separate the codex edition · login state.
 - **Rationale:** `crates/engram-dashboard-agent/tests/backend_contract.rs` (near q4 `:1262` · q11 `:2165`)
+- **Update 2026-11-12 (S25 step 7 P4 QA):** on codex 0.167 the lane failed q4 / q11 / q12 the same way (screen stuck on "loading" past the 45 s start-screen wait; the baseline `70c35894` fails the same three with 11 tests at 4 threads; q11 once showed codex's own app-server readiness timeout). User: 「아니 그냥하드코딩으로 길게 하던가. 변수하나 바꾸면 되는거잖아. 구지 그걸 트래킹으로해야됨?」 — `a55195b4` raised `STARTUP_TIMEOUT` in `backend_contract.rs` 45 s → 120 s, no new tracking entry. With it the codex lane passed `backend_contract` 11/11 (step 7 P5 QA, `4d920305`). A codex that exits on its own app-server timeout would still fail. Whether this closes T-56 (its q5 · q8 and the 0.156.1 PATH-alias warning were not re-examined) is not decided.
 
 ### T-57. When a late reap and a failed activation overlap, `auto_restore=true` is left on a dead agent
 - **Status:** Not started · theoretical path (code reading — no reproduction · measurement) · ★harmless for now★ — the operating daemon does not call boot auto-restore (the startup 9) comment of `crates/engram-dashboard-daemon/src/lib.rs` · near `:782` · user decision 2026-07-09). Pointed out by the crate boundary A U5b-1 review and deferred as out of scope (commit `424c6da5` body 「미룬 것」).
@@ -376,7 +586,141 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
 - **2026-11-10:** 3-3 landed as a pure replacement of net (user: 「일단 기존거 교체하는 정도로 구현하라고」), so this was not fixed there — the daemon adapter keeps net's queue sizes and close-on-saturation. Its own topic now.
 
+### T-94. A claude that exits right after launch is answered "started" with no failure mark
+- **Status:** not started · known limit recorded by S25 step 20 (ADR-0348 decision 6, user decision 2026-11-09).
+- **Symptom:** claude runs as `cmd.exe /c claude`, so a missing or broken claude binary shows up as an early exit after `cmd.exe` started. Creates answer "started" and `spawn_fresh_settled` clears the last failure on `Started`; the agent list shows no ban glyph.
+- **Why open:** claude has no link verdict, and ADR-0201 left claude Fresh early-exit detection out of scope.
+- **Next:** design how claude Fresh settles its first seconds (an early-exit window like the resume path), then record last failure through the one create body.
+
+### T-95. A pass-through `--settings` (or instructions / snapshot flag) in claude `extra_args` replaces the one Engram passes
+- **Status:** not started · pre-existing · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
+- **Problem:** the claude `build_spec` (`backend/claude/mod.rs`) appends the agent's `command.extra_args` after its own flags. claude takes `--settings`, `--append-system-prompt-file` and `--system-prompt-snapshot` once and keeps the last value (step-5 review — not measured on the real CLI), so a pass-through `--settings <x>` replaces the merged settings file (real materials — S25 step 5) and today the control channel's settings fragment (Noop); `--append-system-prompt-file` replaces the merged instructions or the priming; `--system-prompt-snapshot on` undoes the real-material `off`. Losing the merged settings drops `allowedMcpServers`, so the Engram MCP tools can go missing when the user's global settings carry `allowedMcpServers: []`.
+- **Next:** decide whether to refuse or warn on these flags in `extra_args` (a check at preset/agent edit or at launch) or accept and document it. Related: the S25 TRD §6-3 row on `extra_args` and the default-only preview.
+
+### T-96. No cap on the number of claude `--add-dir` pairs vs the cmd.exe 8191-character line
+- **Status:** not started · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
+- **Problem:** claude runs as `cmd.exe /c claude …` on Windows (`platform::shell::console_command`), and cmd.exe refuses a command line over 8191 characters. Each preset folder entry adds `--add-dir <folder>`; nothing counts them (the S25 TRD claims no claude length budget — only codex has `CMD_LINE_LIMIT_UTF16`). Estimate, not measured: ≈ 70 entries of ≈ 100 characters fill the line together with the other flags. What claude does then is not measured (expected: cmd refuses and claude never starts — an early exit, see T-94).
+- **Next:** add a claude length check (a count at `check` time like the codex budget, block ②) or a cap on folder entries; measure first how the failure shows.
+
+### T-101. `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion`
+- **Status:** not started · pre-existing (the rule moved unchanged from daemon `control/priming.rs` to `platform::shell` in S25 step 5) · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
+- **Problem:** `CMD_UNSAFE_CHARS` = `% & ^ | < >` (`crates/engram-dashboard-platform/src/shell.rs`). When cmd delayed expansion is on (registry `DelayedExpansion=1` under `Command Processor` — off by default), cmd expands `!NAME!` and drops a lone `!`, so a path holding `!` reaches claude changed. `console_command` passes `/c` without `/V:OFF`. Affects every path the rule guards (the priming file in daemon `control/priming.rs`, and from S25 step 5 the claude merged instructions, settings file, plugin folder and preset folder entries) — and any other path on the same cmd line.
+- **Next:** add `!` to the rule (a folder holding `!` is then refused at `preset.add` and blocks with ②), or pass `/V:OFF` to cmd — check the shim side first (the npm `.cmd` shim runs under cmd too).
+- **Widened by S25 step 6** (2026-11-10): `platform::shell::text_is_cli_safe` (the codex preset `-c` lines and the priming value) sits on the same `CMD_UNSAFE_CHARS`, and the codex real-terminal working-folder guard (`backend/codex/cmdline.rs` `cwd_reaches_codex_unchanged` — moved there from `launch.rs` by S25 step 7 P2) repeats the set as a literal (T-92) — adding `!` to the platform set alone would not reach that guard. Nor would it cover a priming with spaces: `backend/codex/cmdline.rs` `priming_value` consults `text_is_cli_safe` only when the text holds no space (a spaced value is quoted), and cmd's delayed expansion is believed to act inside quotes like `%` (not measured) — so `!` in the priming needs its own refusal there, or `/V:OFF`.
+
+### T-102. Codex pass-through `extra_args` are not guarded on the cmd line
+- **Status:** not started · pre-existing · a recorded decision of S25 step 6 (`trd-codex-translation.md` R10 — the user's own input; not re-raised by the step-6 code review).
+- **Problem:** the codex `build_spec` appends `command.extra_args` before the preset `-c` lines and the priming argument. An argument with an odd number of `"` flips cmd's quote state for every later argument (measured M5), so the priming's `<` `>` can become redirections; a `% & ^ | < >` in it reaches cmd as is — including a `%` that pairs with a lone `%` in the real-terminal working folder, which the folder guard lets through (ADR-0353 decision 3). The preset lines are guarded (odd `"` and the metachars refused), the pass-through is not — on Noop and real materials alike. On real materials the command-line count does include them (an upper bound there); the Noop budget is not one (T-87).
+- **Next:** decide whether `extra_args` get the same guard (refuse at agent edit or at launch) or stay the user's responsibility.
+
+### T-103. Noop codex terminal `--cd` is not checked for cmd metachars
+- **Status:** not started · pre-existing · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
+- **Problem:** the Noop codex terminal argv puts the working folder on the cmd line as `--cd <cwd>` (`backend/codex/mod.rs` `build_spec`) with no check. A path with no space goes on the line bare, so `C:\Work\R&D` makes cmd run `D`; two `%` expand as a variable — that half is the known limit the 2026-09-08 decision chose not to fix (`%VAR%` through the shim — the 「알려진 한계」 comment in `backend/codex/mod.rs` `build_spec`). The real path is guarded since step 6 (`cwd_reaches_codex_unchanged` — refuses two or more `%`, `"`, a control char, non-UTF-8, or `& ^ | < >` without a space); Noop goes away when step 8 plugs real kits in.
+- **Next:** close with step 8 (every codex terminal launch then takes the real path), or apply the same rule to the Noop path if Noop stays.
+
+### T-87. Noop codex terminal budget is not an upper bound
+- **Status:** not started · latent · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
+- **Problem:** the Noop priming budget (`command_line_cost` in `backend/codex/mod.rs`) counts `cmd.exe /c codex` as 16 units and quotes as 3 per argument. Since research M10a, cmd is known to limit the expanded `codex.cmd` line to 8191 again (+148 units on the measured install), portable-pty writes the resolved `cmd.exe` path (27 units, not 7), and pass-through `"` and `\` are doubled by the quoting — none counted. A priming of about 7.8k characters could pass the Noop check and still fail the launch; today's priming is about 1.3 KB. The real path counts an upper bound (`cmdline::fits`).
+- **Next:** close with step 8 (real kits replace the Noop priming), or route the Noop budget through `cmdline::fits`.
+
+### T-88. Non-npm codex shims may put `%*` inside an `IF ( )` block
+- **Status:** unverified (from memory) · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
+- **Problem:** the step-6 guard and count were measured with the npm `codex.cmd` shim, which puts `%*` on a plain line. Shims from pnpm, npm ≤ 6 or yarn v1 are said to put `%*` inside `IF … ( … )` blocks, where an unquoted `)` in a `-c` line (allowed by the guard) could end the block early and break the launch.
+- **Next:** install codex through one of those managers and look at the generated shim; if confirmed, refuse an unquoted `)` (or `(`) in a preset line, or document npm as the supported install.
+
+### T-89. Codex first-turn delivery is confirmed by the turn window, not by `clientUserMessageId`
+- **Status:** not started · theoretical path · found 2026-11-10 by the S25 step 6 code review (P3).
+- **Problem:** the transport marks the changed-instructions context delivered when a `userMessage` echo is attributed to the open carrying turn (`backend/codex/transport.rs` `note_context_echo`). A server-originated `userMessage` in our thread during that turn would report `true` although our turn was not the one echoed (no known codex feature does this). Related, also unverified: if codex emits a live `userMessage` notification during the resume handshake (`excludeTurns: true`), the first-turn report would be `false` on every resume and the context re-sent on every launch.
+- **Next:** on codex versions above the client-id floor, match the echo's `clientUserMessageId` to the carrying turn; check the resume-handshake case in the step-8 real CLI lane.
+
+### T-90. A mismatched-turnId echo consumes the codex first-turn report with `false`
+- **Status:** not started · theoretical path · safe direction · found 2026-11-10 by the S25 step 6 code review (P3 fix round).
+- **Problem:** `witness_first_turn` (`backend/codex/transport.rs`) checks only the thread id, so an echo on our thread with another turn id (e.g. a late echo of an earlier turn after the carrying turn got its id) fires the one-shot `FirstTurnSink` with `false`. The context is still cleared by the matching echo, so step 8 records nothing and the next launch re-sends the context once (an accepted duplicate).
+- **Next:** if duplicates show up after step 8, let the report wait for the carrying turn's echo instead of the first echo on the thread.
+
+### T-91. Codex `thread/resume` deprecation notice
+- **Status:** watch · found by the S25 step 6 measurements (`trd-codex-translation.md` R9).
+- **Problem:** codex warns that full-history hydration on `thread/resume` is deprecated for paginated threads. Our resume already sends `excludeTurns: true`, so the warning seen in M4 came from the measurement harness; the remaining risk is upstream changing `thread/resume` semantics.
+- **Next:** re-check on each codex version change (the codex lane runs the live resume L2/L3).
+
+### T-97. The daemon's `stopping` latch is per connection — a second `StopDaemon` on another connection does not join
+- **Status:** not started · pre-existing on master (S21 3-3) · found 2026-11-10 by the review of the master merge into S25 (`bb062838` — codex and lead reviewers independently).
+- **Problem:** `AgentConnections::build` (`daemon/src/agent_conn.rs`) creates a new `ConnectionCore` per connection and `ConnectionCore::new` starts `stopping: AtomicBool` at false; the `StopDaemon` arm returns `DispatchFlow::Close`, so one core never sees a second `StopDaemon`. A `StopDaemon` on another connection starts another `shutdown_all` alongside the first. The struct doc ("every field except `llm_policy` is a shared handle"), ADR-0350 decision 4 ("a second StopDaemon only joins") and the tests `a_stop_daemon_before_the_first_shutdown_signals_joins_it` / `a_stop_daemon_after_the_shutdown_signalled_only_answers_and_closes` (one core, two sessions — a shape production never builds) overstate it.
+- **Harm:** none found — kills serialize on the transport lock and `run()` runs `shutdown_all` again anyway (ADR-0352). Unreachable from our own clients today (the shell runs one stop flight with joiners).
+- **Next:** move the latch to a shared `Arc<AtomicBool>` on `AgentConnections` (and make the tests use two cores), or drop the "joins" claim from the doc, ADR-0350 and the test names.
+
+### T-98. An in-flight create can outlive the single-instance guard and write the roster after it is released
+- **Status:** not started · pre-existing (present at the merge base too) · rare ordering · found 2026-11-10 by the lifecycle-axis review of the master merge (`bb062838`).
+- **Problem:** the `InstanceGuard` (`daemon/src/lib.rs`) drops when `run()` returns, but `#[tokio::main]` then drops the runtime, which waits for running `spawn_blocking` work — the `SpawnByCwd` / `SpawnProfile` / `Spawn` creates (`connection_core.rs`). A create not yet inserted when the second `shutdown_all` ran finishes after the data-folder lock is released, and its roster writes (last failure ADR-0172, the `auto_restore` raise, the notice fingerprint record) land then. A daemon started in that window (ADR-0352 decision 2 does not hold back 「데몬 켜기」 during a stop) could load `agents.json` and have it overwritten by the old process. The child itself still dies with the old process's Job.
+- **Doc gap:** ADR-0352's "the single-instance guard holds `daemon.json` for the daemon's life" and the `lib.rs` comment hold for `run()`'s life, not the process's.
+- **Next:** drain or refuse in-flight creates before the guard drops (or hold the guard until the runtime is gone); fix the ADR-0352 wording either way.
+
+### T-99. A spawn that arrives while the daemon is stopping leaves an asleep agent with a last-failure mark
+- **Status:** recorded, not planned · pre-existing · found 2026-11-10 by the lifecycle-axis review of the master merge (`bb062838`).
+- **Problem:** ADR-0352 keeps the main link open during shutdown, so a WS `SpawnByCwd` or bus `agent.spawn` / `agent.spawnInto` whose child is killed mid-activation by `shutdown_all` takes the `CreatedAsleep` path and registers an asleep ad-hoc agent with a last-failure mark that survives a restart, although the cause was the stop. Master's `SpawnProfile` wake gets the same mark. No daemon-wide gate refuses creates: `AgentManager.shutting_down` is set first in `shutdown_all` but read only by the finish hook and the reaper; the per-connection `stopping` (T-97) cannot serve.
+- **Decision so far:** not refused — the CLAUDE.md principle 「최소한만 막기」 (block only what breaks a run or is a security hole); a misleading mark is neither.
+- **Next:** only if it bites — refuse creates once `shutting_down` is set, or skip the last-failure mark when the kill came from shutdown.
+
+### T-106. S25 step 7 asset-library — review findings recorded, not fixed
+- **Status:** recorded, not planned — each would add a condition, state or mechanism without a real case (user 2026-11-12: 「조건이 많아지는것도 버그가 끼어들 틈이 있어서.」). Found by the step-7 code reviews; each unit's commit message lists them (P5 `4d920305` · P6 `72effa1d` · P7 `0525a5b5` · P8 `f42d8538` · P9 `d445f03e`). Child TRD `docs/process/S25-preset-library/trd-asset-library.md` §13.
+- **Findings** (all in `crates/engram-dashboard-asset-library/src/`; none reproduced — code reading):
+  - P6 `folder.rs`: a worker's failure answer for an **advisory** ask is stored in the `LaunchIo` (stored answers are meant to be real op answers); an error on the one look past the listing cap counts as "more entries" (the listing is marked truncated), not as a failed read (telling them apart needs a new branch); `Instant` overflow with huge waits → T-105.
+  - P7 `lib.rs`: the `list` safety net on an unknown folder walks that folder's subtree on every `list` until a refresh, and answers no subfolder lines for it; `RefreshReport.changed` counts racy re-reads whose bytes are identical.
+  - P8 `lib.rs` · `resolve.rs`: the root status and the catalog are read under two lock takes — a root change in between pairs an older root state with the newer catalog (a read computation only); skill collection is quadratic; `ListRow.state` carries no preset line problems; a file the scan could never read stays ① (not ②) in the read entrances.
+  - P9 `launch.rs`: an unanswered project-marker stat reads as "no marker"; `remove_tree` and the sweep root check are path-based (TOCTOU — boot time, Engram's own folder); a source replaced by a folder gives `Failed`, not `Stale`, on Windows.
+  - P3 / P5 hand-over, checked 2026-11-13 (`catalog.rs` `yaml_item`): a successful parse wins over `sniff_kind` only for presets — a `kind` the line scan reads as unknown (`!!str preset`, an anchor, a block scalar) is parsed as a preset, so the same spellings of `settings` fail, and a `kind` only inside a flow mapping (`{kind: preset}`) reads as `Absent` (not listed).
+- **Next:** revisit one when a real case shows; otherwise none.
+
+### T-117. S25 step 9a library edit — review findings recorded, not fixed
+- **Status:** recorded, not planned (user 2026-11-19: 「그냥 미뤄.」). Found by the step-9a code reviews; the U3 (`6aae4b76`) and U4 (`bda7d849`) commit messages list them. Step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md`.
+- **Findings** (all in `crates/engram-dashboard-asset-library/src/`; code reading, none reproduced):
+  - U3 `agent_edit.rs` `agent_edit`: every agent-preset edit stats the library root before its change, even when the agent has no library preset (the stat is used only when one is attached). A root on an unresponsive share delays that edit by up to `IO_LIMIT` (5 s); outside every lock, so no other request waits. Fix shape: stat only when a library preset is attached — known only inside the change, so the order changes. Re-judge when step 10a routes the commands.
+  - U3 `lib.rs` `plug_profile_edit`: the second-plug branch (warn, ignore) has no test; production plugs once.
+  - U4 `relink.rs` part (b): the "other missing targets" judgement covers items and folders, the tests only items (coder's note, fix round 1).
+- **Re-judged at step 10a (2026-11-20):** the root stat on every agent-preset edit stays as is (step-10a TRD B16).
+- **Next:** revisit one when a real case shows; otherwise none.
+
 ## Minor feature · cleanup
+
+### T-107. S25 step 7 asset-library — test names that overclaim, placements no test pins, two log lines not reworded
+- **Status:** not started · found by the step-7 code reviews and QA (child TRD `docs/process/S25-preset-library/trd-asset-library.md` §13).
+- **Problem:** (1) `validate.rs` `check_skill_runs_the_port_with_the_library_parser` promises more than it proves (its doc says so — P4 review, batched); (2) the `listed_at` real-`FsStore` test in `store.rs` survived its mutation in P5 QA — the order is caught by two other tests, its comment says so, the name should say what it pins; (3) P9: the merge test cannot prove the handed-off job waited on the held write lock (P7's blocking write is unchanged); (4) P9: folder-instruction placement for a folder in a nested preset (it goes right after the nested preset's own lines) and for a folder repeated across presets is not pinned by a test (round cap); (5) P9's log wording pass (user 2026-11-13 — `docs/reference/logging-conventions.md` 「Format」) did not reach two P7 debug lines in `gate.rs`: 「라이브러리 늦은 합치기: 읽은 뒤 세대가 움직여 버렸다」 (the late merge) and 「라이브러리 훑기: 훑는 사이 변경 세대가 움직여 다시 훑는다」 (the scan retry) — found by the step-7 doc-pass review.
+- **Next:** rename (1) and (2); add the two placement tests (4) — test-only follow-ups. The two log lines (5) go with the English batch (T-108).
+
+### T-108. Convert the existing Korean log messages to English (one batch)
+- **Status:** not started · user decision 2026-11-13: 「로그는 그냥 영어.」 → 「대신에 서술이 아니라 누구나 알아볼 수 있게 심플하게 구성해야겠지.」 → 「규약을 바꿔. … 어쨋든 지시서 바꿔 나중에 이부분 영어로 한꺼번에 변경은 할거야.」 The convention (`docs/reference/logging-conventions.md` 「Format」) and `CLAUDE.md` 「언어」 changed the same day; the existing lines were left for this batch.
+- **Problem:** log messages are now one short line in English, plain and simple, code names over descriptions, no narrative prose. Most existing `tracing` calls still carry Korean text. Count (2026-11-13, working tree of `v0.5.0/feat/preset-library`): main's script estimate was ~620 calls; a re-count of `error!` / `warn!` / `info!` / `debug!` / `trace!` calls (bare or `tracing::`) whose argument list contains Hangul, multi-line aware, comment lines skipped, `*.rs` under `crates/` and `src-tauri/src/` (inline `#[cfg(test)]` modules included, `tests/` folders and `target/` excluded) gives **765 of 909** — `src-tauri/src` 319 · agent 215 · daemon 178 · messaging 32 · asset-library 17 · base 3 · platform 1. The count includes Hangul anywhere in the call (fields as well as the message). Single-line `rg '\b(error|warn|info|debug|trace)!\(.*[가-힣]' -g '*.rs' crates src-tauri/src` finds only 230, because most calls span lines. Includes the two `gate.rs` debug lines of T-107 (5).
+- **Next:** one batch on its own branch: rewrite each message to the English rule (levels, fields and targets unchanged; identifiers stay in fields). Re-count first with a multi-line-aware scan like the one above, and check tests that assert on log text (e.g. the tracing-capture tests) in the same change.
+
+### T-92. The codex real-terminal cwd guard repeats the cmd metachar set
+- **Status:** not started · found 2026-11-10 by the S25 step 6 code review (the cwd-guard delta).
+- **Problem:** `backend/codex/cmdline.rs` `cwd_reaches_codex_unchanged` (in `launch.rs` until S25 step 7 P2 moved it into one helper shared by `materialize` and the port's `working_folder_blocks`) writes `& ^ | < >` as a literal instead of using the platform `CMD_UNSAFE_CHARS` (`crates/engram-dashboard-platform/src/shell.rs`), so a change to the platform set (e.g. `!` — T-101) would not reach it. There is also no separate test row for `>`.
+- **Next:** expose the set (or a space-aware helper) from `platform::shell` and use it in the guard; add the `>` row.
+
+### T-93. The codex live test L5 leaves its temporary folder on every run
+- **Status:** not started · found 2026-11-10 by the S25 step 6 QA (main recycled the leftovers by hand).
+- **Problem:** `crates/engram-dashboard-agent/tests/codex_launch_live.rs` L5 cannot remove its temporary folder when the test drops it — os error 32, a codex child process still holds it. Each codex-lane run leaves one folder under the temp directory.
+- **Next:** wait for (or kill) the codex child before the cleanup, or retry the removal briefly.
+
+### T-119. A JSON array argument from Windows PowerShell 5.1 loses its inner quotes
+- **Status:** not started — pre-existing, found by the step-10a live check (2026-11-20).
+- **What:** `engram preset.add --items '["rules/a.md"]'` run from Windows PowerShell 5.1 reaches `engram.exe` as `[rules/a.md]` and the CLI refuses it `BAD_ARGS` ("declared a JSON array"); Git Bash passes it. Every list argument the help teaches is affected, and `agent.resolve --targets` already was. An agent whose shell is PS 5.1 (likely codex on Windows) hits it.
+- **Options then:** the CLI accepts a bracketed list without quotes for string arrays, or the help shows a PS-safe spelling, or arguments from a file / stdin.
+
+### T-118. Improve the agent priming's content
+- **Status:** waiting for trigger — after S25 step 10a (user 2026-11-19: 「해당 문서도 나중에 개선하긴 해야되는데 어쨋든 현재는 기존 포맷 맞춰서 진행해」).
+- **What:** `builtin/instructions/priming.md` — 10a translates it to English in its existing format and adds the library pointer lines (step-10a TRD §12 O1 · O2); rewriting its content is left for later.
+- **Weigh then:** the codex terminal command-line bound on the priming length (asset-library `builtin.rs` test).
+
+### T-116. Drop the CI Hangul check once the English habit has settled
+- **Status:** waiting for trigger — after S25 (user 2026-11-19: 「초반에만 좀 적용하다가 나중에 배자」, a light note, not a decision to act now).
+- **What:** the `gates` step 「Hangul check」 in `.github/workflows/ci.yml` runs `node scripts/check-hangul.mjs` (ADR-0383, master S38). Removing it amends ADR-0383.
+- **Weigh then:** keeping it costs `hangul-ok` markers on intentional Korean fixtures and user quotes; dropping it loses the only guard against workers writing Korean code text from Korean briefs. Count how often the gate fired during S25 before deciding.
+
+### T-100. CLAUDE.md 「최소한만 막기」 — add the follow-up rule
+- **Status:** waiting for trigger — the next CLAUDE.md revision (user 2026-11-10: record it as feedback, do not edit CLAUDE.md now).
+- **Proposal:** append to the 「설계 원칙」 line 「최소한만 막기」 (added in `9969ac60`) the sentence 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 — from the user's follow-up 2026-11-10 「일단 너무 막지 말고 추가로 막는건 실제로 불편하면 막자고」.
+- **Next:** when CLAUDE.md is next revised, ask the user once and add it.
 
 ### T-71. Do not point at tracking numbers — just delete when resolved
 - **Old number:** T-67 — moved on 2026-10-23 because the number overlapped with the slot docking branch.

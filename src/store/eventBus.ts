@@ -22,16 +22,6 @@ export async function refreshProfiles(): Promise<void> {
   }
 }
 
-/** Preset list refresh (ADR-0061, mirror of refreshProfiles): pulled at boot + reconnect resync; post-create/delete updates come from the PresetListUpdated broadcast. */
-export async function refreshPresets(): Promise<void> {
-  try {
-    const presets = await agentClient.listPresets()
-    useAgentStore.getState().setPresets(presets)
-  } catch (err) {
-    console.warn('[eventBus] refreshPresets failed:', err)
-  }
-}
-
 /**
  * Resync right after a reconnect (Q2): only on a connected *re*-transition (first connection excluded — `lastState` guard in initEventBus). Pulls the authoritative lists and rewrites the store.
  * ★This getAgents is **the main path** of output recovery (ADR-0046 amend)★: a disconnected view settles into detached and re-attaches only when its agent shows up in that roster (protocolClient.observeRoster). Without the roster pull, slots never attach after a reconnect — do not remove it as "just a list redraw".
@@ -47,7 +37,6 @@ async function resyncAfterReconnect(): Promise<void> {
     console.warn('[eventBus] resync getAgents failed:', err)
   }
   await refreshProfiles()
-  await refreshPresets()
 }
 
 export function initEventBus(): Promise<void> {
@@ -125,12 +114,6 @@ export function initEventBus(): Promise<void> {
       unlistenFns.push(
         agentClient.onProfileListUpdated(profiles => {
           useAgentStore.getState().setProfiles(profiles)
-        }),
-      )
-
-      unlistenFns.push(
-        agentClient.onPresetListUpdated(presets => {
-          useAgentStore.getState().setPresets(presets)
         }),
       )
 

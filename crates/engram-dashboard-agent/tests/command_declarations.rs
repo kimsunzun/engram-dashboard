@@ -1,10 +1,19 @@
 //! Declaration golden — pins the name set and the error set so they do not silently diverge (TRD §7 「declaration derivation」).
 
 use engram_dashboard_agent::commands::{
-    AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
-    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentResolveArgs, AgentSpawnArgs, UsageGetArgs,
-    UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    AgentAttachPresetArgs, AgentCancelQueuedInputArgs, AgentDetachPresetArgs, AgentDuplicateArgs,
+    AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs, AgentNewArgs,
+    AgentPresetsArgs, AgentRenameArgs, AgentReorderPresetsArgs, AgentResolveArgs,
+    AgentSetWorkspaceArgs, AgentSpawnArgs, LibraryAddMountArgs, LibraryCopyArgs, LibraryDeleteArgs,
+    LibraryEmptyTrashArgs, LibraryFoldersArgs, LibraryListArgs, LibraryListTrashArgs,
+    LibraryMoveArgs, LibraryNewFileArgs, LibraryNewFolderArgs, LibraryReadArgs, LibraryRefreshArgs,
+    LibraryRelinkArgs, LibraryRelocateMountArgs, LibraryRemoveMountArgs, LibraryRenameArgs,
+    LibraryRenameMountArgs, LibraryRestoreArgs, LibraryStatusArgs, PresetAddArgs, PresetCheckArgs,
+    PresetGetArgs, PresetPreviewFolderArgs, PresetRemoveArgs, PresetReorderArgs, PresetSaveArgs,
+    PresetSetBackendArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    SHELL_ONLY,
 };
+use engram_dashboard_command::DeadlineClass;
 use engram_dashboard_command::{
     command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of, Effect, ErrorCode,
     COMMON_ERRORS,
@@ -18,15 +27,48 @@ fn declared_names_are_the_cli_verbs() {
     assert_eq!(
         names,
         vec![
+            "agent.attachPreset",
             "agent.cancelQueuedInput",
+            "agent.detachPreset",
+            "agent.duplicate",
             "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
             "agent.move",
             "agent.new",
+            "agent.presets",
             "agent.rename",
+            "agent.reorderPresets",
             "agent.resolve",
+            "agent.setWorkspace",
             "agent.spawn",
+            "library.addMount",
+            "library.copy",
+            "library.delete",
+            "library.emptyTrash",
+            "library.folders",
+            "library.list",
+            "library.listTrash",
+            "library.move",
+            "library.newFile",
+            "library.newFolder",
+            "library.read",
+            "library.refresh",
+            "library.relink",
+            "library.relocateMount",
+            "library.removeMount",
+            "library.rename",
+            "library.renameMount",
+            "library.restore",
+            "library.status",
+            "preset.add",
+            "preset.check",
+            "preset.get",
+            "preset.previewFolder",
+            "preset.remove",
+            "preset.reorder",
+            "preset.save",
+            "preset.setBackend",
             "usage.get",
             "usage.refresh"
         ]
@@ -43,7 +85,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 7 // two were added in v6 — `agent.interrupt` · `usage.refresh`
+            == 30 // two were added in v6 — `agent.interrupt` · `usage.refresh`; twenty-three in v9 — `library.addMount` · `removeMount` · `relocateMount` · `renameMount` · `newFolder` · `newFile` · `relink`, `preset.add` · `remove` · `reorder` · `setBackend` · `save`, `agent.attachPreset` · `detachPreset` · `reorderPresets`, `agent.setWorkspace` · `duplicate`, `library.move` · `rename` · `copy` · `delete` · `restore` · `emptyTrash`
     );
 }
 
@@ -81,7 +123,168 @@ fn the_resolve_verb_is_a_read_declared_in_generation_8() {
     let resolve = spec_of("agent.resolve").expect("declaration");
     assert_eq!(resolve.effect, Effect::Read);
     assert_eq!(resolve.since, 8);
-    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 8);
+}
+
+/// The twelve library commands (ADR-0386 · ADR-0400 decision 7) — all in catalog 9 and ordinary (no launch deadline);
+/// the seven that change the library or `library.json` are `Write`. ★`library.refresh` is `Read`★: it changes only the in-memory catalog and a
+/// rerun is harmless, while a `Write` would make a same-id retry answer `ALREADY_APPLIED` with no report.
+#[test]
+fn the_library_verbs_are_declared_in_generation_9_with_their_effect() {
+    let cases = [
+        ("library.status", Effect::Read),
+        ("library.addMount", Effect::Write),
+        ("library.removeMount", Effect::Write),
+        ("library.relocateMount", Effect::Write),
+        ("library.renameMount", Effect::Write),
+        ("library.folders", Effect::Read),
+        ("library.refresh", Effect::Read),
+        ("library.list", Effect::Read),
+        ("library.read", Effect::Read),
+        ("library.newFolder", Effect::Write),
+        ("library.newFile", Effect::Write),
+        ("library.relink", Effect::Write),
+    ];
+    for (name, effect) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// The seven file and trash commands (ADR-0419) — all in catalog 9; the trash view is `Read` and ordinary (its reads are
+/// bounded by the read budget), the six that move, copy, delete, restore or empty are `Write` with the launch deadline
+/// class (a copy across volumes or a large emptying can outlast the ordinary wait). `on_conflict` advertises its three
+/// words.
+#[test]
+fn the_file_verbs_are_declared_in_generation_9_with_their_effect_and_deadline() {
+    let cases = [
+        ("library.move", Effect::Write, DeadlineClass::Launch),
+        ("library.rename", Effect::Write, DeadlineClass::Launch),
+        ("library.copy", Effect::Write, DeadlineClass::Launch),
+        ("library.delete", Effect::Write, DeadlineClass::Launch),
+        ("library.listTrash", Effect::Read, DeadlineClass::Ordinary),
+        ("library.restore", Effect::Write, DeadlineClass::Launch),
+        ("library.emptyTrash", Effect::Write, DeadlineClass::Launch),
+    ];
+    for (name, effect, deadline) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, deadline, "{name}");
+    }
+    for name in ["library.move", "library.copy"] {
+        let schema: serde_json::Value =
+            serde_json::from_str(spec_of(name).expect("declaration").args_schema)
+                .expect("args schema");
+        assert_eq!(
+            schema["properties"]["on_conflict"]["anyOf"][0]["enum"],
+            json!(["Overwrite", "Skip", "KeepBoth"]),
+            "{name}: {schema}"
+        );
+    }
+}
+
+/// The eight preset commands (ADR-0386) — all in catalog 9 and ordinary; the five that rewrite a preset file are
+/// `Write`, the view, the draft check and the folder preview are `Read`.
+#[test]
+fn the_preset_verbs_are_declared_in_generation_9_with_their_effect() {
+    let cases = [
+        ("preset.get", Effect::Read),
+        ("preset.check", Effect::Read),
+        ("preset.add", Effect::Write),
+        ("preset.remove", Effect::Write),
+        ("preset.reorder", Effect::Write),
+        ("preset.setBackend", Effect::Write),
+        ("preset.save", Effect::Write),
+        ("preset.previewFolder", Effect::Read),
+    ];
+    for (name, effect) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// The four agent-preset commands (ADR-0386) — all in catalog 9 and ordinary; the view is `Read`, the three edits
+/// `Write`.
+#[test]
+fn the_agent_preset_verbs_are_declared_in_generation_9_with_their_effect() {
+    let cases = [
+        ("agent.presets", Effect::Read),
+        ("agent.attachPreset", Effect::Write),
+        ("agent.detachPreset", Effect::Write),
+        ("agent.reorderPresets", Effect::Write),
+        ("agent.setWorkspace", Effect::Write),
+        ("agent.duplicate", Effect::Write),
+    ];
+    for (name, effect) in cases {
+        let spec = spec_of(name).unwrap_or_else(|| panic!("{name} declaration"));
+        assert_eq!(spec.effect, effect, "{name}");
+        assert_eq!(spec.since, 9, "{name}");
+        assert_eq!(spec.deadline, DeadlineClass::Ordinary, "{name}");
+    }
+}
+
+/// `preset.reorder`'s `section` is a plain string — the handler checks the word (ADR-0400 decision 22) — so the
+/// command's summary lists the six lowercase words; `preset.previewFolder` advertises the two modes.
+#[test]
+fn the_preset_section_words_are_documented_and_the_preview_mode_is_a_closed_vocabulary() {
+    let schema = |name: &str| -> serde_json::Value {
+        serde_json::from_str(spec_of(name).expect("declaration").args_schema).expect("args schema")
+    };
+    let section = &schema("preset.reorder")["properties"]["section"];
+    assert_eq!(section["type"], json!("string"), "{section}");
+    assert!(section.get("enum").is_none(), "{section}");
+    let summary = spec_of("preset.reorder").expect("declaration").summary;
+    for word in [
+        "presets",
+        "instructions",
+        "skills",
+        "hooks",
+        "settings",
+        "folders",
+    ] {
+        assert!(
+            summary.contains(&format!("`{word}`")),
+            "{word} missing from: {summary}"
+        );
+    }
+    assert_eq!(
+        schema("preset.previewFolder")["properties"]["mode"]["anyOf"][0]["enum"],
+        json!(["Terminal", "StreamJson"])
+    );
+}
+
+/// The library list filter advertises the closed kind vocabulary — `SkillFile` is its own word beside `Skill`, and
+/// `HookFile` beside `Hook` (ADR-0420).
+#[test]
+fn the_library_list_advertises_the_seven_kinds() {
+    let schema: serde_json::Value =
+        serde_json::from_str(spec_of("library.list").expect("declaration").args_schema)
+            .expect("args schema");
+    let kinds = &schema["properties"]["kinds"]["anyOf"][0]["items"]["enum"];
+    assert_eq!(
+        kinds,
+        &json!([
+            "Instruction",
+            "Skill",
+            "SkillFile",
+            "Hook",
+            "HookFile",
+            "Settings",
+            "Preset"
+        ]),
+        "{schema}"
+    );
+}
+
+/// The generation is 9 now — `agent.new`'s `preset` field and `store.presets` in the `agent.list` reply were removed (TRD
+/// S25-preset-library §5-2 1). It is bumped by hand when a declaration changes, so the value is pinned here.
+#[test]
+fn the_catalog_generation_is_9() {
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 9);
 }
 
 /// ★The input-moving command list holds only this crate's `Write` declarations★ — a missing name or a query slipping in would make the
@@ -99,6 +302,22 @@ fn every_input_affecting_name_is_a_declared_write_verb() {
     assert!(INPUT_AFFECTING.contains(&"agent.cancelQueuedInput"));
     assert!(INPUT_AFFECTING.contains(&"agent.interrupt"));
     assert!(!INPUT_AFFECTING.contains(&"agent.listQueuedInputs"));
+}
+
+/// ★The shell-only list holds only this crate's `Write` declarations outside the `agent` family★ (ADR-0419) — a name the
+/// table does not declare would leave the gate guarding nothing, and an `agent.<verb>` name would be the one name
+/// `/control/agent` can also build.
+#[test]
+fn every_shell_only_name_is_a_declared_write_verb_outside_the_agent_family() {
+    assert_eq!(SHELL_ONLY, ["library.emptyTrash"]);
+    for name in SHELL_ONLY {
+        let spec = COMMAND_SPECS
+            .iter()
+            .find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("{name} must be a declaration of this block"));
+        assert_eq!(spec.effect, Effect::Write, "{name}");
+        assert!(!name.starts_with("agent."), "{name}");
+    }
 }
 
 #[test]
@@ -119,11 +338,8 @@ fn error_sets_are_golden() {
         declared("agent.spawn"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
     );
-    // If the `preset` pointing misses, the target is absent — so the create verb also advertises NOT_FOUND.
-    assert_eq!(
-        declared("agent.new"),
-        vec![ErrorCode::NotFound, ErrorCode::Conflict]
-    );
+    // No field points at a target, so there is no absent target — the create verb does not advertise NOT_FOUND.
+    assert_eq!(declared("agent.new"), vec![ErrorCode::Conflict]);
     assert_eq!(
         declared("agent.rename"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
@@ -148,6 +364,89 @@ fn error_sets_are_golden() {
     // A backend without a field = NOT_FOUND (the same code as wire ⟳).
     assert_eq!(declared("usage.get"), vec![ErrorCode::NotFound]);
     assert_eq!(declared("usage.refresh"), vec![ErrorCode::NotFound]);
+    // ADR-0379: `Unavailable` and `Conflict` refusals are CONFLICT; `library.status` refuses only from a daemon with
+    //   no library; a refresh never refuses (a bad spelling is INVALID_ARGUMENT, from the table's set).
+    for name in [
+        "library.status",
+        "library.addMount",
+        "library.folders",
+        "library.list",
+    ] {
+        assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
+    // ADR-0400 decision 7: removing, relocating or renaming a mount that is not registered is NOT_FOUND
+    //   `mount-not-found`.
+    for name in [
+        "library.removeMount",
+        "library.relocateMount",
+        "library.renameMount",
+    ] {
+        assert_eq!(
+            declared(name),
+            vec![ErrorCode::NotFound, ErrorCode::Conflict],
+            "{name}"
+        );
+    }
+    assert_eq!(declared("library.refresh"), vec![]);
+    // A preset view or edit answers NOT_FOUND for a missing preset file; the draft check and the folder preview never
+    //   do (CONFLICT `library-unavailable` only — the preview only from a daemon that runs no library).
+    for name in [
+        "preset.get",
+        "preset.add",
+        "preset.remove",
+        "preset.reorder",
+        "preset.setBackend",
+        "preset.save",
+    ] {
+        assert_eq!(
+            declared(name),
+            vec![ErrorCode::NotFound, ErrorCode::Conflict],
+            "{name}"
+        );
+    }
+    for name in ["preset.check", "preset.previewFolder"] {
+        assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
+    // ADR-0419: a file command answers per item — a missing item is its row, not the call's NOT_FOUND; the whole call
+    //   refuses CONFLICT (no library, a stale root generation, an unconfirmed plan, the built-in mount); the trash view
+    //   only from a daemon that runs no library.
+    for name in [
+        "library.move",
+        "library.rename",
+        "library.copy",
+        "library.delete",
+        "library.listTrash",
+        "library.restore",
+    ] {
+        assert_eq!(declared(name), vec![ErrorCode::Conflict], "{name}");
+    }
+    // ADR-0419: emptying refuses only `nothing-to-empty` itself (INVALID_ARGUMENT, from the table's set); CONFLICT from a
+    //   daemon that runs no library, UNSUPPORTED `shell-only` from the daemon's gate off the socket.
+    assert_eq!(
+        declared("library.emptyTrash"),
+        vec![ErrorCode::Conflict, ErrorCode::Unsupported]
+    );
+    // The agent-preset commands resolve `target` (absent = NOT_FOUND · same name = CONFLICT); their refusals are
+    //   NOT_FOUND (the agent deleted meanwhile) and CONFLICT.
+    for name in [
+        "library.read",
+        "library.newFolder",
+        "library.newFile",
+        "library.relink",
+        "agent.presets",
+        "agent.attachPreset",
+        "agent.detachPreset",
+        "agent.reorderPresets",
+        // ADR-0386: the agent not found or deleted meanwhile; `workspace-locked`, the roster ceiling.
+        "agent.setWorkspace",
+        "agent.duplicate",
+    ] {
+        assert_eq!(
+            declared(name),
+            vec![ErrorCode::NotFound, ErrorCode::Conflict],
+            "{name}"
+        );
+    }
 }
 
 /// ★The advertised set must be everything that can actually happen★ — argument rejection and internal failure happen in any command.
@@ -206,14 +505,13 @@ fn required_matches_what_deserialization_actually_demands() {
         (
             "agent.new",
             parses::<AgentNewArgs>,
-            // Carries both mutually exclusive fields — this comparison measures **deserialization**; the combination constraint is the handler's
-            //   (same place as target/cwd of `agent.spawn`).
             json!({
                 "cwd": "C:/work/x",
-                "preset": "bookmark-1",
                 "name": "beta",
                 "output_format": "StreamJson",
                 "backend": "Claude",
+                "presets": ["p.yaml"],
+                "root_generation": 3,
             }),
         ),
         (
@@ -225,6 +523,16 @@ fn required_matches_what_deserialization_actually_demands() {
             "agent.move",
             parses::<AgentMoveArgs>,
             json!({ "target": "alpha", "parent": null }),
+        ),
+        (
+            "agent.setWorkspace",
+            parses::<AgentSetWorkspaceArgs>,
+            json!({ "target": "alpha", "cwd": "C:/work/y" }),
+        ),
+        (
+            "agent.duplicate",
+            parses::<AgentDuplicateArgs>,
+            json!({ "target": "alpha" }),
         ),
         (
             "agent.listQueuedInputs",
@@ -250,6 +558,180 @@ fn required_matches_what_deserialization_actually_demands() {
             "usage.refresh",
             parses::<UsageRefreshArgs>,
             json!({ "backend": "Codex" }),
+        ),
+        ("library.status", parses::<LibraryStatusArgs>, json!({})),
+        (
+            "library.addMount",
+            parses::<LibraryAddMountArgs>,
+            json!({ "name": "team", "path": "C:/lib", "create": true }),
+        ),
+        (
+            "library.removeMount",
+            parses::<LibraryRemoveMountArgs>,
+            json!({ "mount": "team" }),
+        ),
+        (
+            "library.relocateMount",
+            parses::<LibraryRelocateMountArgs>,
+            json!({ "mount": "team", "path": "C:/lib", "create": true }),
+        ),
+        (
+            "library.renameMount",
+            parses::<LibraryRenameMountArgs>,
+            json!({ "mount": "team", "to": "shared", "yes": true, "root_generation": 7 }),
+        ),
+        ("library.folders", parses::<LibraryFoldersArgs>, json!({})),
+        (
+            "library.refresh",
+            parses::<LibraryRefreshArgs>,
+            json!({ "folder": "rules" }),
+        ),
+        (
+            "library.list",
+            parses::<LibraryListArgs>,
+            json!({ "folder": "rules", "query": "x", "kinds": ["Preset"] }),
+        ),
+        (
+            "library.read",
+            parses::<LibraryReadArgs>,
+            json!({ "path": "rules/a.md" }),
+        ),
+        (
+            "library.newFolder",
+            parses::<LibraryNewFolderArgs>,
+            json!({ "parent": "rules", "name": "team", "root_generation": 3 }),
+        ),
+        (
+            "library.newFile",
+            parses::<LibraryNewFileArgs>,
+            json!({ "folder": "rules", "name": "a", "kind": "Markdown", "root_generation": 3 }),
+        ),
+        (
+            "library.relink",
+            parses::<LibraryRelinkArgs>,
+            json!({ "from": "a.md", "to": "b/a.md", "root_generation": 3 }),
+        ),
+        (
+            "preset.get",
+            parses::<PresetGetArgs>,
+            json!({ "path": "p.yaml" }),
+        ),
+        (
+            "preset.check",
+            parses::<PresetCheckArgs>,
+            json!({
+                "path": "p.yaml", "presets": [], "instructions": [{ "path": "a.md", "backend": "codex" }],
+                "skills": [], "settings": [], "folders": ["C:/f"],
+            }),
+        ),
+        (
+            "preset.add",
+            parses::<PresetAddArgs>,
+            json!({
+                "path": "p.yaml", "items": ["a.md"], "backend": "codex", "folders": ["C:/f"],
+                "after": "b.md", "root_generation": 3,
+            }),
+        ),
+        (
+            "preset.remove",
+            parses::<PresetRemoveArgs>,
+            json!({ "path": "p.yaml", "items": ["a.md"], "folders": ["C:/f"], "root_generation": 3 }),
+        ),
+        (
+            "preset.reorder",
+            parses::<PresetReorderArgs>,
+            json!({
+                "path": "p.yaml", "section": "skills", "order": ["a", "b"], "base_rev": "r",
+                "root_generation": 3,
+            }),
+        ),
+        (
+            "preset.setBackend",
+            parses::<PresetSetBackendArgs>,
+            json!({ "path": "p.yaml", "items": ["a.md"], "backend": "codex", "root_generation": 3 }),
+        ),
+        (
+            "preset.save",
+            parses::<PresetSaveArgs>,
+            json!({
+                "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                "folders": [], "base_rev": "r", "root_generation": 3,
+            }),
+        ),
+        (
+            "preset.previewFolder",
+            parses::<PresetPreviewFolderArgs>,
+            json!({ "folder": "C:/f", "backend": "codex", "mode": "Terminal" }),
+        ),
+        (
+            "library.move",
+            parses::<LibraryMoveArgs>,
+            json!({
+                "paths": ["a.md"], "to_folder": "rules", "on_conflict": "KeepBoth", "yes": true,
+                "detach_refs": true, "plan_digest": "d", "root_generation": 3,
+            }),
+        ),
+        (
+            "library.rename",
+            parses::<LibraryRenameArgs>,
+            json!({
+                "path": "a.md", "name": "b.md", "yes": true, "detach_refs": true, "plan_digest": "d",
+                "root_generation": 3,
+            }),
+        ),
+        (
+            "library.copy",
+            parses::<LibraryCopyArgs>,
+            json!({ "paths": ["a.md"], "to_folder": "rules", "on_conflict": "Skip", "root_generation": 3 }),
+        ),
+        (
+            "library.delete",
+            parses::<LibraryDeleteArgs>,
+            json!({
+                "paths": ["a.md"], "yes": true, "detach_refs": true, "plan_digest": "d",
+                "root_generation": 3,
+            }),
+        ),
+        (
+            "library.listTrash",
+            parses::<LibraryListTrashArgs>,
+            json!({}),
+        ),
+        (
+            "library.restore",
+            parses::<LibraryRestoreArgs>,
+            json!({
+                "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "a.md" }],
+                "keep_both": true, "root_generation": 3,
+            }),
+        ),
+        (
+            "library.emptyTrash",
+            parses::<LibraryEmptyTrashArgs>,
+            json!({
+                "bundles": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "rows": ["a.md"] }],
+                "rows": [{ "mount": "library", "bundle": "20261123T081500Z-abc123", "path": "b.md" }],
+            }),
+        ),
+        (
+            "agent.presets",
+            parses::<AgentPresetsArgs>,
+            json!({ "target": "alpha" }),
+        ),
+        (
+            "agent.attachPreset",
+            parses::<AgentAttachPresetArgs>,
+            json!({ "target": "alpha", "presets": ["p.yaml"], "after": "q.yaml", "root_generation": 3 }),
+        ),
+        (
+            "agent.detachPreset",
+            parses::<AgentDetachPresetArgs>,
+            json!({ "target": "alpha", "presets": ["p.yaml"], "yes": true, "root_generation": 3 }),
+        ),
+        (
+            "agent.reorderPresets",
+            parses::<AgentReorderPresetsArgs>,
+            json!({ "target": "alpha", "order": ["p.yaml"], "base_rev": "r", "root_generation": 3 }),
         ),
     ];
 
@@ -287,25 +769,31 @@ fn required_matches_what_deserialization_actually_demands() {
 
 /// ★**The advertisement** carries the way to register without a dialog★ (ADR-0156 — the advertisement is the usage).
 ///
-/// The caller is the LLM and sees only this schema: it must carry that the folder is decided two ways (`cwd`·`preset`) and that the other
-/// two fields are **closed vocabularies**, for it to choose its own arguments.
-/// ★Neither folder-deciding field is required alone★ — 「exactly one」 is a **combination** the schema cannot express (the handler decides;
-/// the rejection text points at both fields).
-/// ★`backend` is required alone (2026-09-08)★ — the silent claude default was removed, and `required` must carry that so the caller knows
+/// The caller is the LLM and sees only this schema: it must carry that the working folder (`cwd`) and the backend are required and
+/// that the two fields are **closed vocabularies**, for it to choose its own arguments.
+/// ★`backend` is required (2026-09-08)★ — the silent claude default was removed, and `required` must carry that so the caller knows
 ///   before calling.
 #[test]
-fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabularies() {
+fn the_create_verb_advertises_its_required_fields_and_closed_vocabularies() {
     let schema: serde_json::Value =
         serde_json::from_str(spec_of("agent.new").expect("declaration").args_schema)
             .expect("args schema");
     let properties = schema["properties"].as_object().expect("properties object");
 
-    for field in ["cwd", "preset", "name", "output_format", "backend"] {
-        assert!(
-            properties.contains_key(field),
-            "the {field} field is not in the advertisement"
-        );
-    }
+    let mut fields: Vec<&str> = properties.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        vec![
+            "backend",
+            "cwd",
+            "name",
+            "output_format",
+            "presets",
+            "root_generation"
+        ],
+        "advertised fields: {schema}"
+    );
     let required: Vec<&str> = schema["required"]
         .as_array()
         .expect("required array")
@@ -314,8 +802,8 @@ fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabula
         .collect();
     assert_eq!(
         required,
-        vec!["backend"],
-        "the only field required alone is `backend`: {schema}"
+        vec!["cwd", "backend"],
+        "the required fields are `cwd` · `backend`: {schema}"
     );
 
     // A closed vocabulary is carried as **a value list** — a bare name would not let the caller choose what to put.

@@ -5,7 +5,7 @@
 // ADR-0012
 
 use engram_dashboard_protocol::{
-    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport, UsageLimitSnapshot,
+    AgentId, AgentInfo, AgentProfile, AgentStatus, RestoreReport, UsageLimitSnapshot,
 };
 use tauri::Emitter;
 
@@ -26,9 +26,6 @@ pub(crate) trait DaemonEvents: Send + Sync {
     fn restore_result(&self, report: &RestoreReport);
 
     fn profile_list_updated(&self, profiles: &[AgentProfile]);
-
-    /// ADR-0061
-    fn preset_list_updated(&self, presets: &[Preset]);
 
     /// One usage snapshot — once per daemon broadcast. `labels` = the windows that receive it (those with a usage slot — never empty), `socket_epoch` = marker of the socket it came from (ADR-0195 · the receiver forgets the revision only when this grows). Choosing the window is the receiving webview's job — it is sent to all webviews.
     fn usage_limits_updated(
@@ -83,10 +80,6 @@ impl DaemonEvents for TauriEmitter {
         let _ = self.0.emit("profile-list-updated", profiles);
     }
 
-    fn preset_list_updated(&self, presets: &[Preset]) {
-        let _ = self.0.emit("preset-list-updated", presets);
-    }
-
     fn usage_limits_updated(
         &self,
         snapshot: &UsageLimitSnapshot,
@@ -116,7 +109,6 @@ impl DaemonEvents for NoDaemonEvents {
     fn status_changed(&self, _agent_id: &AgentId, _status: &AgentStatus, _epoch: u32) {}
     fn restore_result(&self, _report: &RestoreReport) {}
     fn profile_list_updated(&self, _profiles: &[AgentProfile]) {}
-    fn preset_list_updated(&self, _presets: &[Preset]) {}
     fn usage_limits_updated(
         &self,
         _snapshot: &UsageLimitSnapshot,

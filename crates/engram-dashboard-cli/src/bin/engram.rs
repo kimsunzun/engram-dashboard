@@ -60,6 +60,9 @@
 //!   a string if the slot is a string. The call path first fetches the discovery list, reads that command's
 //!   schema, and moves values only by the declared type (`bind_invoke_args`). An unknown flag is rejected **without a round trip**,
 //!   listing all declared slots.
+//! ★A name the list does not hold is still called★ (ADR-0419): it goes out with no schema (every value a string) and the daemon
+//!   answers — its unknown-name refusal for a typo, its `shell-only` refusal for a name it leaves out of the list on purpose. Only
+//!   when the list read dropped rows does the CLI refuse the name itself (the name may be one of those rows).
 //! ★The `help` blob is opaque (ADR-0156)★: a client-registered entry **may be arbitrary text, not JSON**; one unreadable blob does not
 //!   sink the list — that line keeps only its name.
 
@@ -71,8 +74,9 @@
 //!   Order = shape parsing → credentials → (if `--body-stdin`) stdin → request.
 //! ★stdout is not guaranteed to be JSON★: a non-2xx body also passes through as is (a 401 gives an empty line; a proxy can produce HTML)
 //!   **on purpose** — a rejection body may carry correction JSON the sending agent parses to self-correct.
-//!   Only rejections this CLI emits **itself** (BAD_ARGS·NO_TOKEN·UNKNOWN_COMMAND·transport failure·PROTOCOL_MISMATCH) are always envelope
-//!   JSON, and the help and `commands` screens are plain text. Decide on the **exit code**, not the stdout shape.
+//!   Only rejections this CLI emits **itself** (BAD_ARGS·NO_TOKEN·transport failure·PROTOCOL_MISMATCH, and UNKNOWN_COMMAND for
+//!   `commands <name>` of an unlisted name or a call whose list read dropped rows) are always envelope JSON, and the help
+//!   and `commands` screens are plain text. Decide on the **exit code**, not the stdout shape.
 //! ★A failure to reach the daemon takes one path whatever the command (`fail_unreached`)★: connect · write · read · silence limit ·
 //!   truncation and the 404 for an unknown route print the same envelope + exit 1. The 404 is `PROTOCOL_MISMATCH`:
 //!   the daemon returns a 404 only for a path outside its list, with an empty body, so the daemon is a different build from this CLI.
@@ -117,8 +121,9 @@ use engram_dashboard_agent::types::{
     AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
     CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_HELP_ROUTE,
     CLI_HELP_SCREEN_KEY, CLI_HELP_TOPIC_KEY, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
-    RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
+    LAUNCH_RELAY_CALLER_WAIT_SECS, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
 };
+use engram_dashboard_command::DeadlineClass;
 
 /// The control socket's **silence limit** (short because the daemon is local) — if the daemon is dead, fail fast so the agent retries/reports.
 ///
@@ -133,6 +138,12 @@ use engram_dashboard_agent::types::{
 /// sends nothing before its answer (source of truth: the constant's doc on the agent side).
 // ADR-0161
 const TIMEOUT: Duration = Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS);
+
+/// The silence window for a launch verb — `engram agent spawn` and the call form of a launch-class command (the class
+/// read from its catalog entry, never from a list of names here). One value whether the daemon answers the launch
+/// itself or relays it: the end of the launch-wait chain (agent `types.rs`).
+// ADR-0369
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(LAUNCH_RELAY_CALLER_WAIT_SECS);
 
 /// The help verb. `--help`/`-h` are also accepted in the same slot — `is_help_token`.
 const HELP_VERB: &str = "help";
@@ -242,7 +253,7 @@ fn read_credentials() -> Result<(String, String), (&'static str, &'static str)> 
 fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
     let route = command.route();
     let request_body = command.request_body();
-    match post_json(base, route, token, &request_body) {
+    match post_json(base, route, token, &request_body, command.silence_window()) {
         Ok(resp) => {
             // Print the body even for non-2xx — it carries correction JSON that the sending agent parses.
             println!("{}", resp.body);
@@ -263,7 +274,13 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
 /// Ask the daemon for one help screen and print it. The word is carried unchecked — the vocabulary belongs to the daemon.
 // ADR-0285
 fn run_help(base: &str, token: &str, topic: Option<&str>) -> i32 {
-    match post_json(base, CLI_HELP_ROUTE, token, &help_request_body(topic)) {
+    match post_json(
+        base,
+        CLI_HELP_ROUTE,
+        token,
+        &help_request_body(topic),
+        TIMEOUT,
+    ) {
         Ok(resp) => {
             let verdict = exit_code_for_help_response(resp.status, &resp.body);
             println!("{}", verdict.stdout);
@@ -494,6 +511,16 @@ impl Command {
             Command::Send(_) => "/control/send",
             Command::Status { .. } | Command::Pending => "/control/messages",
             Command::Agent(_) => "/control/agent",
+        }
+    }
+
+    /// How long this verb's socket may stay silent — a launch waits [`LAUNCH_TIMEOUT`], every other verb [`TIMEOUT`].
+    fn silence_window(&self) -> Duration {
+        match self {
+            Command::Agent(ParsedAgent::Spawn { .. }) => LAUNCH_TIMEOUT,
+            Command::Send(_) | Command::Status { .. } | Command::Pending | Command::Agent(_) => {
+                TIMEOUT
+            }
         }
     }
 
@@ -1530,7 +1557,7 @@ fn read_catalog(v: &serde_json::Value) -> Result<CatalogRead, String> {
 ///   to stdout is **byte-indistinguishable** from that command's own rejection — on a single 401 the caller (LLM)
 ///   starts fixing perfectly good arguments. One line says which request failed.
 fn fetch_catalog(base: &str, token: &str, for_command: Option<&str>) -> Result<CatalogRead, i32> {
-    let resp = match post_json(base, ROUTE_COMMANDS, token, "{}") {
+    let resp = match post_json(base, ROUTE_COMMANDS, token, "{}", TIMEOUT) {
         Ok(r) => r,
         Err(e) => {
             let code = fail_unreached(&e);
@@ -1622,19 +1649,26 @@ fn run_catalog(base: &str, token: &str, request: &ParsedCatalog) -> i32 {
 ///
 /// ★Even with `callable:false` it is called as is★: the daemon is the source of truth for reachability; cutting it here would leave that
 ///   refusal unobserved.
+/// ★So is a name the list does not hold★ (ADR-0419): it is posted with no schema (values as strings, the ordinary silence window) and the
+///   daemon answers — its unknown-name refusal for a typo, its `shell-only` refusal for a command the list omits on purpose; a local
+///   refusal would keep that answer from the caller. Except when the list read dropped rows: the name may be one of them, so it stays
+///   a local refusal rather than a call with unscreened flags. After the daemon's `UNKNOWN_COMMAND` one stderr line names
+///   `engram commands` — the daemon's words name only its route.
+// ADR-0419
 fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
     let read = match fetch_catalog(base, token, Some(&invoke.name)) {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let Some(entry) = read.entries.iter().find(|e| e.name == invoke.name) else {
+    let entry = read.entries.iter().find(|e| e.name == invoke.name);
+    if entry.is_none() && read.skipped > 0 {
         print_error(
             ERR_UNKNOWN_COMMAND,
             &unknown_command_hint(&invoke.name, read.skipped),
         );
         return EXIT_FAILED;
-    };
-    let blob = parse_help_blob(&entry.help);
+    }
+    let blob = entry.and_then(|entry| parse_help_blob(&entry.help));
     let declared = blob.as_ref().and_then(declared_args_of);
     let args = match bind_invoke_args(&invoke.name, declared.as_deref(), &invoke.tokens) {
         Ok(a) => a,
@@ -1656,9 +1690,22 @@ fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
         "request_id": new_request_id(),
     })
     .to_string();
-    match post_json(base, ROUTE_CALL, token, &body) {
+    match post_json(
+        base,
+        ROUTE_CALL,
+        token,
+        &body,
+        call_silence_window(blob.as_ref()),
+    ) {
         Ok(resp) => {
             println!("{}", resp.body);
+            if serde_json::from_str::<serde_json::Value>(&resp.body)
+                .is_ok_and(|v| v.get("code").and_then(|c| c.as_str()) == Some(ERR_UNKNOWN_COMMAND))
+            {
+                eprintln!(
+                    "{CLI_EXE_NAME}: run `{CLI_EXE_NAME} {CLI_VERB_COMMANDS}` for every name the daemon lists"
+                );
+            }
             // ★Measure by the declared return — the material came in the same round trip★: the lenient query decider would give
             //   `agent.new` exit 0 on `{"status":"ok"}` while **the old family gives exit 2 for the same command and response**;
             //   opposite verdicts by entrance would make the caller record something that did not happen as fact (the symptom ADR-0132
@@ -1742,6 +1789,16 @@ fn exit_code_for_call_response(
     EXIT_MALFORMED_SUCCESS
 }
 
+/// The silence window of a call — [`LAUNCH_TIMEOUT`] when the catalog entry `run_invoke` already fetched states the
+/// launch class, [`TIMEOUT`] otherwise (no entry blob · no class · an unknown word).
+// ADR-0369
+fn call_silence_window(entry: Option<&serde_json::Value>) -> Duration {
+    match entry.map(DeadlineClass::of_schema_entry) {
+        Some(DeadlineClass::Launch) => LAUNCH_TIMEOUT,
+        Some(DeadlineClass::Ordinary) | None => TIMEOUT,
+    }
+}
+
 /// The `required` list of a schema fragment (strings only).
 fn required_keys(schema: &serde_json::Value) -> Vec<String> {
     schema
@@ -1761,6 +1818,8 @@ fn required_keys(schema: &serde_json::Value) -> Vec<String> {
 /// If rows were dropped, one of them **may have been the name being looked for** (a registration missing `callable`, like
 ///   `{"name":"slot.assign","help":"x"}`, is enough). Asserting "there is no such name" would make the caller (LLM) give up for good
 /// a command that exists — all the more as this wording goes in a machine-read envelope. We say only what we know.
+/// Its callers: `commands <name>`, and a call only when the list read dropped rows — any other unlisted name is posted and the
+/// daemon answers it ([`run_invoke`]).
 fn unknown_command_hint(name: &str, skipped: usize) -> String {
     if skipped > 0 {
         return format!(
@@ -2398,13 +2457,17 @@ struct HttpResponse {
 
 /// For local plain-text HTTP only (no TLS — the daemon is plain-text on 127.0.0.1).
 ///
-/// ★Route parameterization (D)★: send and query share server, auth and framing, so only the path is swapped (a per-verb HTTP client would
-///   triplicate truncation handling and header conventions).
+/// ★Route parameterization (D)★: send and query use the same server, same auth and same framing, so only the path is swapped
+///   (if the HTTP client were duplicated per verb, truncation handling and header conventions would exist in three copies).
+///
+/// `silence_window` = the read/write timeout of the socket ([`TIMEOUT`] · [`LAUNCH_TIMEOUT`] — a silence window, not a
+/// total budget).
 fn post_json(
     base: &str,
     route: &str,
     token: &str,
     request_body: &str,
+    silence_window: Duration,
 ) -> Result<HttpResponse, SendError> {
     let (host, port) = parse_host_port(base).map_err(SendError::Connect)?;
     let path = format!("{}{route}", base_path(base));
@@ -2412,8 +2475,8 @@ fn post_json(
     let mut stream = TcpStream::connect((host.as_str(), port))
         .map_err(|e| SendError::Connect(format!("connect {host}:{port} failed: {e}")))?;
     stream
-        .set_read_timeout(Some(TIMEOUT))
-        .and_then(|_| stream.set_write_timeout(Some(TIMEOUT)))
+        .set_read_timeout(Some(silence_window))
+        .and_then(|_| stream.set_write_timeout(Some(silence_window)))
         .map_err(|e| SendError::Connect(format!("set timeout failed: {e}")))?;
 
     // Content-Length is required (so the server knows the body boundary), Connection: close (ends after the response → the server
@@ -3443,6 +3506,55 @@ mod tests {
         }
     }
 
+    /// ADR-0369: `agent spawn` (no catalog on its route) waits the launch wait; every other group verb the shared 10 s.
+    #[test]
+    fn agent_spawn_waits_the_launch_wait_and_every_other_verb_the_shared_one() {
+        assert_eq!(
+            LAUNCH_TIMEOUT,
+            Duration::from_secs(LAUNCH_RELAY_CALLER_WAIT_SECS)
+        );
+        assert!(LAUNCH_TIMEOUT > TIMEOUT);
+        let window = |args: &[&str]| {
+            Command::Agent(parse_agent_command(args).expect("parse")).silence_window()
+        };
+        assert_eq!(window(&["agent", "spawn", "w"]), LAUNCH_TIMEOUT);
+        assert_eq!(
+            window(&["agent", "spawn", "--cwd", "C:/work"]),
+            LAUNCH_TIMEOUT
+        );
+        for args in [
+            &["agent", "list"][..],
+            &["agent", "new", "--cwd", "C:/work"],
+            &["agent", "rename", "a", "b"],
+            &["agent", "move", "a", "--parent", "none"],
+        ] {
+            assert_eq!(window(args), TIMEOUT, "{args:?}");
+        }
+        assert_eq!(Command::Pending.silence_window(), TIMEOUT);
+    }
+
+    /// ADR-0369: a call's wait comes from the class in the catalog entry already fetched — a launch-class entry waits the
+    /// launch wait; an ordinary entry, an unknown word or an unreadable blob the shared one.
+    #[test]
+    fn a_call_waits_by_the_class_its_catalog_entry_states() {
+        let entry = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+        assert_eq!(
+            call_silence_window(Some(&entry(
+                r#"{"name":"agent.spawnInto","deadline":"Launch"}"#
+            ))),
+            LAUNCH_TIMEOUT
+        );
+        assert_eq!(
+            call_silence_window(Some(&entry(r#"{"name":"tab.create"}"#))),
+            TIMEOUT
+        );
+        assert_eq!(
+            call_silence_window(Some(&entry(r#"{"name":"x.y","deadline":"Someday"}"#))),
+            TIMEOUT
+        );
+        assert_eq!(call_silence_window(None), TIMEOUT);
+    }
+
     /// Per-verb wire (route + body) — the whole family rides one route.
     fn agent_wire(args: &[&str]) -> (&'static str, serde_json::Value) {
         let cmd = Command::Agent(parse_agent_command(args).expect("parse"));
@@ -3961,11 +4073,17 @@ mod tests {
     }
 
     /// ★`help <word>` carries the typed word as is★ — if one word is wired to another word, the daemon gives a different screen.
-    ///   That the four screens differ from each other and from the table of contents is measured by the same-named half on the daemon side
+    ///   That the five screens differ from each other and from the table of contents is measured by the same-named half on the daemon side
     ///   (`control::help`).
     #[test]
     fn each_group_word_is_carried_as_typed() {
-        for word in [CLI_GROUP_MAIL, CLI_GROUP_AGENT, "window", "settings"] {
+        for word in [
+            CLI_GROUP_MAIL,
+            CLI_GROUP_AGENT,
+            "window",
+            "settings",
+            "library",
+        ] {
             assert_eq!(help_word(&["help", word]).as_deref(), Some(word));
         }
     }
@@ -4052,8 +4170,9 @@ mod tests {
     // ADR-0092
     #[test]
     fn the_priming_pointer_lines_parse_as_help_requests() {
-        let priming = std::fs::read_to_string(help_repo_root().join("prompts/agent-priming.md"))
-            .expect("priming file exists");
+        let priming =
+            std::fs::read_to_string(help_repo_root().join("builtin/instructions/priming.md"))
+                .expect("priming file exists");
         let pointer = format!("{CLI_EXE_NAME} help ");
         assert_eq!(
             help_word(&["help"]),

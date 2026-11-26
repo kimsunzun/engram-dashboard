@@ -47,7 +47,6 @@ const agentStoreState = vi.hoisted(() => ({
   agentsLoaded: false,
   profiles: [] as unknown[],
   profilesLoaded: false,
-  presets: [] as unknown[],
 }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: Object.assign(
@@ -56,7 +55,7 @@ vi.mock('../../store/agentStore', () => ({
   ),
 }))
 
-// ── Native folder dialog stub (ADR-0064) — slot.createAgentHere / preset.add / agentlist.createAgent call
+// ── Native folder dialog stub (ADR-0064) — slot.createAgentHere / agentlist.createAgent call
 //    @tauri-apps/plugin-dialog open. The return (path/null) is swapped per test. ──
 const dialogMock = vi.hoisted(() => ({ open: vi.fn(async () => null as string | null) }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -85,10 +84,6 @@ vi.mock('../slot/DomSlot', () => ({
   ),
 }))
 
-// ── PresetPalette stub (ADR-0060/0061) — only checks the preset_palette variant mounts, without preset CRUD wiring ──
-vi.mock('../slot/PresetPalette', () => ({
-  default: () => <div data-testid="preset-palette" />,
-}))
 // ── UsageSlot stub — only checks the usage variant mounts and the toggles and slot coordinates passed down (the screen is UsageSlot.test's job) ──
 vi.mock('../slot/UsageSlot', () => ({
   default: ({
@@ -299,20 +294,12 @@ describe('ViewLayoutRenderer — slot branch', () => {
     expect(overlay).toBeUndefined()
   })
 
-  // ── ADR-0060/0061/0062: preset_palette·agent_list variant → each real renderer mounts (hasContent=true) ──
-  it('content.type=preset_palette slot → PresetPalette mounts', () => {
-    render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'preset_palette' })} focusedSlotId={null} />)
-    expect(screen.getByTestId('preset-palette')).toBeTruthy()
-    // The preset palette is real content (hasContent=true) — there must be no centering flex or the palette layout breaks.
-    //   Alignment is carried by the border element (ADR-0227) — the empty-slot positive pair below guards that the targeting is right.
-    expect(borderOf('s1').style.justifyContent).not.toBe('center')
-    expect(borderOf('s1').style.overflow).toBe('hidden')
-  })
-
+  // ── ADR-0060/0062: agent_list variant → real renderer mounts (hasContent=true) ──
   it('content.type=agent_list slot (Slice C) → AgentList mounts (hasContent=true)', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
     expect(screen.getByTestId('agent-list')).toBeTruthy()
     // A real renderer, not the empty placeholder — there must be no centering flex or the list layout breaks.
+    //   Alignment is carried by the border element (ADR-0227) — the empty-slot positive pair below guards that the targeting is right.
     expect(emptyIcons()).toHaveLength(0)
     expect(borderOf('s1').style.justifyContent).not.toBe('center')
     expect(borderOf('s1').style.overflow).toBe('hidden')
@@ -818,7 +805,7 @@ describe('ViewLayoutRenderer — split branch (shell rectangles)', () => {
 })
 
 // ── ★click-to-focus gate (control-slot focus excluded — ADR-0066 refinement)★ ─────────────────────────────
-// ★What this suite blocks★: a click on the tree (agent_list) or palette (preset_palette) slot pane must not call focusSlot
+// ★What this suite blocks★: a click on the pane of the tree (agent_list) or another control slot must not call focusSlot
 // (they are not work slots, so not focus targets). That was the root of the pre-existing UX bug where the following right-click "open" took that control slot as target and
 // overwrote the tree with an agent terminal. Content slots (empty/agent) call focusSlot as before.
 //
@@ -881,11 +868,6 @@ describe('ViewLayoutRenderer — click-to-focus gate (control-slot focus exclude
     expect(focusSlotSpy).not.toHaveBeenCalled()
   })
 
-  it('preset_palette (palette) slot click → focusSlot not called (control slot = focus excluded)', () => {
-    clickSlot({ type: 'preset_palette' })
-    expect(focusSlotSpy).not.toHaveBeenCalled()
-  })
-
   // The focus gate is an allowlist (isContentSlot), so a new variant is excluded without being singled out.
   it('usage slot click → focusSlot not called', () => {
     clickSlot({ type: 'usage', show_claude: true, show_codex: true })
@@ -896,7 +878,7 @@ describe('ViewLayoutRenderer — click-to-focus gate (control-slot focus exclude
 // ── ★Right-click unified context menu (§5, ADR-0064)★ ─────────────────────────────────────────────────
 // ★What this suite actually blocks★: right-clicking a canvas slot mounts the unified SlotContextMenu (the output of buildSlotMenu(content.type))
 // and each item click flows (viewId, slotId, agentId) through its command.run(ctx) to viewStore/agentClient.
-// Menu items = command id references (ADR-0064) — content-specific (kill agent · open tree/palette · create) +
+// Menu items = command id references (ADR-0064) — content-specific (kill agent · open tree · create) +
 // common '*' (split horizontal/vertical · detach popup · clear · close) coexist in one menu.
 //
 // Strategy: spies for split/closeSlot/assignAgent/setSlotContent/moveSlotToWindow are injected into the real viewStore
@@ -983,7 +965,7 @@ describe('ViewLayoutRenderer — right-click context menu (§5 single control su
     expect(screen.queryByText('에이전트 트리 열기')).toBeNull()
     openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
-    expect(screen.getByText('프리셋 팔레트 열기')).toBeTruthy()
+    expect(screen.getByText('사용량 한도 열기')).toBeTruthy()
     // ADR-0067
     expect(screen.queryByText('에이전트 생성')).toBeNull()
   })
@@ -1090,9 +1072,9 @@ describe('ViewLayoutRenderer — right-click context menu (§5 single control su
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-lc2', 'top_bottom')
   })
 
-  // ★A left-click opens no menu for any slot type (ADR-0144)★: a menu over terminal input, tree node selection or palette item
+  // ★A left-click opens no menu for any slot type (ADR-0144)★: a menu over terminal input or tree node selection
   //   clicks would cover the click meaning those slots have. An empty slot now follows the same rule (that
-  //   case is verified with focusSlot by the click-to-focus gate suite above) and the three cases below are the control
+  //   case is verified with focusSlot by the click-to-focus gate suite above) and the two cases below are the control
   //   slots' share ('split horizontally' is a common item independent of content kind, so it serves as the discriminator of "did a menu appear").
   it('a left-click on an agent (terminal) slot does not open a menu', () => {
     seedAgents(agentInfo('a-lc', false))
@@ -1104,14 +1086,6 @@ describe('ViewLayoutRenderer — right-click context menu (§5 single control su
   it('a left-click on an agent_list (tree) slot does not open a menu', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('slot-tree-lc', { type: 'agent_list' })} focusedSlotId={null} />)
     leftClickSlot('slot-tree-lc', 20, 30)
-    expect(screen.queryByText('가로 분할')).toBeNull()
-  })
-
-  it('a left-click on a preset_palette (palette) slot does not open a menu', () => {
-    render(
-      <ViewLayoutRenderer node={contentSlotNode('slot-pal-lc', { type: 'preset_palette' })} focusedSlotId={null} />,
-    )
-    leftClickSlot('slot-pal-lc', 20, 30)
     expect(screen.queryByText('가로 분할')).toBeNull()
   })
 
@@ -1141,13 +1115,6 @@ describe('ViewLayoutRenderer — right-click context menu (§5 single control su
     openNewContentFlyout()
     fireEvent.click(screen.getByText('에이전트 트리 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-T', { type: 'agent_list' })
-  })
-
-  it('"open preset palette" (flyout) → setSlotContent(viewId, slotId, {type:preset_palette})', () => {
-    openMenu('slot-U', null)
-    openNewContentFlyout()
-    fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
-    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U', { type: 'preset_palette' })
   })
 
   it('"open usage limits" (flyout) → setSlotContent(viewId, slotId, {type:usage, both companies on})', () => {
@@ -1243,8 +1210,8 @@ describe('ViewLayoutRenderer — right-click context menu (§5 single control su
     fireEvent.contextMenu(frameOf('slot-F'))
     expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
     openNewContentFlyout()
-    fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
-    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-F', { type: 'preset_palette' })
+    fireEvent.click(screen.getByText('에이전트 트리 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-F', { type: 'agent_list' })
   })
 
   // ── ★"detach to popup" = common (ADR-0064)★: shown regardless of content kind including empty (ADR-0228) and moves (viewId, slotId). ──

@@ -56,10 +56,15 @@ pub use roster::{OwnerLookup, OwnerLookupSource, Roster, RosterEntry};
 pub use route::route;
 pub use spec::{
     catalog_json, command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of,
-    CommandDecl, CommandSpec, Effect, LinkedSpec, COMMON_ERRORS,
+    CommandDecl, CommandSpec, DeadlineClass, Effect, LinkedSpec, COMMON_ERRORS,
 };
 pub use table::{blocking_handler, CommandFuture, CommandHandler, CommandTable, TableError};
 
 /// Used by the declaration macro when it builds linker-collected items — keeps consuming crates from depending on `inventory` directly.
 #[doc(hidden)]
 pub use inventory;
+
+/// The declaration macro's `Json` field type expands to `serde_json::Value` through this path, so a declaring
+/// crate need not depend on `serde_json` itself.
+#[doc(hidden)]
+pub use serde_json;

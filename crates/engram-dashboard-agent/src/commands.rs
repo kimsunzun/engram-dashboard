@@ -1,17 +1,24 @@
 //! `agent.*` commands — live next to the code that works with **declaration and body as one set** (`AgentManager`) (ADR-0155).
 //!
-//! ★This table is the real entry of the control verbs — **two** surfaces★: the CLI's `/control/agent` route (finds `{verb}` as
-//!   `agent.<verb>`) and the envelope the client issues on the command bus. Both pass through the daemon's one common entry
-//!   (daemon `control/commands.rs`), so this file's return shapes, error codes and notification counts are exactly the response of `engram
-//!   agent …` and the answer the LLM receives on the bus.
+//! ★This table is the real entry of the control verbs — **three** surfaces★: the CLI's `/control/agent` route (finds `{verb}` as
+//!   `agent.<verb>`), its full-name route `/control/call` (`engram <name> …`) and the envelope the client issues on the command bus.
+//!   All pass through the daemon's one common entry (daemon `control/commands.rs`), so this file's return shapes, error codes and
+//!   notification counts are exactly the response of `engram agent …` / `engram <name> …` and the answer the LLM receives on the bus.
 //! ★Hosted by the daemon, declared by the core★ (ADR-0029 + TRD §2-3).
 //!
 //! ★`usage.*` (the two usage-limit verbs) are declared here too — their bodies are not★: this crate produces the vocabulary
 //!   (`AgentBackend` word · row types), so the declaration lives here (ADR-0155 decision 1) and the daemon's usage service plugs the real
 //!   thing in through [`UsageCommandHost`] (TRD S21 usage-limit-slot §3 #18).
 //!
+//! ★`library.*`, `preset.*` and the agent-preset commands are declared here too — their bodies are asset-library's★: this
+//!   crate owns the command vocabulary (ADR-0155 decision 1 · ADR-0311); the handlers and the third port,
+//!   [`LibraryCommandHost`], are in `library_commands.rs` (one `declare_commands!` block per module, so the
+//!   declarations stay in this block). `agent.new`'s `presets` are judged through that port too. `library.emptyTrash` is
+//!   declared in the same block but is shell only ([`SHELL_ONLY`]): the daemon's entrance refuses it to every control route
+//!   and the control route's list omits it (ADR-0419).
+//!
 //! Entry points: [`make_table`](fn.make_table.html) (assembly) · [`AgentCommandHost`](trait.AgentCommandHost.html) (injection seam) ·
-//!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port).
+//!   [`UsageCommandHost`](trait.UsageCommandHost.html) (usage port) · [`LibraryCommandHost`] (library port).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,9 +28,14 @@ use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode, RetryMode,
 };
 
-use crate::manager::{AgentManager, RenameOutcome};
-use crate::persistence::AGENTS_FILE;
-use crate::preset::PresetId;
+use crate::launch::{notice_text, LaunchBlocked, Notice, Reason};
+use crate::library_commands::{coded_error, refusal_error, PortClass, PortRefusal};
+pub use crate::library_commands::{LibraryCommandHost, PresetSection};
+use crate::manager::{
+    Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome, WorkspaceRefusal,
+    WorkspaceSet,
+};
+use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
 // An alias telling the core enum apart from the declaration vocabulary of the same name below.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
@@ -37,6 +49,25 @@ use crate::usage::UsageVendorKey;
 // ★Success responses are flat (user decision 2026-08-13)★: each command declares its return, so there is no reason to wrap one more
 //   layer `{"agent":{…}}`.
 declare_commands! {
+    // v9 (2026-11-01): the old presets (working-folder bookmarks) were removed — `agent.new` lost its `preset` field
+    //   and `cwd` became required (`NOT_FOUND` left its advertised errors), and the `agent.list` answer lost
+    //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
+    //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
+    //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
+    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`). The nine `library.*`, the eight
+    //   `preset.*` and the four agent-preset commands come in this generation too, as do `agent.setWorkspace` and
+    //   `agent.duplicate`, and `agent.new` gains `presets`, `root_generation` and the answer's `skipped` (ADR-0386).
+    //   Library mounts (ADR-0400 decision 20) land in it too: `library.list` lost its `builtins` argument and the
+    //   answer's `builtins` rows (the built-in mount `engram` is listed as a mount), and every preset view (`preset.get`
+    //   and the preset edits' answers) gains `notices`. Then the mount commands: `library.status` answers `mounts` (its
+    //   `root`, `root_setting`, `state` and `state_why` left), `library.addMount` · `removeMount` · `relocateMount` are
+    //   added and `library.setRoot` is removed (ADR-0400 decision 7), and `preset.reorder`'s `section` became a
+    //   lowercase word (ADR-0400 decision 22). `library.renameMount` is added in it too (ADR-0400 decision 12). So are
+    //   the file and trash commands `library.move` · `rename` · `copy` · `delete` · `listTrash` · `restore`, the five
+    //   writes with the launch deadline class (ADR-0419), and `library.emptyTrash`, shell only (`SHELL_ONLY`) and with
+    //   the launch deadline class too. Hook components (ADR-0420) land in it as well: `LibraryKind` gains `Hook` ·
+    //   `HookFile`, `library.folders` rows gain `hook`, every preset view gains `hooks`, `preset.save` /
+    //   `preset.check` take an optional `hooks` and `preset.reorder` the section word `hooks`.
     // v8: `agent.resolve` added (ADR-0307 · TRD S28 §6).
     // v7: the answer of `agent.list` gained `store` — the state of the two registry stores (agents · presets) (ADR-0291 R17 · D6).
     // v6: `agent.interrupt` (ADR-0237) · `usage.get`·`usage.refresh` (TRD S21 usage-limit-slot §1-6) added; two branches each raised it to
@@ -50,7 +81,7 @@ declare_commands! {
     // v3: the `backend` of `agent.new` went from optional → required — a breaking change removing the silent claude default (reason: that
     //   field's doc). This number is diagnostic; the receiving side does not refuse by it
     //   (the RegisterCommands branch of `connection_core`).
-    catalog_version: 8;
+    catalog_version: 9;
 
     /// One row of the roster.
     struct AgentRow {
@@ -103,10 +134,9 @@ declare_commands! {
         file_version: Option<u64>,
     }
 
-    /// The two roster stores — `agents` (agents.json · agent roster) · `presets` (presets.json · path bookmarks).
+    /// The roster store — `agents` (the profile file `agent-profiles.json` · agent roster).
     struct RosterStoreRow {
         agents: StoreStatusRow,
-        presets: StoreStatusRow,
     }
 
     /// The backend to run the new agent on — ★the values accepted today are the two `Claude` and `Codex`★ (codex came in
@@ -116,7 +146,7 @@ declare_commands! {
     /// runs with them** — so the field is left open but the values are narrowed to the confirmed two (so the contract's **shape** does not
     /// change later).
     /// ★The worth of adding a variant is decided by **whether its pair already exists**★: the run command (`AgentCommand`)
-    /// **is written as is into `agents.json`** with `#[serde(tag = "kind")]`, and an old build meeting an unknown kind treats that
+    /// **is written as is into the profile file** with `#[serde(tag = "kind")]`, and an old build meeting an unknown kind treats that
     /// file **as one lump** as damaged and **comes up with an empty roster** — the first save copies that file aside to `.corrupt` and overwrites it
     /// (persistence `FileProfileStore::load` · builds older than that move it to `.corrupt-<ms>` at load). So
     /// adding here a backend **not yet** in `AgentCommand` is a migration that breaks disk compatibility, and adding a backend whose pair **already
@@ -216,10 +246,603 @@ declare_commands! {
         Rejected,
     }
 
+    /// A launch notice (`agent.spawn`) — something the launch left out, on purpose or because it was not found
+    /// (`missing-item-skipped`, `library-unavailable-skipped`). Not a refusal: the launch went ahead.
+    struct LaunchNoticeRow {
+        /// Fixed notice code.
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        /// Line in the file it names, or `null`.
+        line: Option<u32>,
+        /// The notice as one readable line.
+        text: String,
+    }
+
+    // ── Library (`library.*` — ADR-0386) ──────────────────────────────────────────────────────────────
+    // Every row is typed; `Json` holds only `args`, whose keys depend on `code`. The bodies are asset-library's,
+    //   reached through `library_commands::LibraryCommandHost`.
+
+    /// The kind of a library item — `SkillFile` is a skill folder's `SKILL.md`: it stands in for its skill, is listed
+    /// inside the skill folder, and `kinds` matches it only by `SkillFile`, never by `Skill`. `Hook` is a folder
+    /// holding a `hooks.json` (and no `SKILL.md`); `HookFile` is that `hooks.json`, matched only by `HookFile` in
+    /// the same way.
+    // ADR-0420
+    enum LibraryKind {
+        Instruction,
+        Skill,
+        SkillFile,
+        Hook,
+        HookFile,
+        Settings,
+        Preset,
+    }
+
+    /// What `library.newFile` makes — `Markdown` (an instruction, `.md`) | `Settings` | `Preset` (`.yaml`).
+    enum LibraryNewFileKind {
+        Markdown,
+        Settings,
+        Preset,
+    }
+
+    /// A reason — a fixed code, its arguments and the line in the file it names.
+    struct ReasonRow {
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// One library item.
+    struct ListRow {
+        /// Library path, starting with its mount's name (a skill or a hook: its folder; a built-in: `engram/…`).
+        path: String,
+        /// `null` = a broken file that claims no preset or settings kind (its reason is in `state`), or the one row of
+        /// a folder behind a link.
+        kind: Option<LibraryKind>,
+        /// A skill's name; a hook's folder name; a built-in's id; every other item's file name.
+        name: String,
+        /// Why it does not read — a broken file, a settings field refusal, a path through a link, a built-in whose
+        /// files are missing (`builtin-unavailable`). `null` = it reads.
+        state: Option<ReasonRow>,
+        /// Presets that reach it plus agents that attach it. A built-in counts only the Default slot: the agents whose
+        /// Default slot is on for `engram/default`, 0 for every other built-in.
+        references: u32,
+        /// An instruction's excerpt, a skill's description, the `description` of a hook's `hooks.json` or of a preset
+        /// or settings file; else empty.
+        description: String,
+    }
+
+    /// A plain subfolder line of `library.list`.
+    struct ListFolderRow {
+        path: String,
+        name: String,
+        /// A mount (a row of the library's top): `ok` | `missing` | `unreadable`, as last seen (no fresh check);
+        /// `null` = a folder inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be
+        /// read, yet its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
+        state: Option<String>,
+        /// Why a mount's `state` is not `ok`.
+        state_why: Option<String>,
+    }
+
+    /// One folder of `library.folders`.
+    struct LibraryFolderRow {
+        path: String,
+        name: String,
+        /// A skill folder (it holds a `SKILL.md`).
+        skill: bool,
+        /// A hook folder (it holds a `hooks.json` and no `SKILL.md`).
+        // ADR-0420
+        hook: bool,
+        /// A mount (a top folder): `ok` | `missing` | `unreadable`, as last seen (no fresh check); `null` = a folder
+        /// inside a mount. The built-in mount `engram` is `unreadable` when its folder cannot be read, yet its rows
+        /// stay as stand-ins and a launch goes on with `builtin-unavailable`.
+        state: Option<String>,
+        /// Why a mount's `state` is not `ok`.
+        state_why: Option<String>,
+    }
+
+    /// A mount a whole-library answer left out because it cannot be read. The built-in mount `engram` is named when its
+    /// folder cannot be read, yet its rows stay as stand-ins and a launch goes on with `builtin-unavailable`.
+    struct UnavailableMountRow {
+        mount: String,
+        /// `missing` | `unreadable`.
+        state: String,
+        why: String,
+    }
+
+    /// A reason tied to one library path.
+    struct PathReasonRow {
+        path: String,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// Where a refresh could not read — `path` `null` = the folder asked for could not be scanned at all (in no mount,
+    /// in the built-in mount, or a dot or temp name); items already read are kept.
+    struct RefreshErrorRow {
+        path: Option<String>,
+        why: String,
+    }
+
+    /// An agent that refers to a library item.
+    struct AgentRefRow {
+        id: String,
+        name: String,
+    }
+
+    /// One old → new pair a relink re-pointed.
+    struct RelinkPairRow {
+        from: String,
+        to: String,
+    }
+
+    /// Why a relink stopped after it had written something — the refusal it met, as a refusal would carry it.
+    struct RelinkStopRow {
+        /// The preset file whose read or write failed; `null` = the agents' rewrite failed.
+        path: Option<String>,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        /// The refusal as one readable line.
+        message: String,
+    }
+
+    // ── Files and trash (`library.move` … `library.restore` — ADR-0419) ──────────────────────────────────────
+    // ADR-0409
+    // ADR-0419
+    // One flat row per given path or trash row, in the order given: `status` = `done` | `skipped` | `conflict` |
+    //   `failed`. `done` fills the row's result fields; every other status fills `code` and `args` — the reason as the
+    //   service built it (a skip's code from `host.rs`), so a staging a copy left is named inside `args`.
+
+    /// How a move or copy answers a name taken at its destination — the entry there goes into its mount's trash and the
+    /// item takes the name | the item stays where it is | the item takes the next free `name (2)`, `name (3)` … name.
+    enum LibraryOnConflict {
+        Overwrite,
+        Skip,
+        KeepBoth,
+    }
+
+    /// A row of a mount's trash: its mount, its bundle, and its path inside the mount (as `library.listTrash` lists it).
+    struct TrashAddressRow {
+        mount: String,
+        bundle: String,
+        path: String,
+    }
+
+    /// One given path of a move or rename.
+    struct MoveItemRow {
+        /// As given.
+        path: String,
+        /// `done` | `skipped` | `conflict` | `failed`.
+        status: String,
+        /// `done`: the library path it is at now (a merged folder: the folder it merged into); else `null`.
+        to: Option<String>,
+        /// `done`: the entries an overwrite moved into their mount's trash, in move order; else empty.
+        trashed: Vec<TrashAddressRow>,
+        /// `done` across volumes: the trash row its original went to, in its own mount's trash; else `null`.
+        original: Option<TrashAddressRow>,
+        /// `done`, a merge: the entries left where they were, each with why; else empty.
+        left: Vec<PathReasonRow>,
+        /// Not `done`: the reason's code (a skip: `inside-given-folder` · `in-place` · `name-exists` ·
+        /// `name-taken-during-copy`); `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// One old → new pair a move's references followed. Apply the pairs in order: each maps what the pairs before it
+    /// made of a path.
+    struct MovePairRow {
+        from: String,
+        to: String,
+        /// Only `from` itself maps, nothing below it (a merge's emptied source folder).
+        exact: bool,
+    }
+
+    /// A git working tree the written or skipped preset files lie in, once per mount and tree.
+    struct GitTreeRow {
+        mount: String,
+        /// `true` = in a git working tree · `false` = in none · `null` = could not be told.
+        git: Option<bool>,
+        /// The folder holding its `.git` when `git` is `true`; else `null`.
+        top: Option<String>,
+    }
+
+    /// One given path of a copy.
+    struct CopyItemRow {
+        /// As given.
+        path: String,
+        /// `done` | `skipped` | `conflict` | `failed`.
+        status: String,
+        /// `done`: the library path of the copy; else `null`.
+        to: Option<String>,
+        /// `done`: the entry an overwrite moved into its mount's trash (none or one); else empty.
+        trashed: Vec<TrashAddressRow>,
+        /// Not `done`: the reason's code (a skip: `inside-given-folder` · `name-exists` · `name-taken-during-copy`);
+        /// `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// One given path of a delete.
+    struct DeleteItemRow {
+        /// As given.
+        path: String,
+        /// `done` | `skipped` | `failed`.
+        status: String,
+        /// `done`: the trash row it went to; else `null`.
+        trashed: Option<TrashAddressRow>,
+        /// Not `done`: the reason's code (a skip: `inside-given-folder`); `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// One given trash row of a restore.
+    struct RestoreItemRow {
+        mount: String,
+        bundle: String,
+        path: String,
+        /// `done` | `conflict` | `failed`.
+        status: String,
+        /// `done`: the library path it is back at (with `keep_both`, maybe `name (2)` …); else `null`.
+        to: Option<String>,
+        /// Not `done`: the reason's code; `done`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `done`.
+        args: Json,
+    }
+
+    /// Why part of a mount's trash was not listed or not touched — a reason code and its arguments.
+    struct TrashProblemRow {
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+    }
+
+    /// One row of a trash bundle.
+    struct TrashViewRow {
+        /// Its path inside the bundle — the item's path in its mount.
+        path: String,
+        /// The library path a restore puts it back at.
+        original: String,
+        /// `root` (a deleted item the bundle's record names — a folder is one row) | `found` (a file, link or empty
+        /// folder of a bundle with no readable record) | `other` (something else left in a bundle with a record).
+        kind: String,
+        /// `present` | `through_link` (a link lies on the way — left untouched) | `failed` (a check on the way
+        /// failed — `why`).
+        state: String,
+        /// `present`: `file` | `folder` | `link`; else `null`.
+        entry: Option<String>,
+        /// `failed`: why; else `null`.
+        why: Option<String>,
+        /// A staging a failed or partial copy left (or a found temp name) — shown, never restorable.
+        staging: bool,
+        /// The library path a staging was meant for, when the record names it; else `null`.
+        intended: Option<String>,
+        /// `library.restore` can take it: not `other`, not a staging, `present`, and `original` holds no dot or
+        /// temp name.
+        restorable: bool,
+    }
+
+    /// One bundle of a mount's trash — what one operation deleted there.
+    struct TrashBundleRow {
+        bundle: String,
+        /// When it was deleted, RFC 3339 UTC (`2026-11-23T08:15:00Z`).
+        deleted_at: String,
+        /// How its rows were found: `record` | `no_record` (its files and empty folders) | `record_unreadable` (the
+        /// same; `why`) | `unchecked` (the bundle could not be checked — no rows; `trouble`).
+        source: String,
+        /// `record_unreadable`: why; else `null`.
+        why: Option<String>,
+        /// Why some rows may be missing (a listing inside the bundle failed), or why an `unchecked` bundle has none.
+        trouble: Option<String>,
+        /// By path.
+        rows: Vec<TrashViewRow>,
+    }
+
+    /// One mount's trash.
+    struct MountTrashRow {
+        mount: String,
+        /// Why its trash could not be listed (`bundles` is then empty): `trash-unusable` `{mount, why}` (its `.trash`
+        /// is a link or not a folder) or `library-unavailable` `{mount, message}` (not read in time, or held as
+        /// overlapping another mount); `null` = listed.
+        problem: Option<TrashProblemRow>,
+        /// By id (oldest first).
+        bundles: Vec<TrashBundleRow>,
+    }
+
+    /// An empty-all address: one bundle of the trash view with the rows the view listed for it — a row it did not list
+    /// stays.
+    struct ListedBundleArg {
+        mount: String,
+        bundle: String,
+        /// The rows' paths inside the bundle, as the view listed them.
+        rows: Vec<String>,
+    }
+
+    /// One addressed trash row of an emptying.
+    struct EmptiedRow {
+        mount: String,
+        bundle: String,
+        path: String,
+        /// `gone` (it was there and is no longer) | `remaining` (it is still there — a folder row may be partly
+        /// emptied) | `not_found` (it was not there, or it is no row: a foreign bundle, a mount not registered, a path
+        /// that is no row of the bundle).
+        outcome: String,
+        /// Not `gone`: why — `remaining`: `library-write-failed` (the OS error code in `args.os_error`),
+        /// `path-through-link`, `inside-root`, `library-read-failed`, or why its bundle was not touched; `not_found`:
+        /// `not-found`. `gone`: `null`.
+        code: Option<String>,
+        /// The code's arguments (keys depend on `code`); `null` when `gone`.
+        args: Json,
+    }
+
+    /// One addressed bundle of an emptying.
+    struct EmptiedBundleRow {
+        mount: String,
+        bundle: String,
+        /// `gone` (its folder no longer exists) | `remaining` (its folder stays: rows that stayed, roots the view did not
+        /// list, the record) | `not_found` (it was no bundle).
+        outcome: String,
+        /// Why nothing of it was touched: `library-unavailable` (its mount did not answer or went), `trash-unusable` or
+        /// `library-read-failed`; `null` = it was handled.
+        untouched: Option<TrashProblemRow>,
+    }
+
+    // ── Preset (`preset.*` — ADR-0386) ────────────────────────────────────────────────────────────────
+
+    /// One entry of a preset list as `preset.save` / `preset.check` take it.
+    struct PresetEntryArg {
+        /// A library path or a built-in (`engram/…`).
+        path: String,
+        /// The backend word the entry is for (instructions, skills and hooks only); `null` = every backend.
+        backend: Option<String>,
+    }
+
+    /// One entry of a preset list as the file holds it, in file order (a duplicate included).
+    struct PresetEntryRow {
+        path: String,
+        /// `null` = every backend.
+        backend: Option<String>,
+        /// Its line in the file.
+        line: u32,
+        /// Why the entry does not read — `not-found` (also for an item in a mount that is not there),
+        /// `library-unavailable` `{mount, message}` (its mount cannot be read — the item was not looked up),
+        /// `path-through-link`, the item's broken reason, a settings file's first refusal or a hook's
+        /// `hook-shape-invalid`, `wrong-kind`, `builtin-in-library-preset`, `preset-cycle`; `null` = it reads. What an
+        /// inner preset reaches is in `problems`.
+        state: Option<ReasonRow>,
+    }
+
+    // ADR-0341
+    /// One folder entry of a preset — an absolute folder the backend loads natively (not a library item).
+    struct FolderRow {
+        /// The normalized path; a relative entry (a line problem) as the file spells it.
+        path: String,
+        /// Its line in the file; `null` = a folder of a `preset.check` draft.
+        line: Option<u32>,
+        /// `ok` | `missing` | `not_a_directory` | `unreadable`; `null` = not checked (a relative entry, or the library
+        /// was unavailable).
+        status: Option<String>,
+        /// Why it is `unreadable` (the OS error, a timeout or a share not reachable); else `null`.
+        status_why: Option<String>,
+    }
+
+    /// One item of a conflict and the presets it came through.
+    struct ProblemItemRow {
+        item: String,
+        via: Vec<String>,
+    }
+
+    /// A problem of a preset's launch materials, with the absent keys as `null`. A launch leaves out the `missing`
+    /// rows (and the `library_unavailable` row of a library mount that is not registered or not there) and refuses on
+    /// the others — the rows `agent.spawn` puts in `args.reasons`. A `library_unavailable` row stands for the items of
+    /// one mount: `args` = `{mount, message}`.
+    // ADR-0387
+    // ADR-0400 decision 19
+    struct ProblemRow {
+        /// `missing` | `broken` | `conflict` | `library_unavailable`.
+        kind: String,
+        /// The item (`missing` · `broken`); else `null`.
+        item: Option<String>,
+        /// The presets it came through, outermost first (`missing` · `broken`); else `null`.
+        via: Option<Vec<String>>,
+        /// Every item a conflict hits (`conflict`); else `null`.
+        items: Option<Vec<ProblemItemRow>>,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// A preset as `preset.get` shows it — every preset edit answers it after the change.
+    struct PresetView {
+        path: String,
+        /// The preset file's edition — pass it as `base_rev` to `preset.reorder` / `preset.save`.
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        /// The hook components, in file order.
+        // ADR-0420
+        hooks: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        /// The folder entries, normalized and deduplicated (first place kept).
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        /// Every other problem, inner presets' included.
+        problems: Vec<ProblemRow>,
+        /// What resolving it on its own tells — a built-in it reaches (itself included) that could not be read and
+        /// stands in empty (`builtin-unavailable`).
+        notices: Vec<LaunchNoticeRow>,
+        /// How many agents attach it (`engram/default`: the agents whose default slot is on).
+        agents: u32,
+    }
+
+    /// An item or folder an edit left out, and why.
+    struct SkippedRow {
+        /// As given.
+        item: String,
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        line: Option<u32>,
+    }
+
+    /// One mount of `library.status`.
+    struct MountStatusRow {
+        name: String,
+        /// The folder it maps to (the built-in `engram`: the install's built-in folder, empty when there is none).
+        path: String,
+        /// Its folder is the default place (saved as `default`).
+        default: bool,
+        /// The built-in read-only mount `engram`.
+        builtin: bool,
+        /// `ok` | `missing` (not there or not a folder — its items read as absent) | `unreadable` (there but cannot be
+        /// read, did not answer, or overlaps an earlier mount — a launch reaching it is refused); a user mount's is
+        /// checked now, the built-in's is the one read at start.
+        state: String,
+        /// Why `state` is not `ok`.
+        state_why: Option<String>,
+    }
+
+    /// What points at a mount's name from outside it: references in the preset files of the other mounts (each listed
+    /// entry counts) and agents with an attachment in it.
+    struct PointingRow {
+        presets: u32,
+        agents: u32,
+    }
+
+    /// What a backend loads a folder file as — `SkillRoot` = a folder it walks for skills by itself.
+    enum FolderLoadKindWord {
+        Instructions,
+        Rule,
+        Skill,
+        Agent,
+        Command,
+        SkillRoot,
+    }
+
+    /// One file (or skill root) of a folder preview.
+    struct PreviewItemRow {
+        /// Relative to the folder, `/`-separated.
+        path: String,
+        kind: FolderLoadKindWord,
+    }
+
+    /// An entry the backend may load whose answer could not be predicted.
+    struct PreviewUnsureRow {
+        /// Relative to the folder, `/`-separated.
+        path: String,
+        /// `null` = the entry could hold items of several kinds.
+        kind: Option<FolderLoadKindWord>,
+        /// `unreadable` | `front_matter` | `link` | `dashes_in_front_matter` | `unclear_paths` | `empty_body` |
+        /// `hook_keys` | `skill_file_in_command_folder`.
+        why: String,
+        /// The read error (`unreadable`) or the parser's message (`front_matter`); else `null`.
+        message: Option<String>,
+        /// The front matter's line in the file (`front_matter`); else `null`.
+        line: Option<u32>,
+    }
+
+    /// The name a backend gives a loaded skill.
+    struct PreviewSkillNameRow {
+        /// The skill's `SKILL.md`, relative to the folder.
+        path: String,
+        name: String,
+    }
+
+    /// What one backend in one mode loads from a folder.
+    struct PreviewSetRow {
+        loads: Vec<PreviewItemRow>,
+        /// What another mode of the same backend loads and this one does not.
+        omitted: Vec<PreviewItemRow>,
+        /// The rows of `loads` the launch carries itself (the rest the backend reads from the folder).
+        carried: Vec<PreviewItemRow>,
+        unsure: Vec<PreviewUnsureRow>,
+        /// Skills that fail the backend's format check — the backend skips them.
+        malformed: Vec<PathReasonRow>,
+        skill_names: Vec<PreviewSkillNameRow>,
+    }
+
+    /// One backend and mode of a folder preview.
+    struct PreviewLoadRow {
+        backend: String,
+        mode: AgentOutputFormat,
+        /// The backend reads the folder itself at launch, so the set is a prediction.
+        predicted: bool,
+        set: PreviewSetRow,
+        /// Why a file read got no answer (e.g. `timeout`, budget spent) — the reason only, not the file; the set may
+        /// lack what that file decides.
+        unread: Option<String>,
+    }
+
+    /// Why `preset.add` would refuse the folder.
+    struct PreviewRefusalRow {
+        /// As given.
+        path: String,
+        /// `folder-path-relative` | `folder-path-cli-unsafe` | `folder-not-found` | `folder-unreadable`.
+        code: String,
+        /// For `folder-not-found`: missing or not a folder. For `folder-unreadable`: the OS error, a timeout or a share
+        /// not reachable.
+        why: Option<String>,
+    }
+
+    // ── Agent presets (`agent.presets` · `attachPreset` · `detachPreset` · `reorderPresets` — ADR-0386) ─────────────
+
+    // ADR-0341
+    /// A folder entry an agent's presets reach, and the presets it came through.
+    struct AgentFolderRow {
+        /// The normalized absolute path.
+        path: String,
+        /// The presets it came through, outermost first.
+        via: Vec<String>,
+        /// Its line in the last preset of `via`.
+        line: u32,
+        /// `ok` | `missing` | `not_a_directory` | `unreadable`; `null` = not checked.
+        status: Option<String>,
+        /// Why it is `unreadable` (the OS error, a timeout or a share not reachable); else `null`.
+        status_why: Option<String>,
+    }
+
+    /// An agent's presets as `agent.presets` shows them — every agent-preset edit answers it after the change.
+    struct AgentPresetsView {
+        agent_id: String,
+        name: String,
+        /// The Default slot (`engram/default`) is on.
+        default_preset: bool,
+        /// The attached library presets as the agent stores them, in attach order.
+        presets: Vec<String>,
+        cwd: String,
+        /// Why the working folder cannot be changed now — `running` | `preparing` | `conversed`; `null` = it can.
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        /// The attachments' edition — pass it as `base_rev` to `agent.reorderPresets`.
+        base_rev: String,
+        /// `false` = its backend takes no preset (no settings check): the rows below stay empty and a launch ignores
+        /// the presets.
+        takes_presets: bool,
+        /// The folder entries its presets reach, in expansion order.
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        /// Every other problem, inner presets' included. A launch leaves out the `missing` rows (and the
+        /// `library_unavailable` row of a library mount that is not registered or not there) and refuses on the others.
+        problems: Vec<ProblemRow>,
+        /// What a launch would leave out on purpose. What it leaves out because it was not found is in `problems`.
+        notices: Vec<LaunchNoticeRow>,
+    }
+
     // errors lists only codes **specific to this command** — argument rejection (INVALID_ARGUMENT) and internal failure (INTERNAL)
     //   are emitted by the table, so `CommandSpec::advertised_errors` adds them automatically.
 
-    /// The whole roster — name · liveness · working folder · parent — and the state of the two roster stores (`store`).
+    /// The whole roster — name · liveness · working folder · parent — and the state of the roster store (`store`).
     #[effect(Read)]
     #[since(1)]
     "agent.list" => args AgentListArgs {}
@@ -247,9 +870,21 @@ declare_commands! {
         agents: Vec<ResolvedAgentRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Launches an agent (including waking an asleep one).
+    /// Starts an agent: wakes an existing one (`target`) or creates one in `cwd` and starts it.
+    /// A preset item that is not found, or the items of a library mount that is not registered or not there, do not
+    /// block: they are left out and named in `notices` (one notice per mount, with `mount`). A blocked launch starts
+    /// nothing and is `CONFLICT` with `args.reasons`, one row per reason by `kind`: `broken` {kind, item, via, code,
+    /// args, line?} (a folder entry that cannot be read included) · `conflict` {kind, items: [{item, via}], code, args,
+    /// line?} · `library_unavailable` {kind, code, args: {mount, message}, line?} (a library mount that exists but
+    /// cannot be read). Fix the listed items, then start again.
+    /// With `cwd`, a launch blocked before the agent is added answers `CONFLICT` with `args.reasons` and creates
+    /// nothing; a start failure after the add is `INTERNAL` with `args.agent_id` (plus `args.reasons` when blocked) —
+    /// start that agent by target, do not create another.
+    // ADR-0369
+    // ADR-0387
     #[effect(Write)]
     #[since(1)]
+    #[deadline(Launch)]
     "agent.spawn" => args AgentSpawnArgs {
         /// The target to wake (name or id). Mutually exclusive with cwd.
         target: Option<String>,
@@ -262,16 +897,20 @@ declare_commands! {
         name: String,
         state: String,
         created: bool,
+        /// Launch notices, each set shown once per agent — empty when nothing was launched or this agent was
+        /// already shown the same set.
+        notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// Registers a new agent in the roster (does not launch it — it stays asleep).
+    /// Registers a new agent in the roster (does not launch it — it stays asleep). `presets` are judged as
+    /// `agent.attachPreset` judges them: the agent is created with what can be attached, each one left out is in
+    /// `skipped` with why. CONFLICT `library-unavailable` (a library preset named while the library cannot be read —
+    /// with `mount` when that preset's mount cannot be read) or `root-generation-stale` creates nothing.
+    // ADR-0386
     #[effect(Write)]
     #[since(1)]
     "agent.new" => args AgentNewArgs {
-        /// Working folder. ★Mutually exclusive with `preset`, and **exactly one of the two** must be present★.
-        cwd: Option<String>,
-        /// The id of a registered path bookmark (preset). Mutually exclusive with cwd.
-        preset: Option<String>,
+        cwd: String,
         name: Option<String>,
         /// Unspecified = StreamJson.
         output_format: Option<AgentOutputFormat>,
@@ -282,11 +921,19 @@ declare_commands! {
         /// (the `AgentBackendKind` doc of `protocol` · the daemon's `MISSING_BACKEND`), and leaving only this door
         /// would split that decision per entry.
         backend: AgentBackend,
+        /// Library presets to attach — the Default slot (`engram/default`) is on for every new agent. Unspecified = the
+        /// Default slot only.
+        presets: Option<Vec<String>>,
+        /// With `presets` only — the value `library.status` answered; refuses if a mount changed since (checked when
+        /// the presets are judged, just before the create). Unspecified = the current mounts.
+        root_generation: Option<u64>,
     } -> ok AgentNewOk {
         agent_id: String,
         name: String,
         state: String,
-    } errors [NOT_FOUND, CONFLICT];
+        /// The `presets` not attached, and why; empty without `presets`.
+        skipped: Vec<SkippedRow>,
+    } errors [CONFLICT];
 
     /// Changes the display name.
     #[effect(Write)]
@@ -313,6 +960,39 @@ declare_commands! {
         agent_id: String,
         name: String,
         parent: Option<String>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Changes an agent's working folder. `cwd` must be an existing absolute folder, else INVALID_ARGUMENT
+    /// `workspace-not-found` {cwd, why} — `why` also says `not absolute`, or that the folder did not answer in time
+    /// (`timeout`), could not be read, or is on a network share that is not reachable (`share not reachable`). Only an
+    /// asleep agent that has never conversed can change it: CONFLICT `workspace-locked` {reason: `running` |
+    /// `preparing` | `conversed` | `changing`}. The agent keeps its name.
+    // ADR-0386
+    #[effect(Write)]
+    #[since(9)]
+    "agent.setWorkspace" => args AgentSetWorkspaceArgs {
+        target: String,
+        cwd: String,
+    } -> ok AgentSetWorkspaceOk {
+        agent_id: String,
+        name: String,
+        /// The folder as stored.
+        cwd: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Registers a copy of an agent beside it (the same parent), asleep, named after it with the next number
+    /// (`bob` → `bob(1)`): the same backend, mode, folder, env and presets, with no conversation or history.
+    /// INVALID_ARGUMENT when this surface does not create the original's backend; CONFLICT at the roster ceiling.
+    /// After a timeout or an unknown outcome, check `agent.list` before calling again.
+    // ADR-0386
+    #[effect(Write)]
+    #[since(9)]
+    "agent.duplicate" => args AgentDuplicateArgs {
+        target: String,
+    } -> ok AgentDuplicateOk {
+        agent_id: String,
+        name: String,
+        state: String,
     } errors [NOT_FOUND, CONFLICT];
 
     /// The list of inputs a live agent received mid-turn without confirmation yet that they were accepted (non-terminal only). `state` = `queued` (before confirmation —
@@ -435,6 +1115,838 @@ declare_commands! {
         /// Upstream original text — ★`Debug` prints the original; do not put it into logs with `{:?}`★ (the doc of `UsageVendorRow.upstream`).
         upstream: Option<String>,
     } errors [NOT_FOUND];
+
+    // ADR-0386
+    // A library refusal carries `args` = {code, args, line?}: `code` is the fixed reason, `args` its arguments. Every
+    //   refusal applied nothing (`library-config-write-failed` aside: the mount change is live but not saved, and
+    //   repeating the same call saves again — ADR-0381 · ADR-0400 decision 14).
+
+    /// The library's mounts now, in order — each with its `name`, its folder `path`, `default` (at the default place),
+    /// `builtin` (the read-only mount `engram`, always last) and `state` (+ `state_why`; checked now, the built-in's
+    /// read at start); `config`
+    /// (library.json) = `ok` | `read_only` | `corrupt` | `unsaved` (+ `config_why`; `unsaved` = a mount change is live
+    /// but not saved), `suggested_new` = the default place. `root_generation` = pass it to an edit, which then refuses
+    /// if a mount changed since (CONFLICT `root-generation-stale`). CONFLICT `library-unavailable` only from a daemon
+    /// that runs no library.
+    #[effect(Read)]
+    #[since(9)]
+    "library.status" => args LibraryStatusArgs {} -> ok LibraryStatusOk {
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+    } errors [CONFLICT];
+
+    // ADR-0400
+    // The mount commands answer the status after the change. A failed save (CONFLICT `library-config-write-failed`)
+    //   leaves the change live: repeat the same call to save it — a repeat whose change is already live answers
+    //   success. After a timeout, read `library.status` before repeating.
+
+    /// Registers the absolute folder `path` as the mount `name` (`create` makes the folder once the overlap check passed — a
+    /// refused check creates nothing; no file is copied or moved) and saves it in library.json; answers the status and `already_pointing` — references that already named
+    /// `name` and now resolve into the folder. The same name already at the same folder only saves again.
+    /// INVALID_ARGUMENT `mount-name-invalid` (one name: no `/ \ :`, no leading `.`, at most 64 characters, not
+    /// `engram`) · `item-path-invalid` (a relative path); CONFLICT `mount-name-taken` · `mount-overlaps` (`with` =
+    /// `mount` + `mount` — another mount's folder, inside or holding it; only mounts are judged) ·
+    /// `library-config-read-only` (nothing done) · `library-root-unusable` (the folder cannot be used, or whether it
+    /// overlaps could not be told — nothing published) · `library-unavailable` (the run's first overlap check of the
+    /// saved mounts has not finished — nothing done; repeat the call) · `library-config-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.addMount" => args LibraryAddMountArgs {
+        name: String,
+        path: String,
+        /// Create the folder first. Unspecified = false.
+        create: Option<bool>,
+    } -> ok LibraryAddMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+        already_pointing: PointingRow,
+    } errors [CONFLICT];
+
+    /// Unregisters the mount `mount` — no file is touched, ever; adding it back restores every reference. Answers the
+    /// status, `now_absent` — references that name it and now read as absent (a launch skips them with one notice) —
+    /// and `outcome` = `removed`, or `saved_only` when the mount was already gone because an earlier removal's save
+    /// failed (only library.json was written). NOT_FOUND `mount-not-found`; CONFLICT `mount-read-only` (`engram`) ·
+    /// `library-config-read-only` · `library-unavailable` (as `library.addMount`) · `library-config-write-failed`;
+    /// INVALID_ARGUMENT `mount-name-invalid`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.removeMount" => args LibraryRemoveMountArgs {
+        mount: String,
+    } -> ok LibraryRemoveMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+        now_absent: PointingRow,
+        outcome: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Points the mount `mount` at the absolute folder `path` under the same name (`create` makes it first; no file is
+    /// copied or moved; references do not change) and saves it in library.json; answers the status. Pointing it at the
+    /// folder it already has only saves again. Refusals as `library.addMount` except `mount-name-taken`, judged against
+    /// every other mount, plus NOT_FOUND `mount-not-found` and CONFLICT `mount-read-only` (`engram`).
+    #[effect(Write)]
+    #[since(9)]
+    "library.relocateMount" => args LibraryRelocateMountArgs {
+        mount: String,
+        path: String,
+        /// Create the folder first. Unspecified = false.
+        create: Option<bool>,
+    } -> ok LibraryRelocateMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Renames the mount `mount` to `to` and re-points every reference to `mount/…` (in the preset files of every
+    /// mount that can be read, then in agents) at `to/…`; a case-only rename is allowed; saves library.json. When
+    /// files would be rewritten, or references would stay as they are because their mount cannot be read, the first
+    /// call applies nothing and answers CONFLICT `mount-rename-unconfirmed` with `plan` (`files` per mount with `git`
+    /// — the mount is in a git working tree —, `unread` mounts with `paths` — their files that refer to `mount/…` and
+    /// stay as they are; null: never walked, what in it refers is unknown —, `agents`, `whole_files` — rewritten
+    /// whole, comments and quoting not kept —,
+    /// `already_pointing`), `root_generation` and `plan_digest` (over the files in `plan` and its never-walked mounts); repeat with `yes` and that
+    /// `root_generation` and `plan_digest` — both required whenever the plan needs confirmation: files to rewrite or
+    /// references left unread (either missing: the same refusal; stale: `root-generation-stale` with a fresh `plan` and
+    /// `plan_digest`). To have the unread files rewritten too, wait for their mount and call again
+    /// instead of confirming. A confirmed call whose plan is no longer the one confirmed — a preset came to refer to
+    /// `mount/…` or stopped, a mount came back or became unreadable — applies nothing and answers
+    /// `mount-rename-unconfirmed` with the fresh `plan`; read it and confirm again. Answers the status, the pairs `fixed`, the files
+    /// `written` and `skipped` with why, `stopped` when an IO failure or the agents' save stopped it part-way (the old
+    /// name stays and the answer carries no `plan_digest` — call again: the repeat plans what is left, and a plan that
+    /// needs confirmation is answered as above to confirm with its own tokens, while the tokens confirmed before the stop
+    /// answer `mount-rename-unconfirmed` or `root-generation-stale` with that plan unless it is the confirmed one
+    /// again — every written file came to refer to `mount/…` again), and `already_pointing` — references
+    /// that already named `to` (0 for a case-only rename where names ignore case). A `skipped` row whose path is a mount
+    /// name: that mount was never walked, so what in it refers to `mount/…` is unknown. `git` is null when it could not
+    /// be told. NOT_FOUND `mount-not-found`; CONFLICT `mount-unusable` (`{mount, state, why}` — the
+    /// mount cannot be read, so its own references could not be rewritten) · `mount-name-taken` · `mount-read-only`
+    /// (`engram`) · `library-config-read-only` · `library-unavailable` (as `library.addMount`; also when no first scan
+    /// of the library could be applied, or a mount's folder — `mount` itself included — was lost during the rename:
+    /// the old name stays, repeat after `library.status`) ·
+    /// `library-config-write-failed`, or the agent store's refusal when it is read-only and agents would change;
+    /// INVALID_ARGUMENT `mount-name-invalid`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.renameMount" => args LibraryRenameMountArgs {
+        mount: String,
+        to: String,
+        /// Confirms the plan. Unspecified = false.
+        yes: Option<bool>,
+        /// The value the plan answered — required with `yes` whenever the plan needs confirmation (files to rewrite or
+        /// references left unread).
+        root_generation: Option<u64>,
+        /// The `plan_digest` the plan answered — required with `yes` whenever the plan needs confirmation (files to
+        /// rewrite or references left unread).
+        plan_digest: Option<String>,
+    } -> ok LibraryRenameMountOk {
+        // ★The status fields must not differ by a character from `LibraryStatusOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.status`.
+        daemon_id: String,
+        mounts: Vec<MountStatusRow>,
+        config: String,
+        config_why: Option<String>,
+        suggested_new: String,
+        root_generation: u64,
+        fixed: Vec<RelinkPairRow>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        stopped: Option<RelinkStopRow>,
+        already_pointing: PointingRow,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Every folder of the library, flat, by path; a skill folder is marked `skill`, a hook folder `hook`; each mount (a
+    /// top folder) carries its `state`. The folders of a mount that cannot be read are left out and the mount is named in `unavailable`
+    /// (the built-in mount `engram` too when its folder cannot be read, though its rows stay as stand-ins and a launch
+    /// goes on with `builtin-unavailable`). CONFLICT `library-unavailable` when no scan of the library could be applied.
+    #[effect(Read)]
+    #[since(9)]
+    "library.folders" => args LibraryFoldersArgs {} -> ok LibraryFoldersOk {
+        folders: Vec<LibraryFolderRow>,
+        unavailable: Vec<UnavailableMountRow>,
+    } errors [CONFLICT];
+
+    /// Re-reads `folder` (unspecified = the whole library) from disk and reports it: `changed` items, `problems` of the
+    /// files re-read, `no_kind` (yaml files with no `kind` — not listed), `skipped_links` (links not entered) and
+    /// `errors` (where reading failed — those items are kept as they were; a mount that could not be read, or one
+    /// registered or moved during the scan and so not walked by it, is a row with its name as `path`; a row with no
+    /// `path` = the folder asked for could not be read — or is in the built-in mount `engram`, which is never scanned).
+    /// Use it after changing
+    /// library files outside Engram. It never refuses except for a `folder` that is
+    /// not a library path (INVALID_ARGUMENT `item-path-invalid`).
+    #[effect(Read)]
+    #[since(9)]
+    "library.refresh" => args LibraryRefreshArgs {
+        folder: Option<String>,
+    } -> ok LibraryRefreshOk {
+        changed: u32,
+        problems: Vec<PathReasonRow>,
+        no_kind: Vec<String>,
+        skipped_links: Vec<String>,
+        errors: Vec<RefreshErrorRow>,
+    } errors [];
+
+    /// The items directly in `folder` (unspecified = the library's top, which holds only the mounts) and its plain
+    /// subfolders. `query` searches name and
+    /// description (case-insensitive) in every item below `folder` and answers matching rows only (no
+    /// `folders`). `kinds` keeps only those kinds (unspecified or empty = all; a broken file counts as the kind it
+    /// claims; a skill's `SKILL.md` matches only `SkillFile`, a hook's `hooks.json` only `HookFile`). A `folder` at or
+    /// below a link answers one `path-through-link` row, which the filters do not apply to. Unspecified `folder` lists
+    /// the mounts, each with
+    /// its `state` — the built-in read-only mount `engram` among them (`engram/default`, `engram/priming`, folder
+    /// `engram/settings`); a `query` without `folder` searches the mounts that can be read and names the others in
+    /// `unavailable` (the built-in mount `engram` too when its folder cannot be read, though its rows stay as
+    /// stand-ins and a launch goes on with `builtin-unavailable`). CONFLICT `library-unavailable` (with `mount`) when
+    /// `folder` is in a
+    /// mount that cannot be read.
+    #[effect(Read)]
+    #[since(9)]
+    "library.list" => args LibraryListArgs {
+        folder: Option<String>,
+        query: Option<String>,
+        kinds: Option<Vec<LibraryKind>>,
+    } -> ok LibraryListOk {
+        folder: Option<String>,
+        rows: Vec<ListRow>,
+        folders: Vec<ListFolderRow>,
+        unavailable: Vec<UnavailableMountRow>,
+    } errors [CONFLICT];
+
+    /// One item's detail: its row, its file on disk (`absolute`), the presets that list it (`presets_direct`) or reach
+    /// it through nested presets (`presets_indirect`), the agents that attach it (`agents_direct` — a preset only) or a
+    /// preset reaching it (`agents_indirect`), an instruction's `excerpt` and a settings file's field names
+    /// (`settings_fields`). A built-in (`engram/…`) counts only the Default slot: `agents_direct` = the agents whose
+    /// Default slot is on for `engram/default`, and the preset and indirect lists are empty (every other built-in: all
+    /// empty). NOT_FOUND `not-found` = no such item (a mount's name is not an item); CONFLICT `library-unavailable` (with
+    /// `mount` when the item's mount cannot be read).
+    #[effect(Read)]
+    #[since(9)]
+    "library.read" => args LibraryReadArgs {
+        path: String,
+    } -> ok LibraryReadOk {
+        row: ListRow,
+        absolute: String,
+        presets_direct: Vec<String>,
+        presets_indirect: Vec<String>,
+        agents_direct: Vec<AgentRefRow>,
+        agents_indirect: Vec<AgentRefRow>,
+        excerpt: Option<String>,
+        settings_fields: Vec<String>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Creates folder `name` in `parent` (unspecified: INVALID_ARGUMENT `virtual-root-read-only` — nothing is created
+    /// at the library's top; a mount's name alone is a parent like any folder); answers its path. CONFLICT
+    /// `name-exists` (nothing replaced) · `library-unavailable` (with `mount` when the parent's mount cannot be read — nothing is written into
+    /// it) · `mount-read-only` (`{mount, path}` — the parent is in the built-in mount `engram`) ·
+    /// `root-generation-stale` · `library-write-failed` (a retry after it may answer `name-exists` — the partial file
+    /// or folder stays); NOT_FOUND `not-found` = the parent is missing.
+    #[effect(Write)]
+    #[since(9)]
+    "library.newFolder" => args LibraryNewFolderArgs {
+        parent: Option<String>,
+        name: String,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryNewFolderOk {
+        path: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Creates file `name` of `kind` in `folder` (unspecified: refused as `library.newFolder`) from an empty template (`.md` or `.yaml` is
+    /// added unless the name ends with it); answers its path. Refusals as `library.newFolder`.
+    #[effect(Write)]
+    #[since(9)]
+    "library.newFile" => args LibraryNewFileArgs {
+        folder: Option<String>,
+        name: String,
+        kind: LibraryNewFileKind,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryNewFileOk {
+        path: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Re-points every reference to `from` (in preset files, then agents) at `to`; when `from` is missing it also
+    /// re-points the other missing items of `from`'s folder whose names are in `to`'s folder (`more` of them). Answers
+    /// the pairs `fixed`, the files `written`, the files `skipped` with why, and `stopped` when an IO failure stopped
+    /// it after a write (run the same relink again once it is cleared). NOT_FOUND `not-found` = `to` is not in the
+    /// library; INVALID_ARGUMENT `relink-kind-mismatch` = `to` is of another kind than its references need; CONFLICT
+    /// `library-unavailable` (with `mount` when `to`'s mount cannot be read) · `mount-read-only` (`{mount, path}` —
+    /// `from` or `to` is in the built-in mount `engram`) · `root-generation-stale`. A file in a
+    /// mount that cannot be read is not rewritten: it is in `skipped` with `library-unavailable` and its `mount`. A
+    /// `skipped` row whose `path` is a mount's name means that mount could not be read at all: references inside it
+    /// may remain (`fixed` covers the mounts that were read) — run the same relink again once it is back.
+    #[effect(Write)]
+    #[since(9)]
+    "library.relink" => args LibraryRelinkArgs {
+        from: String,
+        to: String,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryRelinkOk {
+        fixed: Vec<RelinkPairRow>,
+        more: u32,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    // ADR-0369
+    // ADR-0409
+    // ADR-0419: the five file writes take the launch deadline class — a copy across volumes can outlast the ordinary
+    //   wait; `library.listTrash` is bounded by the read budget and stays ordinary.
+
+    /// Moves `paths` into the folder `to_folder`, each keeping its name — on one volume a rename that never replaces,
+    /// across volumes a copy whose original then goes into its own mount's trash. A taken name follows `on_conflict`
+    /// (unspecified: that item's `conflict` `name-exists`); on one volume same-name folders merge entry by entry, across
+    /// volumes they are refused (`crosses-volumes`). Every preset file that names a moved path is rewritten whole, then
+    /// the agents are re-pointed — no confirmation, except when a referenced folder's lone marker (a skill's
+    /// `SKILL.md`, a hook's `hooks.json`) leaves it, or a merge would leave a referenced skill or hook folder without it (an entry
+    /// stays behind, the marker would take a keep-both name, or a `hooks.json` would land beside a `SKILL.md`): then
+    /// nothing is applied and the answer is CONFLICT `hook-unconfirmed` when every folder referred to is a hook, else
+    /// `skill-unconfirmed`, with `plan` (`presets`, `agents`), `plan_digest` and `forms` — repeat with `yes`
+    /// (references kept) or `yes` + `detach_refs` + that `plan_digest` (references removed). Answers one row per path in
+    /// the order given (`items`), the old → new `mapping` the references followed (apply in order), the preset files
+    /// `written` and `skipped` with why, the git working `trees` they lie in, the `agents` re-pointed, `detached`
+    /// skill and hook folders, and `stopped` when the reference fix stopped part-way (the items stay moved;
+    /// `library.relink` the old path once it is cleared). INVALID_ARGUMENT `item-path-invalid` (`to_folder` is no
+    /// library path or holds a dot or temp name) · `detach-refs-invalid` (`detach_refs` with no such marker or merge);
+    /// CONFLICT `mount-read-only` (`to_folder` in the built-in mount `engram`) · `library-unavailable` ·
+    /// `skill-unconfirmed` · `hook-unconfirmed` · `root-generation-stale` (an unconfirmed or stale refusal met after
+    /// copies across volumes also names them in `args.args.stagings`), or the
+    /// agent store's refusal when it is read-only and agents would change. Can take long (a copy across volumes); after
+    /// an answer that never came the outcome is unknown — do not repeat; read the destination after a pause.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.move" => args LibraryMoveArgs {
+        /// Library paths of the items to move (a file, or a folder with everything in it).
+        paths: Vec<String>,
+        /// The library path of the folder they go into (it must exist).
+        to_folder: String,
+        /// Unspecified = a taken name is that item's conflict.
+        on_conflict: Option<LibraryOnConflict>,
+        /// Confirms a `skill-unconfirmed` or `hook-unconfirmed` plan. Unspecified = false.
+        yes: Option<bool>,
+        /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
+        detach_refs: Option<bool>,
+        /// The `plan_digest` the plan answered — required with `detach_refs`.
+        plan_digest: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryMoveOk {
+        items: Vec<MoveItemRow>,
+        mapping: Vec<MovePairRow>,
+        detached: Vec<String>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        trees: Vec<GitTreeRow>,
+        agents: Vec<AgentRefRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [CONFLICT];
+
+    /// Renames the item `path` to `name` in its folder (a case-only rename too) — a move to a new name, answered as
+    /// `library.move` answers (one row): a taken name is the row's `conflict` `name-exists` (nothing replaced), its own
+    /// spelling is `skipped` `in-place`; references follow, and a referenced skill's `SKILL.md` or hook's `hooks.json`
+    /// renamed so its folder is no skill or hook asks first (`skill-unconfirmed` or `hook-unconfirmed`, as
+    /// `library.move`). Refusals as `library.move`, with `name` — not one valid name, or a dot or temp name:
+    /// INVALID_ARGUMENT `item-path-invalid` — in place of `to_folder`.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.rename" => args LibraryRenameArgs {
+        /// The library path of the item.
+        path: String,
+        /// Its new name (one name, no folder).
+        name: String,
+        /// Confirms a `skill-unconfirmed` or `hook-unconfirmed` plan. Unspecified = false.
+        yes: Option<bool>,
+        /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
+        detach_refs: Option<bool>,
+        /// The `plan_digest` the plan answered — required with `detach_refs`.
+        plan_digest: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryRenameOk {
+        // ★The fields must not differ by a character from `LibraryMoveOk`★ — the pairing destructures it
+        //   (`library_commands.rs`); field meanings: `library.move`.
+        items: Vec<MoveItemRow>,
+        mapping: Vec<MovePairRow>,
+        detached: Vec<String>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        trees: Vec<GitTreeRow>,
+        agents: Vec<AgentRefRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [CONFLICT];
+
+    /// Copies `paths` into the folder `to_folder` — each keeps its name (a built-in item from `engram` takes its file's
+    /// name); copied into its own folder it takes the copy name (`a - Copy.md`, then `a - Copy (2).md` …, whatever
+    /// `on_conflict` says). A taken name follows `on_conflict` (unspecified: that item's `conflict` `name-exists`); a
+    /// same-name folder is never merged (`copy-merge-refused`). Each copy is made aside under a temp name and then put
+    /// in place; nothing refers to a copy, so no reference changes. Answers one row per path in the order given; a copy
+    /// that failed part-way names its staging in `args` (`staging_row` — it went into the trash —, or `staging` ·
+    /// `staging_disk` · `staging_kept` when it stayed). INVALID_ARGUMENT `item-path-invalid` (as `library.move`);
+    /// CONFLICT `mount-read-only` · `library-unavailable` · `root-generation-stale` (met after copying:
+    /// `args.args.stagings`). Can take long; after an answer that never came the outcome is unknown — do not repeat;
+    /// read the destination after a pause.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.copy" => args LibraryCopyArgs {
+        /// Library paths of the items to copy, or built-in items (`engram/…`).
+        paths: Vec<String>,
+        /// The library path of the folder the copies go into (it must exist).
+        to_folder: String,
+        /// Unspecified = a taken name is that item's conflict.
+        on_conflict: Option<LibraryOnConflict>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryCopyOk {
+        items: Vec<CopyItemRow>,
+    } errors [CONFLICT];
+
+    /// Deletes `paths` into each one's own mount's trash (`.trash`, one bundle per mount per call — `library.listTrash`
+    /// shows it, `library.restore` brings rows back). When preset files or agents refer to what goes, the first call
+    /// applies nothing and answers CONFLICT `delete-unconfirmed` with `plan` (`presets` — the preset files listing a
+    /// deleted path —, `agents`), `plan_digest` and `forms`: repeat with `yes` (references kept — they read as not
+    /// found until a restore) or `yes` + `detach_refs` + that `plan_digest` (their lines and attachments removed). A plan
+    /// that changed before the repeat answers the same CONFLICT with the fresh plan, nothing applied. Answers one row per
+    /// path in the order given (`items`), and with `detach_refs` the paths `detached`, the preset files `written` and
+    /// `skipped` with why, the `agents` changed and `stopped` when that fix stopped part-way (the items stay deleted).
+    /// CONFLICT `library-unavailable` · `delete-unconfirmed` · `root-generation-stale`, or the agent store's refusal
+    /// when it is read-only and agents would change. Emptying the trash is not a command of this list.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.delete" => args LibraryDeleteArgs {
+        /// Library paths of the items to delete (a file, or a folder with everything in it).
+        paths: Vec<String>,
+        /// Confirms a `delete-unconfirmed` plan. Unspecified = false.
+        yes: Option<bool>,
+        /// With `yes` and `plan_digest`: removes the references the plan named. Unspecified = false.
+        detach_refs: Option<bool>,
+        /// The `plan_digest` the plan answered — required with `detach_refs`.
+        plan_digest: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryDeleteOk {
+        items: Vec<DeleteItemRow>,
+        detached: Vec<String>,
+        written: Vec<String>,
+        skipped: Vec<PathReasonRow>,
+        agents: Vec<AgentRefRow>,
+        stopped: Option<RelinkStopRow>,
+    } errors [CONFLICT];
+
+    /// The trash of every registered mount, in mount order: its bundles by id (one per delete per mount), each with
+    /// when it was deleted and its rows — `original` is where `library.restore` puts a row back and `restorable` says
+    /// whether it can. A mount whose trash cannot be read is named with its `problem`, not waited for. Reads only.
+    /// CONFLICT `library-unavailable` only from a daemon that runs no library.
+    #[effect(Read)]
+    #[since(9)]
+    "library.listTrash" => args LibraryListTrashArgs {} -> ok LibraryListTrashOk {
+        mounts: Vec<MountTrashRow>,
+    } errors [CONFLICT];
+
+    /// Restores trash `rows` (as `library.listTrash` lists them) to the same paths in the same mounts, making missing
+    /// parent folders; nothing is ever overwritten — a taken name is that row's `conflict` `name-exists`, and with
+    /// `keep_both` the row comes back as `name (2)`, `name (3)` … instead. Answers one row per given row in the order
+    /// given. CONFLICT `library-unavailable` · `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.restore" => args LibraryRestoreArgs {
+        /// The trash rows to restore.
+        rows: Vec<TrashAddressRow>,
+        /// A taken name restores under the next free keep-both name. Unspecified = false.
+        keep_both: Option<bool>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok LibraryRestoreOk {
+        items: Vec<RestoreItemRow>,
+    } errors [CONFLICT];
+
+    // ADR-0322 decision 1
+    // ADR-0326 decision 4
+    // ADR-0408
+    // ADR-0419: shell only — named in `SHELL_ONLY`, so the daemon refuses it from every control route and leaves it out
+    //   of the control route's list. Only the library screen may send it, from the user's gesture after the permanent-delete
+    //   modal; no shell or webview command may wrap it — an agent reaches shell commands through `/control/call` relaying
+    //   (ADR-0160).
+
+    /// Removes trash rows for good — nothing goes to an OS Recycle Bin: `bundles` empties each bundle of exactly the rows
+    /// the trash view listed for it (what it did not list stays, with the record), `rows` deletes single rows for good.
+    /// Answers every addressed row (the bundles' rows in the order given, then `rows`) and every addressed bundle with
+    /// its outcome; one that is not gone carries why. INVALID_ARGUMENT `nothing-to-empty` (neither `bundles` nor
+    /// `rows`); CONFLICT `library-unavailable` only from a daemon that runs no library; UNSUPPORTED `shell-only` from
+    /// any caller but the Engram app. Can take long; after an answer that never came, read the trash view again rather
+    /// than resend.
+    #[effect(Write)]
+    #[since(9)]
+    #[deadline(Launch)]
+    "library.emptyTrash" => args LibraryEmptyTrashArgs {
+        /// Empty-all: bundles, each with the rows the view listed for it.
+        bundles: Option<Vec<ListedBundleArg>>,
+        /// Permanent delete: single trash rows.
+        rows: Option<Vec<TrashAddressRow>>,
+    } -> ok LibraryEmptyTrashOk {
+        rows: Vec<EmptiedRow>,
+        bundles: Vec<EmptiedBundleRow>,
+    } errors [CONFLICT, UNSUPPORTED];
+
+    // ADR-0358
+    // ADR-0384
+    // ADR-0386
+    // A preset edit rewrites the whole file (hand-written comments and layout are not kept) and answers the preset as
+    //   committed. A path that is not a library path is INVALID_ARGUMENT `item-path-invalid`; a file that is not a
+    //   preset, INVALID_ARGUMENT `wrong-kind` or the reader's code; a preset in a mount that cannot be read, CONFLICT
+    //   `library-unavailable` with `mount` (ADR-0400 decision 6); a check or edit of a path in the built-in mount
+    //   `engram`, CONFLICT `mount-read-only` with `mount` and `path` (ADR-0400 decision 20).
+
+    /// A preset's entries with their state, its folder entries, the conflicts and problems a launch of it alone would
+    /// meet, its edition `rev` and how many agents attach it. `path` = a library path or `engram/default`. NOT_FOUND
+    /// `not-found`; INVALID_ARGUMENT `wrong-kind` (not a preset); CONFLICT `library-unavailable` (with `mount` when the
+    /// preset's mount cannot be read).
+    #[effect(Read)]
+    #[since(9)]
+    "preset.get" => args PresetGetArgs {
+        path: String,
+    } -> ok PresetGetOk {
+        // ★The fields must not differ by a character from `PresetView`★ — the pairing is `From<PresetView>`
+        //   (destructuring); field meanings: `PresetView`.
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Judges a draft of the preset's lists as `preset.save` would, without writing: the folders it would list, the
+    /// conflicts and problems a launch of it would meet, and `save_refuses` = a save of this draft would be refused
+    /// (each mismatch is a `broken` problem with `args` `{path, list}`). `folders` or `hooks` omitted = the file's
+    /// folders or hooks stay, judged as they are.
+    /// CONFLICT `library-unavailable` (with `mount` when the preset's mount cannot be read) · `mount-read-only` (a
+    /// path in the built-in mount `engram`).
+    #[effect(Read)]
+    #[since(9)]
+    "preset.check" => args PresetCheckArgs {
+        path: String,
+        presets: Vec<PresetEntryArg>,
+        instructions: Vec<PresetEntryArg>,
+        skills: Vec<PresetEntryArg>,
+        /// Omitted = the file's hooks stay.
+        // ADR-0420
+        hooks: Option<Vec<PresetEntryArg>>,
+        settings: Vec<PresetEntryArg>,
+        folders: Option<Vec<String>>,
+    } -> ok PresetCheckOk {
+        save_refuses: bool,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+    } errors [CONFLICT];
+
+    /// Adds `items` (each into the list of its kind, `backend` for all of them) or absolute `folders` — one of the two —
+    /// after the `after` entry (else at the end). Applies what it can: each item it cannot add is in `skipped` with why
+    /// (`not-found`, `wrong-kind`, `already-present`, `preset-cycle`, a backend word it does not take …). A bad folder
+    /// refuses the whole call, INVALID_ARGUMENT `preset-folders-refused` naming each. NOT_FOUND `not-found` = no such
+    /// preset file; CONFLICT `library-unavailable` · `mount-read-only` · `root-generation-stale` ·
+    /// `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.add" => args PresetAddArgs {
+        path: String,
+        items: Option<Vec<String>>,
+        /// With `items` only. Unspecified = every backend.
+        backend: Option<String>,
+        folders: Option<Vec<String>>,
+        after: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok PresetAddOk {
+        /// What was added (folders normalized).
+        applied: Vec<String>,
+        skipped: Vec<SkippedRow>,
+        view: PresetView,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Removes `items` (every entry of each, in every list) or `folders` — one of the two; removing what is not there
+    /// changes nothing. Answers the preset after the change. NOT_FOUND `not-found` = no such preset file; CONFLICT
+    /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.remove" => args PresetRemoveArgs {
+        path: String,
+        items: Option<Vec<String>>,
+        folders: Option<Vec<String>>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok PresetRemoveOk {
+        // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Puts one `section` (`presets` | `instructions` | `skills` | `hooks` | `settings` | `folders` — another word is
+    /// INVALID_ARGUMENT) in `order` — every entry `preset.get` shows in it, each once (a duplicate as often as it is
+    /// listed), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the `rev` you
+    /// read; CONFLICT `rev-mismatch` = the file changed since (read it again). NOT_FOUND `not-found`; CONFLICT
+    /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.reorder" => args PresetReorderArgs {
+        path: String,
+        /// `presets` | `instructions` | `skills` | `hooks` | `settings` | `folders` — the preset file's own keys;
+        /// another word is INVALID_ARGUMENT.
+        section: String,
+        order: Vec<String>,
+        base_rev: String,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok PresetReorderOk {
+        // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Sets the backend of `items` in instructions, skills and hooks (`backend` unspecified = every backend). Applies
+    /// what it can: an item the preset does not list, or lists only in presets or settings, is in `skipped`. An unknown
+    /// backend word refuses the whole call, INVALID_ARGUMENT `backend-tag-unknown`. NOT_FOUND `not-found`; CONFLICT
+    /// `library-unavailable` · `mount-read-only` · `root-generation-stale` · `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.setBackend" => args PresetSetBackendArgs {
+        path: String,
+        items: Vec<String>,
+        backend: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok PresetSetBackendOk {
+        applied: Vec<String>,
+        skipped: Vec<SkippedRow>,
+        view: PresetView,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Replaces the four lists (and `hooks` and `folders`, when given — omitted = they stay) with the draft, all or
+    /// nothing: any mismatch (not a path, an unknown backend word, one item twice in a list, an item of another kind, a cycle, a
+    /// relative folder …) refuses the whole save, INVALID_ARGUMENT `preset-save-refused` listing each. A missing item
+    /// is allowed. `base_rev` (optional) = the `rev` you read; CONFLICT `rev-mismatch` = the file changed since.
+    /// NOT_FOUND `not-found`; CONFLICT `library-unavailable` · `mount-read-only` · `root-generation-stale` ·
+    /// `library-write-failed`.
+    #[effect(Write)]
+    #[since(9)]
+    "preset.save" => args PresetSaveArgs {
+        path: String,
+        presets: Vec<PresetEntryArg>,
+        instructions: Vec<PresetEntryArg>,
+        skills: Vec<PresetEntryArg>,
+        /// Omitted = the file's hooks stay.
+        // ADR-0420
+        hooks: Option<Vec<PresetEntryArg>>,
+        settings: Vec<PresetEntryArg>,
+        folders: Option<Vec<String>>,
+        base_rev: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok PresetSaveOk {
+        // ★The fields must not differ by a character from `PresetView`★ (`From<PresetView>`).
+        path: String,
+        rev: String,
+        description: Option<String>,
+        presets: Vec<PresetEntryRow>,
+        instructions: Vec<PresetEntryRow>,
+        skills: Vec<PresetEntryRow>,
+        hooks: Vec<PresetEntryRow>,
+        settings: Vec<PresetEntryRow>,
+        folders: Vec<FolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+        agents: u32,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// What a folder entry would load: the absolute `folder` normalized (`path`, `null` = not absolute), why
+    /// `preset.add` would refuse it (`refused`), and per backend (`backend`, unspecified = every one) and mode (`mode`,
+    /// unspecified = both) what that backend loads from it. `truncated` = the listing stopped at its cap, `skipped` =
+    /// entries it could not read, `unlisted` = why a folder that exists could not be listed. Reads only.
+    /// INVALID_ARGUMENT `backend-tag-unknown`; CONFLICT `library-unavailable` only from a daemon that runs no library.
+    // ADR-0341
+    #[effect(Read)]
+    #[since(9)]
+    "preset.previewFolder" => args PresetPreviewFolderArgs {
+        folder: String,
+        backend: Option<String>,
+        mode: Option<AgentOutputFormat>,
+    } -> ok PresetPreviewFolderOk {
+        path: Option<String>,
+        refused: Option<PreviewRefusalRow>,
+        loads: Vec<PreviewLoadRow>,
+        truncated: bool,
+        skipped: Vec<String>,
+        unlisted: Option<String>,
+    } errors [CONFLICT];
+
+    // ADR-0384
+    // ADR-0386
+    // An agent-preset edit answers the agent's presets as committed. `target` = the agent's name or id (NOT_FOUND /
+    //   CONFLICT with candidates when it points at none or several); NOT_FOUND `not-found` `{agent}` = the agent was
+    //   deleted meanwhile; INTERNAL `profile-edit-unavailable` = this daemon cannot write agents' presets.
+
+    /// An agent's presets: the Default slot, the attached presets, its working folder and why it is locked, its backend
+    /// and mode, `base_rev`, and the folders, conflicts, problems and notices a launch would meet — it leaves out the
+    /// `missing` problem rows (and the `library_unavailable` row of a library mount that is not registered or not
+    /// there) and refuses on the others.
+    #[effect(Read)]
+    #[since(9)]
+    "agent.presets" => args AgentPresetsArgs {
+        target: String,
+    } -> ok AgentPresetsOk {
+        // ★The fields must not differ by a character from `AgentPresetsView`★ — the pairing is
+        //   `From<AgentPresetsView>` (destructuring); field meanings: `AgentPresetsView`.
+        agent_id: String,
+        name: String,
+        default_preset: bool,
+        presets: Vec<String>,
+        cwd: String,
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        base_rev: String,
+        takes_presets: bool,
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Attaches `presets` (library presets; `engram/default` turns the Default slot on) after the `after` preset in
+    /// call order (else at the end). Applies what it can: each one it cannot attach is in `skipped` with why
+    /// (`not-found`, `wrong-kind`, `already-present`, `item-path-invalid`). CONFLICT `library-unavailable` (a library
+    /// preset named while the library cannot be read — with `mount` when that preset's mount cannot be read) ·
+    /// `root-generation-stale` applies nothing.
+    #[effect(Write)]
+    #[since(9)]
+    "agent.attachPreset" => args AgentAttachPresetArgs {
+        target: String,
+        presets: Vec<String>,
+        after: Option<String>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok AgentAttachPresetOk {
+        applied: Vec<String>,
+        skipped: Vec<SkippedRow>,
+        view: AgentPresetsView,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Detaches `presets` (every attached entry of each; `engram/default` turns the Default slot off — CONFLICT
+    /// `default-preset-detach` unless `yes`). Detaching what is not attached changes nothing; an entry that is not a
+    /// library path is matched by its exact text, and one that matches nothing refuses, INVALID_ARGUMENT
+    /// `item-path-invalid`. CONFLICT `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    "agent.detachPreset" => args AgentDetachPresetArgs {
+        target: String,
+        presets: Vec<String>,
+        /// Confirms turning the Default slot off. Unspecified = false.
+        yes: Option<bool>,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok AgentDetachPresetOk {
+        // ★The fields must not differ by a character from `AgentPresetsView`★ (`From<AgentPresetsView>`).
+        agent_id: String,
+        name: String,
+        default_preset: bool,
+        presets: Vec<String>,
+        cwd: String,
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        base_rev: String,
+        takes_presets: bool,
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// Puts the attached presets in `order` — every entry `agent.presets` shows, each once (a duplicate as often as it
+    /// is attached), else INVALID_ARGUMENT `reorder-order-mismatch` with the expected order in `args`. `base_rev` = the
+    /// `base_rev` you read; CONFLICT `rev-mismatch` = the attachments changed since (read them again). The Default slot
+    /// is untouched. CONFLICT `root-generation-stale`.
+    #[effect(Write)]
+    #[since(9)]
+    "agent.reorderPresets" => args AgentReorderPresetsArgs {
+        target: String,
+        order: Vec<String>,
+        base_rev: String,
+        /// The value `library.status` answered — refuses if a mount changed since. Unspecified = the current mounts.
+        root_generation: Option<u64>,
+    } -> ok AgentReorderPresetsOk {
+        // ★The fields must not differ by a character from `AgentPresetsView`★ (`From<AgentPresetsView>`).
+        agent_id: String,
+        name: String,
+        default_preset: bool,
+        presets: Vec<String>,
+        cwd: String,
+        workspace_lock: Option<String>,
+        backend: String,
+        mode: AgentOutputFormat,
+        base_rev: String,
+        takes_presets: bool,
+        folders: Vec<AgentFolderRow>,
+        conflicts: Vec<ProblemRow>,
+        problems: Vec<ProblemRow>,
+        notices: Vec<LaunchNoticeRow>,
+    } errors [NOT_FOUND, CONFLICT];
 }
 
 /// Commands that **move the input** of a live agent — the common entry looks at the input lease (`check_input`) first.
@@ -445,6 +1957,16 @@ declare_commands! {
 // ADR-0237
 pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput", "agent.interrupt"];
 
+/// Commands only the shell runs — the daemon's one entrance refuses them from a caller with no connection (every control
+/// route) and the control route's command list omits them; WS `ListCommands`, the bindings and the schema keep them (the
+/// shell finds them there).
+///
+/// ★Kept here rather than as a declaration-macro field★, as [`INPUT_AFFECTING`]. Every name must be a `Write` declaration
+/// of this block outside the `agent` family (`/control/agent` builds only `agent.<verb>` names; a test measures both).
+// ADR-0322 decision 1
+// ADR-0419
+pub const SHELL_ONLY: &[&str] = &["library.emptyTrash"];
+
 /// One roster row — only what this table sees from the manager. `live` = `Some(status)` means a session is attached (liveness = [`AgentStatus::is_live`] alone, ADR-0116).
 pub struct AgentRosterRow {
     pub id: AgentId,
@@ -454,19 +1976,24 @@ pub struct AgentRosterRow {
     pub live: Option<AgentStatus>,
 }
 
-/// The current state of the two roster stores — `agent.list` spreads it into [`RosterStoreRow`].
-// ADR-0291 R17 (D6)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RosterStoreStatus {
-    pub agents: StoreStatus,
-    pub presets: StoreStatus,
-}
-
-/// The launch result — the three fields this table sees.
+/// The result of a start — the fields this table reads.
 pub struct StartedAgent {
     pub id: AgentId,
     pub name: String,
     pub status: AgentStatus,
+    /// The launch notices for the reply — [`crate::manager::Activated::notices`].
+    pub notices: Vec<Notice>,
+}
+
+impl From<Activated> for StartedAgent {
+    fn from(Activated { info, notices }: Activated) -> Self {
+        Self {
+            id: info.id,
+            name: info.name,
+            status: info.status,
+            notices,
+        }
+    }
 }
 
 /// **Everything** the `agent.*` handlers have the manager do.
@@ -477,18 +2004,42 @@ pub struct StartedAgent {
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
-    /// The current state of the two roster stores (agents · presets).
+    /// The current state of the roster store (the profile file) — `agent.list` spreads it into [`RosterStoreRow`].
     // ADR-0291 R17 (D6)
-    fn store_status(&self) -> RosterStoreStatus;
+    fn store_status(&self) -> StoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
-    /// ★The three that change the roster (`create_agent` · `rename_agent` · `reparent_agent`) are changes with a caller★ — if the store
-    ///   does not accept the change, the roster is left as is and it is [`PtyError::Store`] (the manager's `try_` versions · ADR-0291 R17).
+    /// ★The roster-changing methods (`create_agent` · `rename_agent` · `reparent_agent` · `create_and_activate` ·
+    ///   `duplicate_agent` · `set_workspace`) are changes with a caller★ — if the store refuses the change the roster
+    ///   stays as it was and the answer is [`PtyError::Store`] (`set_workspace`: [`WorkspaceRefusal::Store`]) (the
+    ///   manager's `try_` variants · ADR-0291 R17). `create_and_activate` is partial: a refused add gives `created:
+    ///   false`; a failure after the add gives `created: true` and the row stays.
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
+    /// [`AgentCommandHost::create_agent`] whose registry insert first asks `still`, inside the registry's lock —
+    /// `Ok(None)` = it answered `false` and nothing was registered; every lock is released on return
+    /// ([`AgentManager::try_create_agent_if`]). `agent.new {presets}` passes the library change-number comparison
+    /// (ADR-0400 decision 18). No default: an implementation that asks `still` outside the lock its insert takes
+    /// would let a library change land between the answer and the insert.
+    fn create_agent_if(
+        &self,
+        profile: AgentProfile,
+        still: &dyn Fn() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError>;
+    /// The handler puts the returned notices on its success reply, so the activation counts as delivering them
+    /// ([`crate::manager::NoticeDelivery::Delivered`] — a start marks the set as shown for this agent).
     fn activate_profile(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError>;
+    /// Create-and-start for a profile whose id is not in the roster ([`AgentManager::create_and_activate`]) — the
+    /// host call of [`create_and_start`]. `delivery` = whether the caller shows the returned notices.
+    /// `Err(NotStarted { created: true, .. })` = the agent was registered and stays asleep.
+    // ADR-0348
+    fn create_and_activate(
+        &self,
+        profile: &AgentProfile,
+        delivery: NoticeDelivery,
+    ) -> Result<Activated, NotStarted>;
     fn rename_agent(
         &self,
         id: AgentId,
@@ -497,8 +2048,13 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★`Ok(false)` does not tell the reason★ — the manager gives only one bool (`ProfileRegistry::try_reparent`).
     /// Absence and a structural conflict are told apart by the handler **by re-querying the roster** (`verb_move`).
     fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
-    /// The working folder of one registered path bookmark (preset, ADR-0061). ★Pointing is **exact id match** only★ (preset names are not unique); a missing id and a non-id string are both `None` — the caller's remedy is the same (pick an id from the list again).
-    fn preset_cwd(&self, id: &str) -> Option<String>;
+    /// `agent.setWorkspace` ([`AgentManager::try_set_workspace`]) — `cwd` as typed; the manager normalizes and stats it.
+    // ADR-0386
+    fn set_workspace(&self, id: AgentId, cwd: &str) -> Result<WorkspaceSet, WorkspaceRefusal>;
+    /// `agent.duplicate` ([`AgentManager::try_duplicate_agent`]) — the registered copy. The handler asks the backend
+    /// policy before calling.
+    // ADR-0386
+    fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError>;
     /// The waiting list of the live incarnation. `None` = no live session.
     // ADR-0231
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing>;
@@ -596,11 +2152,8 @@ impl AgentCommandHost for AgentManager {
             .collect()
     }
 
-    fn store_status(&self) -> RosterStoreStatus {
-        RosterStoreStatus {
-            agents: self.agents_store_status(),
-            presets: self.presets().store_status(),
-        }
+    fn store_status(&self) -> StoreStatus {
+        self.agents_store_status()
     }
 
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
@@ -612,16 +2165,30 @@ impl AgentCommandHost for AgentManager {
         AgentManager::try_create_agent(self, profile)
     }
 
+    // ADR-0400 decision 18
+    fn create_agent_if(
+        &self,
+        profile: AgentProfile,
+        still: &dyn Fn() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError> {
+        AgentManager::try_create_agent_if(self, profile, still)
+    }
+
     fn activate_profile(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError> {
-        AgentManager::activate_profile(self, profile, mode).map(|info| StartedAgent {
-            id: info.id,
-            name: info.name,
-            status: info.status,
-        })
+        AgentManager::activate_profile_reporting(self, profile, mode, NoticeDelivery::Delivered)
+            .map(StartedAgent::from)
+    }
+
+    fn create_and_activate(
+        &self,
+        profile: &AgentProfile,
+        delivery: NoticeDelivery,
+    ) -> Result<Activated, NotStarted> {
+        AgentManager::create_and_activate(self, profile, delivery)
     }
 
     fn rename_agent(
@@ -636,13 +2203,12 @@ impl AgentCommandHost for AgentManager {
         AgentManager::try_reparent_agent(self, child, parent)
     }
 
-    fn preset_cwd(&self, id: &str) -> Option<String> {
-        let id: PresetId = id.parse().ok()?;
-        AgentManager::presets(self)
-            .list()
-            .into_iter()
-            .find(|preset| preset.id == id)
-            .map(|preset| preset.cwd.to_string_lossy().into_owned())
+    fn set_workspace(&self, id: AgentId, cwd: &str) -> Result<WorkspaceSet, WorkspaceRefusal> {
+        AgentManager::try_set_workspace(self, id, cwd)
+    }
+
+    fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+        AgentManager::try_duplicate_agent(self, id)
     }
 
     fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
@@ -676,26 +2242,42 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 // (canonical record: ADR-0219). Do not close the table again on the old coordinates (already rejected as (b) in ADR-0219's 「Rejected
 //   alternatives」).
 //
-// ★The home of the policy is here alone★ — two doors ask this decision, in different crates:
-//   ① `agent.new` (this file) — the declaration vocabulary `AgentBackend` is already narrowed by itself and this table stands one more
-//   layer on top (stops at runtime an edit widening the vocabulary without widening the policy).
-//   ② the daemon `SpawnByCwd` handler (`connection_core.rs`) — asks this table about the spawn packet's wire word and refuses before an
-//   instant profile goes onto the roster and disk (ADR-0279); the shell `agent.spawnInto` and the frontend
-//      `slot.createAgentHere` · `agent.spawn` all send this packet. ★This door does not distinguish callers — despite the name 「LLM
-//   control surface」 human paths see this table too★ (ADR-0279 「Accepted cost」; impact 0 today).
+// ★This table is the policy's only home★ — the doors that ask it live in two crates:
+//   ① `agent.new` (this file) — the declared vocabulary `AgentBackend` narrows on its own, and this table stands one
+//      layer above it (it stops, at run time, an edit that widens the vocabulary without widening the policy — that
+//      arm is not reached today).
+//   ② the daemon `SpawnByCwd` arm (`engram-dashboard-daemon` `connection_core.rs`) — does not ask the table itself:
+//      it hands its policy (production = [`llm_creation_refusal`]) to body ③, which asks with the declared spelling
+//      before the ad-hoc profile reaches the roster or the disk (ADR-0279 · ADR-0348). The shell `agent.spawnInto`
+//      and the front `slot.createAgentHere` · `agent.spawn` all send that packet.
+//      ★This door does not tell callers apart — despite the name "LLM control surface", human paths see this table
+//      too★ (the daemon does not know who sent the packet · ADR-0279 "accepted cost" · no effect today — the table
+//      closes nothing).
+//   ③ the one creation body [`create_and_start`] (this file; bus `agent.spawn --cwd`) — asked with the declared
+//      spelling before anything is registered (ADR-0348 decision 4). Pinned by
+//      `tests::the_body_refuses_a_closed_backend_before_calling_the_host` (the body) and
+//      `tests::the_bus_cwd_arm_hands_the_production_policy_to_the_body` (the wiring).
+//   ④ `agent.duplicate` (this file, [`verb_duplicate`]) — asked with the original's backend word (`launch::backend_word`,
+//      lowercase — the table compares ignoring case) before the host is called, so a shell or gemini original is not
+//      copied (the ADR-0279 cost, ADR-0386 decision 8).
 // ★The shell is not a door★ — `agent.spawnInto` carries only a typo net (`parse_backend`, asks the wire enum) and does not depend on this
 //   crate (ADR-0270 decision 1).
-// ★Creation paths that do not look at the table — do not miss them when counting doors★: the agent bus `agent.spawn` (fixed to claude) ·
-//   the daemon `CreateProfile` (the frontend's reserved-node creation doors such as `agentlist.createCodex`). The frontend
-// registry (`humanOnly`) is not a door looking at this table.
+// ★Some create paths do not see this table — do not miss them when counting doors★ (an uncounted door stays open
+// without ever asking): the daemon `CreateProfile` (the front's reserved-node create doors — `agentlist.createCodex`
+// and the like — go there). The front command registry (`humanOnly`) is not a door of this table — the codex door's
+// `humanOnly` was removed on 2026-09-22.
 // Per-door lists would show 「a backend one door creates but another cannot」. Mismatch measured at ①
 //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens` · `tests::new_advertises_exactly_the_backends_the_llm_policy_opens`
 //   (this file) ·
 // ② the daemon's `every_wire_backend_declares_an_llm_policy` in `connection_core.rs` · `the_production_core_asks_the_agent_backend_policy`
 //   · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
 //
-// ★Why by word, not by type★ — ② would bring the wire enum `protocol::AgentBackendKind`, but this crate does not depend on protocol (see
-//   this crate's `Cargo.toml` `[dependencies]` comment); only the word is shared, and ②'s first test catches spelling divergence.
+// ★Why the table is keyed by a word, not a type★ — the wire vocabulary lives in `protocol::AgentBackendKind`, which
+// this crate does not depend on (the canon of that ban = the `[dependencies]` comment in this crate's `Cargo.toml`),
+// so the one thing the daemon and this crate can both read is the word. The daemon maps the wire enum onto the
+// declared [`AgentBackend`] (a match with no wildcard) and the doors ask with the declared spelling
+// ([`backend_word`]); the table compares ignoring case. A wire word with no row in the table is caught by ②'s first
+// test (`every_wire_backend_declares_an_llm_policy`).
 
 /// One line of the policy table.
 pub struct LlmBackendPolicy {
@@ -785,35 +2367,33 @@ fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
     }
 }
 
-/// ★It says **what the text must carry**★ — a missing id and a non-id string get the same answer
-/// (`AgentCommandHost::preset_cwd`), so it must be guidance that can fix both at once.
-fn preset_not_found(id: &str) -> CommandError {
-    CommandError::not_found(format!(
-        "no registered path with id '{id}' — preset takes the id of a path bookmark, not its name or the folder path itself"
-    ))
-}
-
 /// Assembles the `agent.*` table — ★the only place real handlers come in★ (rule T-1).
 ///
 /// ★blocking contract★: handler bodies write to disk holding the profile lock and poll for resume early exit (`AgentManager::activate_profile`); polling on an async runtime thread would block it, so the assembly must call it behind `spawn_blocking` — both
 ///   surfaces (the daemon's `/control/agent` route and command bus delivery) come through that one common entry, which sits on the blocking pool.
 /// ★`notify` is an argument★: a roster-changing verb must notify (port doc) but the real thing is the daemon's; passing it makes it **impossible to omit** (a trait default would silently not be called).
 /// ★`usage` is an argument for the same reason★: the daemon owns the real `usage.*`; assemblies outside production (smoke bins · tests) pass a port without fields, where `usage.*` answers `NOT_FOUND`.
+/// ★`library` likewise★: production passes asset-library's service; other assemblies pass a port that answers
+///   `library-unavailable` (daemon `NoLibrary`).
 /// Command growth changes the declaration block and one line here, not the assembly (the executable).
 // ADR-0155
+// ADR-0386
 pub fn make_table(
     host: Arc<dyn AgentCommandHost>,
     notify: Arc<dyn RosterChanged>,
     usage: Arc<dyn UsageCommandHost>,
+    library: Arc<dyn LibraryCommandHost>,
 ) -> CommandTable {
     let mut table = CommandTable::new(COMMAND_SPECS);
 
     let list = Arc::clone(&host);
     let resolve = Arc::clone(&host);
     let spawn = (Arc::clone(&host), Arc::clone(&notify));
-    let new = (Arc::clone(&host), Arc::clone(&notify));
+    let new = (Arc::clone(&host), Arc::clone(&notify), Arc::clone(&library));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
     let move_ = (Arc::clone(&host), Arc::clone(&notify));
+    let set_workspace = (Arc::clone(&host), Arc::clone(&notify));
+    let duplicate = (Arc::clone(&host), Arc::clone(&notify));
     let list_queued = Arc::clone(&host);
     let cancel_queued = Arc::clone(&host);
     let interrupt = Arc::clone(&host);
@@ -847,7 +2427,7 @@ pub fn make_table(
         .insert(
             "agent.new",
             blocking_handler(move |args: AgentNewArgs| {
-                verb_new(new.0.as_ref(), new.1.as_ref(), args)
+                verb_new(new.0.as_ref(), new.1.as_ref(), new.2.as_ref(), args)
             }),
         )
         .expect("could not plug agent.new into the table");
@@ -867,6 +2447,23 @@ pub fn make_table(
             }),
         )
         .expect("could not plug agent.move into the table");
+    // ADR-0386: blocking — the folder stat waits on bounded IO (up to the read budget).
+    table
+        .insert(
+            "agent.setWorkspace",
+            blocking_handler(move |args: AgentSetWorkspaceArgs| {
+                verb_set_workspace(set_workspace.0.as_ref(), set_workspace.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.setWorkspace into the table");
+    table
+        .insert(
+            "agent.duplicate",
+            blocking_handler(move |args: AgentDuplicateArgs| {
+                verb_duplicate(duplicate.0.as_ref(), duplicate.1.as_ref(), args)
+            }),
+        )
+        .expect("could not plug agent.duplicate into the table");
     table
         .insert(
             "agent.listQueuedInputs",
@@ -908,6 +2505,7 @@ pub fn make_table(
             }),
         )
         .expect("could not plug usage.refresh into the table");
+    crate::library_commands::insert(&mut table, &host, library);
 
     table
 }
@@ -961,8 +2559,7 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
     Ok(AgentListOk {
         agents,
         store: RosterStoreRow {
-            agents: store_status_row(store.agents),
-            presets: store_status_row(store.presets),
+            agents: store_status_row(store),
         },
     })
 }
@@ -1090,7 +2687,27 @@ fn verb_spawn(
             "name does not apply when waking an existing agent ({token}) — changing a name is a separate verb, so drop this field"
         ))),
         (Some(token), None) => wake_existing(host, notify, token),
-        (None, Some(cwd)) => create_and_start(host, notify, cwd, name.map(str::to_string)),
+        // Claude fixed on purpose — `agent.new` is the one bus door that picks a backend; moves with front `agent.spawn`.
+        // ADR-0348
+        (None, Some(cwd)) => create_and_start(
+            host,
+            notify,
+            NewAgent {
+                cwd: cwd.to_string(),
+                name: name.map(str::to_string),
+                backend: AgentBackend::Claude,
+                policy: llm_creation_refusal,
+                delivery: NoticeDelivery::Delivered,
+            },
+        )
+        .map(|activated| started_payload(activated.into(), true))
+        .map_err(|refused| {
+            spawn_create_refusal(
+                refused,
+                &normalize_spelling(cwd),
+                &backend_word(&AgentBackend::Claude),
+            )
+        }),
     }
 }
 
@@ -1128,127 +2745,208 @@ fn wake_existing(
                 &error,
                 format!(
                     "could not start agent '{token}': {}",
-                    store_error_reason(AGENTS_FILE, &error)
+                    store_error_reason(PROFILES_FILE, &error)
                 ),
             ),
+        ),
+        // A launch refused before any process is a `CONFLICT` so the daemon releases the request id
+        //   (`command_delivery::retains_the_id`) — `INTERNAL` would hold it and swallow the fixed retry as
+        //   `ALREADY_APPLIED` (TRD S25 §1-5 (ga) 1 ①).
+        PtyError::LaunchBlocked(blocked) => CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for agent '{token}': {}; nothing was started — fix the listed items, then start it again",
+                launch_blocked_reason(&blocked)
+            ),
+        )
+        .with_args(blocked.to_args()),
+        PtyError::LaunchRaced => CommandError::with_retry(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for agent '{token}': {LAUNCH_RACED_CAUSE}; nothing was started — try again"
+            ),
+            RetryMode::AfterCondition,
+        ),
+        // ADR-0386: lost the reservation to `agent.setWorkspace` — retryable, so not `INTERNAL` (which keeps the id).
+        PtyError::WorkingFolderChanging => CommandError::with_retry(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for agent '{token}': {WORKING_FOLDER_CHANGING_CAUSE}; nothing was started — start it again once that change is done"
+            ),
+            RetryMode::AfterCondition,
         ),
         other => CommandError::internal(format!("could not start agent '{token}': {other}")),
     })?;
     Ok(started_payload(started, false))
 }
 
-fn create_and_start(
+/// A new agent to create in a folder and start — the input of [`create_and_start`].
+// ADR-0348
+pub struct NewAgent {
+    /// As the caller typed it — the body normalizes the spelling.
+    pub cwd: String,
+    /// The requested name; the registered one may differ (roster uniqueness suffix).
+    pub name: Option<String>,
+    pub backend: AgentBackend,
+    /// `None` = create · `Some(reason)` = refuse. Asked with the declared spelling (`"Claude"`, `"Codex"`).
+    /// Production = [`llm_creation_refusal`].
+    pub policy: fn(&str) -> Option<&'static str>,
+    /// Whether the caller shows the success reply's notices to a reader.
+    pub delivery: NoticeDelivery,
+}
+
+/// Why [`create_and_start`] did not answer with a started agent.
+// ADR-0348
+#[derive(Debug)]
+pub enum CreateRefused {
+    /// The backend policy refused — nothing registered, no last failure, the host was not called.
+    Policy { reason: &'static str },
+    /// Refused or failed with nothing registered now. In practice: a store refusal or write failure, the roster
+    /// ceiling, name space, or a launch block before the add (the pre-create check returns only `LaunchBlocked`); also
+    /// a failure after the add whose row a concurrent delete removed before the `created` probe (TRD §5).
+    NotCreated(PtyError),
+    /// The agent was registered and is asleep under `id` / `name`; `error` is why it did not start.
+    CreatedAsleep {
+        id: AgentId,
+        name: String,
+        error: PtyError,
+    },
+}
+
+/// ★The one creation body★ — every entrance that creates a new agent for a folder and starts it calls this; do not
+/// add a second body. Policy, spelling, the default launch command, the roster notify and the created/not-created
+/// split live here; the pre-create launch check, link verdict, last-failure record and notice delivery come from
+/// the host's Fresh activation path ([`AgentCommandHost::create_and_activate`]).
+///
+/// Notifies the roster once, after the activation, exactly when the agent was registered (success or
+/// [`CreateRefused::CreatedAsleep`]) — never for a refusal that left the roster as it was.
+/// Blocking — call it off async workers.
+// ADR-0348
+pub fn create_and_start(
     host: &dyn AgentCommandHost,
     notify: &dyn RosterChanged,
-    cwd: &str,
-    name: Option<String>,
-) -> Result<AgentSpawnOk, CommandError> {
-    // ★This verb has no format or backend field — the two values below are **chosen**★: when the vocabulary was claude alone `Claude` was
-    //   the only value, but since `agent.new` opened codex this is **an intended claude pin**.
-    // ★No field is added here★ — `agent.new` alone chooses backend and mode; a field here would split the choice across two doors (plus a
-    //   catalog generation bump and binding regeneration). A caller wanting codex registers with `agent.new` then wakes it with
-    //   `agent.spawn {target}`.
-    // ★The same-name frontend door (`agent.spawn` of `src/commands/agentCommands.ts`) is pinned to claude too — they move together.★ But
-    //   the policy table ([`LLM_BACKEND_POLICY`]) sees only the frontend door (via daemon `SpawnByCwd`); this verb does not ask (ADR-0279).
-    let stored = register(
-        host,
-        cwd,
-        name,
-        backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT),
-    )?;
-    notify.roster_changed();
-    let started = host.activate_profile(&stored, SpawnMode::Fresh);
-    // ★Announce **after** activation too — the notification above is a pre-activation snapshot★: in between 「last failure」 is recorded or
-    //   cleared (ADR-0172), an axis that flows only through the profile list. Especially on the failure branch: the Err below goes only to
-    //   the caller
-    //   and nothing remains on screen.
-    // ADR-0172
-    notify.roster_changed();
-    let started = started.map_err(|e| {
-            // ★The registration is not reverted★: the created agent stays in the roster asleep; rewinding would create a second deletion
-            //   path, and deletion semantics are undecided (ADR-0122).
-            // ★The text carries the recovery path★: the caller should **launch again by that name**, not 「create again」 — otherwise they
-            //   create again with the same cwd and names grow one by one.
-            let created_but = |reason: String| {
-                format!(
-                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name (in a moment) instead of creating another",
-                    stored.canonical_name_when_live(),
-                    stored.id
-                )
-            };
-            match e {
-                // ★The reason carries only the cause ([`store_error_cause`]) — no instruction★: 「again a little later」 would read as
-                //   creating again with the same `--cwd` (duplicates) and 「retrying is useless」 contradicts the later 「launch again by
-                //   that name」; the one trailing tail
-                //   gives what to do.
-                // ★Not `CONFLICT` even on a save refusal — this branch already created the agent★: the daemon reads `CONFLICT` as 「a
-                //   rejection with nothing applied」 and lets go of the request number (`command_delivery::retains_the_id`); a retry with
-                //   the same number would then
-                //   create again, leaving an undeletable duplicate (ADR-0122). Only `INTERNAL` holds the number.
+    req: NewAgent,
+) -> Result<Activated, CreateRefused> {
+    if let Some(reason) = (req.policy)(&backend_word(&req.backend)) {
+        return Err(CreateRefused::Policy { reason });
+    }
+    let profile = new_profile(
+        &req.cwd,
+        req.name,
+        backend_command(req.backend, NEW_AGENT_OUTPUT_FORMAT),
+    );
+    let id = profile.id;
+    match host.create_and_activate(&profile, req.delivery) {
+        Ok(activated) => {
+            notify.roster_changed();
+            Ok(activated)
+        }
+        Err(NotStarted {
+            error,
+            created: false,
+        }) => Err(CreateRefused::NotCreated(error)),
+        // Announced even though it failed: the asleep row and its last failure reach the screen only through the
+        //   roster frames (ADR-0172).
+        Err(NotStarted {
+            error,
+            created: true,
+        }) => {
+            notify.roster_changed();
+            let name = host
+                .agent_snapshot(id)
+                .map_or_else(|| id.to_string(), |p| p.canonical_name_when_live());
+            Err(CreateRefused::CreatedAsleep { id, name, error })
+        }
+    }
+}
+
+/// The text of a create that registered the agent but did not start it:
+/// `agent '<name>' (<id>) was created but did not start: <cause> — it is registered and asleep, so <next> instead of
+/// creating another`. `<cause>` carries no instruction of its own (a "try again" reads as "create again"); `<next>`
+/// says to start that agent by name — after fixing the listed items for a block, which does not clear by waiting.
+// ADR-0348
+pub fn created_but_not_started(name: &str, id: AgentId, error: &PtyError) -> String {
+    const AGAIN: &str = "start it again by that name (in a moment)";
+    let (cause, next) = match error {
+        PtyError::Store(store) => (store_error_cause(PROFILES_FILE, store), AGAIN),
+        PtyError::LaunchBlocked(blocked) => (
+            launch_blocked_reason(blocked),
+            "fix the listed items first, then start it by that name",
+        ),
+        // The cause only — `PtyError::LaunchRaced`'s text ends in "try again".
+        PtyError::LaunchRaced => (LAUNCH_RACED_CAUSE.to_string(), AGAIN),
+        other => (other.to_string(), AGAIN),
+    };
+    format!(
+        "agent '{name}' ({id}) was created but did not start: {cause} — it is registered and asleep, so {next} instead of creating another"
+    )
+}
+
+/// The bus answer of a [`create_and_start`] refusal. `cwd` names the folder in a block's text; `word` names the
+/// backend in the policy text.
+// Every failure after the add answers INTERNAL with `args.agent_id`: the agent stays registered, and a CONFLICT would
+//   release the request id so a same-id retry creates an undeletable duplicate. A refusal before the add is a
+//   CONFLICT so the fixed retry is not swallowed (`command_delivery::retains_the_id`).
+// ADR-0122
+// ADR-0348
+fn spawn_create_refusal(refused: CreateRefused, cwd: &str, word: &str) -> CommandError {
+    match refused {
+        CreateRefused::Policy { reason } => policy_refusal(word, reason),
+        CreateRefused::NotCreated(PtyError::LaunchBlocked(blocked)) => CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for a new agent in '{cwd}': {}; nothing was created — fix the listed items, then try again",
+                launch_blocked_reason(&blocked)
+            ),
+        )
+        .with_args(blocked.to_args()),
+        // The pre-create check never races (it returns only a block); this arm is reached only when a concurrent
+        //   delete removed a row that raced after the add — "nothing was created" is then true of the end state.
+        CreateRefused::NotCreated(PtyError::LaunchRaced) => CommandError::with_retry(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for a new agent in '{cwd}': {LAUNCH_RACED_CAUSE}; nothing was created — try again"
+            ),
+            RetryMode::AfterCondition,
+        ),
+        CreateRefused::NotCreated(other) => create_error(other, cwd),
+        CreateRefused::CreatedAsleep { id, name, error } => {
+            let text = created_but_not_started(&name, id, &error);
+            let (failure, mut args) = match error {
                 // ADR-0291 R17
-                PtyError::Store(error) => store_error(
-                    "start",
-                    &error,
-                    CommandError::internal(created_but(store_error_cause(AGENTS_FILE, &error))),
+                PtyError::Store(store) => (
+                    store_error("start", &store, CommandError::internal(text)),
+                    serde_json::Map::new(),
                 ),
-                other => CommandError::internal(created_but(other.to_string())),
-            }
-        })?;
-    Ok(started_payload(started, true))
+                PtyError::LaunchBlocked(blocked) => {
+                    (CommandError::internal(text), blocked.to_args())
+                }
+                _ => (CommandError::internal(text), serde_json::Map::new()),
+            };
+            args.insert("agent_id".into(), id.to_string().into());
+            failure.with_args(args)
+        }
+    }
+}
+
+/// A backend the policy closes — the same words on every door that asks it.
+fn policy_refusal(word: &str, reason: &str) -> CommandError {
+    CommandError::invalid_argument(format!(
+        "backend '{word}' is a known word, but this surface does not create it now — {reason}"
+    ))
 }
 
 fn verb_new(
     host: &dyn AgentCommandHost,
     notify: &dyn RosterChanged,
+    library: &dyn LibraryCommandHost,
     args: AgentNewArgs,
 ) -> Result<AgentNewOk, CommandError> {
-    let (cwd, preset, name) = (
-        args.cwd.as_deref(),
-        args.preset.as_deref(),
-        args.name.as_deref(),
-    );
-    // ★Neither field is 「may be omitted」★ — one must be present, so the blank-value guidance points at the **sibling field** too.
-    //   Otherwise a retry that omitted it as told would be rejected again with 「one of the two must be given」.
+    let (cwd, name) = (args.cwd.as_str(), args.name.as_deref());
     reject_blanks(&[
-        (
-            "cwd",
-            cwd,
-            Blank::OrElse("a folder path, or give preset instead"),
-        ),
-        (
-            "preset",
-            preset,
-            Blank::OrElse("the id of a registered path, or give cwd instead"),
-        ),
+        ("cwd", Some(cwd), Blank::NeedsValue),
         ("name", name, Blank::OrOmit),
     ])?;
-    // ★Two fields can say which folder — do not silently choose one★ (the same discipline as target/cwd of
-    //   `agent.spawn`): if both are given there is no ground to choose, and if neither, there is no place to create.
-    let cwd = match (cwd, preset) {
-        (Some(_), Some(_)) => {
-            return Err(CommandError::invalid_argument(
-                "new takes either a folder (cwd) or a registered path (preset), not both",
-            ))
-        }
-        (None, None) => return Err(CommandError::invalid_argument(
-            "new needs either cwd (a folder to work in) or preset (the id of a registered path)",
-        )),
-        (Some(cwd), None) => cwd.to_string(),
-        (None, Some(id)) => {
-            let stored = host.preset_cwd(id).ok_or_else(|| preset_not_found(id))?;
-            // ★A value that came in a preset gets **the same check as a value given directly**★: `reject_blanks` above looks only at
-            //   caller-typed fields, and preset registration has no value validation (`CreatePreset` stores the string as is) nor does
-            //   `register` filter an empty folder
-            //   (nothing in the core produces `PtyError::CwdDenied`), so an agent with an empty working folder would sit in the roster
-            //   with no verb to delete it (ADR-0122).
-            if is_blank(Some(&stored)) {
-                return Err(CommandError::invalid_argument(format!(
-                    "the registered path '{id}' has a blank folder, so there is nothing to work in — register that path again with a real folder, or pass cwd directly"
-                )));
-            }
-            stored
-        }
-    };
     // ★No default★ — unspecified is rejected by deserialization (`AgentNewArgs::backend` doc). Do not bring back `unwrap_or(Claude)`: with
     //   two backends it silently folds 「did not choose」 into claude (already removed from the spawn packet for the same reason).
     let backend = args.backend.clone();
@@ -1260,48 +2958,104 @@ fn verb_new(
     //   ★Do not delete it★ — it blocks 「widening the vocabulary without widening [`LLM_BACKEND_POLICY`]」 and comes alive the day that edit
     //   arrives; `tests::new_creates_exactly_what_the_llm_backend_policy_opens` measures that (red if the vocabulary is widened without
     //   opening the
-    //   table). Sibling door: the daemon `SpawnByCwd` handler (`connection_core.rs` — does not distinguish callers · ADR-0279), which also
-    //   blocks nothing by policy today. The shell `agent.spawnInto` is not a door (its refusal is the `parse_backend` typo net, ADR-0270);
+    //   table). Sibling door: the one creation body [`create_and_start`] (called by the daemon `SpawnByCwd` · the bus `agent.spawn --cwd` —
+    //   does not distinguish callers · ADR-0279 · ADR-0348), which also blocks nothing by policy today. The shell `agent.spawnInto` is not a door (its refusal is the `parse_backend` typo net, ADR-0270);
     //   the frontend `commands/registry.ts` is not a sibling door.
     if let Some(reason) = llm_creation_refusal(&word) {
-        return Err(CommandError::invalid_argument(format!(
-            "backend '{word}' is a known word, but this surface does not create it now — {reason}"
-        )));
+        return Err(policy_refusal(&word, reason));
     }
-    let stored = register(
-        host,
-        &cwd,
+    let profile = new_profile(
+        cwd,
         name.map(str::to_string),
         backend_command(backend, output_format(args.output_format)),
-    )?;
+    );
+    // ADR-0386: judged before the create under one library read lock, released before `create_agent` takes the
+    //   name-allocation gate; the profile is created with the accepted list in one registry write — no profile-edit
+    //   port step after it, so no failure can follow the create. Without `presets` nothing is judged and
+    //   `root_generation` is not read.
+    // ADR-0400 decision 18: the registry insert inserts only while the library's change number is still the one the
+    //   judgement was made at; on a change nothing is inserted, every lock is released, and the request — its paths
+    //   as given — is judged again. It ends once no library change lands between a judgement and its insert.
+    let (stored, skipped) = loop {
+        let Some(presets) = &args.presets else {
+            break (register(host, profile)?, Vec::new());
+        };
+        let judged = library
+            .judge_new_presets(&profile, presets, args.root_generation)
+            .map_err(|refusal| refusal_error("agent.new", refusal))?;
+        let mut judged_profile = profile.clone();
+        judged_profile.default_preset = judged.attachments.default_preset;
+        judged_profile.presets = judged.attachments.presets;
+        let Some(at) = judged.change else {
+            break (register(host, judged_profile)?, judged.skipped);
+        };
+        let still = || library.change_number() == Some(at);
+        match register_if(host, judged_profile, &still)? {
+            Some(stored) => break (stored, judged.skipped),
+            None => tracing::debug!(
+                judged_at = at,
+                "agent.new: the library changed between the judgement and the insert; judging again"
+            ),
+        }
+    };
     notify.roster_changed();
     Ok(AgentNewOk {
         agent_id: stored.id.to_string(),
         name: stored.canonical_name_when_live(),
         state: AGENT_STATE_SLEEPING.to_string(),
+        skipped,
     })
 }
 
-/// The common part of roster registration — `agent.new` and `agent.spawn --cwd` share it.
+/// The registration of `agent.new` (create without starting).
 ///
 /// ★The settled name can differ from the requested one★: a suffix is attached for global roster uniqueness (ADR-0120/0123), so the response reads the name from **the registered value** — the requested name would diverge from the screen and address.
 fn register(
     host: &dyn AgentCommandHost,
-    cwd: &str,
-    name: Option<String>,
-    command: AgentCommand,
+    profile: AgentProfile,
 ) -> Result<AgentProfile, CommandError> {
-    // ★The typed spelling is tidied here★: people and LLMs fill this field, Windows paths are typed as `C:\work\thing`, and shell values
-    //   sometimes arrive wrapped in `"…"` because of spaces; unabsorbed, an agent 「whose folder name is weird as a whole」 would sit in the
-    //   roster with no verb to delete it (ADR-0122). Only the spelling is tidied; the existence check is later (spawn's
-    //   `dunce::canonicalize`). Not stripping an empty pair of quotes guards the earlier blank-value check (`reject_blanks`).
-    let cwd = &normalize_spelling(cwd);
-    let mut profile =
-        AgentProfile::new(cwd.to_string(), command, PathBuf::from(cwd), vec![], false);
+    let cwd = profile.cwd.to_string_lossy().into_owned();
+    host.create_agent(profile)
+        .map_err(|e| create_error(e, &cwd))
+}
+
+/// [`register`] whose insert inserts only while `still` answers `true` ([`AgentCommandHost::create_agent_if`]);
+/// `Ok(None)` = nothing registered.
+// ADR-0400 decision 18
+fn register_if(
+    host: &dyn AgentCommandHost,
+    profile: AgentProfile,
+    still: &dyn Fn() -> bool,
+) -> Result<Option<AgentProfile>, CommandError> {
+    let cwd = profile.cwd.to_string_lossy().into_owned();
+    host.create_agent_if(profile, still)
+        .map_err(|e| create_error(e, &cwd))
+}
+
+/// A new agent's profile for the folder the caller typed — both create doors (`agent.new` · the one creation body)
+/// build it here.
+// ADR-0348
+fn new_profile(cwd: &str, name: Option<String>, command: AgentCommand) -> AgentProfile {
+    // ★The typed spelling is settled here★: people and LLMs fill this field, and Windows paths come as
+    //   `C:\work\thing`; values from a shell sometimes arrive still wrapped in `"…"` because of spaces. Absorb both
+    //   here, or an agent with a garbled folder name sits in the roster with no verb to remove it (ADR-0122).
+    //   Only the spelling is chosen here — whether the folder exists is not checked. For a stdio start a missing
+    //   folder fails the process spawn (a failure after the add · ADR-0348); a PTY profile (`agent.new` can build
+    //   one) has been observed to start with a missing folder — where that process then runs is unverified.
+    //   An empty quote pair is not stripped, so `reject_blanks` still holds.
+    let cwd = normalize_spelling(cwd);
+    let mut profile = AgentProfile::new(cwd.clone(), command, PathBuf::from(&cwd), vec![], false);
     profile.display_name = name;
+    profile
+}
+
+/// A create refused or failed with nothing registered. `cwd` = the normalized folder, for the
+/// out-of-workspace text. Shared by `agent.new` and the bus `agent.spawn --cwd` refusal.
+// ADR-0348
+fn create_error(e: PtyError, cwd: &str) -> CommandError {
     // ★The caller has different things to do per failure reason★ — free a slot (CONFLICT) · fix the arguments
     //   (INVALID_ARGUMENT) · retrying is useless (INTERNAL). Mashing them into one code would lose that split.
-    host.create_agent(profile).map_err(|e| match e {
+    match e {
         // ★The text reveals the **nature** of the cap★: without this line, the first reaction of a caller (person · LLM) hitting the cap
         //   would be
         //   "raise the number" — that would be removing by oneself the backstop placed to stop runaway creation loops.
@@ -1325,12 +3079,12 @@ fn register(
                 &error,
                 format!(
                     "could not register a new agent: {} — nothing was registered",
-                    store_error_reason(AGENTS_FILE, &error)
+                    store_error_reason(PROFILES_FILE, &error)
                 ),
             ),
         ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
-    })
+    }
 }
 
 fn verb_rename(
@@ -1356,7 +3110,7 @@ fn verb_rename(
                     &error,
                     format!(
                         "could not rename '{token}': {} — the name was left as it is",
-                        store_error_reason(AGENTS_FILE, &error)
+                        store_error_reason(PROFILES_FILE, &error)
                     ),
                 ),
             ),
@@ -1433,7 +3187,7 @@ fn verb_move(
                 &error,
                 format!(
                     "could not move '{token}': {} — it was left where it was",
-                    store_error_reason(AGENTS_FILE, &error)
+                    store_error_reason(PROFILES_FILE, &error)
                 ),
             ),
         ),
@@ -1481,6 +3235,111 @@ fn verb_move(
         //   the caller's decider as "an unreadable response".
         name: current_name(host, child.id).unwrap_or(child.name),
         parent: parent.map(|p| p.to_string()),
+    })
+}
+
+/// `agent.setWorkspace`'s refusal codes — args `{cwd, why}` and `{reason}`.
+// ADR-0386
+pub const WORKSPACE_NOT_FOUND: &str = "workspace-not-found";
+pub const WORKSPACE_LOCKED: &str = "workspace-locked";
+/// The `workspace-locked` reason when another working-folder change holds the agent.
+pub const WORKSPACE_CHANGING: &str = "changing";
+
+// ADR-0321
+// ADR-0386
+fn verb_set_workspace(
+    host: &dyn AgentCommandHost,
+    notify: &dyn RosterChanged,
+    args: AgentSetWorkspaceArgs,
+) -> Result<AgentSetWorkspaceOk, CommandError> {
+    let (token, cwd) = (args.target.as_str(), args.cwd.as_str());
+    reject_blanks(&[
+        ("target", Some(token), Blank::NeedsValue),
+        ("cwd", Some(cwd), Blank::NeedsValue),
+    ])?;
+    let id = resolve(host, token)?.id;
+    // A refusal changed nothing, so there is nothing to announce.
+    let set = host
+        .set_workspace(id, cwd)
+        .map_err(|refusal| workspace_refusal(token, refusal))?;
+    // ADR-0386: the tree shows the folder.
+    notify.roster_changed();
+    Ok(AgentSetWorkspaceOk {
+        agent_id: id.to_string(),
+        name: set.name,
+        cwd: set.cwd,
+    })
+}
+
+/// A `agent.setWorkspace` refusal as a command error — the coded ones in the `{code, args}` shape every coded refusal
+/// carries ([`coded_error`]), an agent gone as the resolver's `NOT_FOUND`. A refusal that clears by itself — a stat
+/// that timed out, a share not reachable, a launch preparing, another change — carries the retry directive; one only
+/// a different call or a different state fixes (not absolute, missing, running, conversed) does not.
+// ADR-0386 decision 14: the clearable ones answer `AfterCondition`, as the library's do.
+// ADR-0387
+fn workspace_refusal(token: &str, refusal: WorkspaceRefusal) -> CommandError {
+    const COMMAND: &str = "agent.setWorkspace";
+    let coded = |class: PortClass, code: &str, args: serde_json::Value, clearable: bool| {
+        let reason = Reason {
+            code: code.to_owned(),
+            args,
+            line: None,
+        };
+        coded_error(COMMAND, class, &reason, clearable)
+    };
+    match refusal {
+        WorkspaceRefusal::FolderNotFound { cwd, why } => {
+            let clearable =
+                why == crate::launch::STAT_TIMED_OUT || why == crate::launch::SHARE_NOT_REACHABLE;
+            coded(
+                PortClass::InvalidArgument,
+                WORKSPACE_NOT_FOUND,
+                serde_json::json!({ "cwd": cwd, "why": why }),
+                clearable,
+            )
+        }
+        WorkspaceRefusal::Locked(lock) => coded(
+            PortClass::Conflict,
+            WORKSPACE_LOCKED,
+            serde_json::json!({ "reason": lock.word() }),
+            lock == crate::profile_edit::WorkspaceLock::Preparing,
+        ),
+        WorkspaceRefusal::Changing => coded(
+            PortClass::Conflict,
+            WORKSPACE_LOCKED,
+            serde_json::json!({ "reason": WORKSPACE_CHANGING }),
+            true,
+        ),
+        WorkspaceRefusal::NotFound => not_found(token),
+        WorkspaceRefusal::Store(error) => refusal_error(COMMAND, PortRefusal::Store(error)),
+    }
+}
+
+/// An LLM creation door (policy header ④): the original's backend must be one this surface creates.
+// ADR-0279
+// ADR-0386
+fn verb_duplicate(
+    host: &dyn AgentCommandHost,
+    notify: &dyn RosterChanged,
+    args: AgentDuplicateArgs,
+) -> Result<AgentDuplicateOk, CommandError> {
+    let token = args.target.as_str();
+    reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
+    let id = resolve(host, token)?.id;
+    let original = host.agent_snapshot(id).ok_or_else(|| not_found(token))?;
+    let word = crate::launch::backend_word(&original.command);
+    if let Some(reason) = llm_creation_refusal(&word) {
+        return Err(policy_refusal(&word, reason));
+    }
+    let copy = host.duplicate_agent(id).map_err(|e| match e {
+        PtyError::NotFound(_) => not_found(token),
+        other => create_error(other, &original.cwd.to_string_lossy()),
+    })?;
+    notify.roster_changed();
+    Ok(AgentDuplicateOk {
+        agent_id: copy.id.to_string(),
+        name: copy.canonical_name_when_live(),
+        state: AGENT_STATE_SLEEPING.to_string(),
     })
 }
 
@@ -1585,7 +3444,7 @@ fn verb_interrupt(
     }
 }
 
-/// A change with a caller that the store (profiles · presets) did not accept → a caller error (code + retry instruction). The bus and WS (daemon `connection_core`) use this, and the shell settings (`settings.set` · `settings.reset`) follow the same split:
+/// A change with a caller that the store (profiles) did not accept → a caller error (code + retry instruction). The bus and WS (daemon `connection_core`) use this, and the shell settings (`settings.set` · `settings.reset`) follow the same split:
 /// - A store refused at load (read-only for this whole run, any cause) = `CONFLICT` · `never` — clears only by fixing or replacing the file and restarting the daemon.
 /// - A refusal by the re-decision right before writing — file written by a newer edition = `CONFLICT` · `never` (same while that file stays) · unreadable = `CONFLICT` · `after-condition` (usually a briefly held lock).
 /// - Write failure = `INTERNAL`.
@@ -1650,10 +3509,14 @@ fn store_error_cause(file: &str, error: &StoreError) -> String {
 /// Returns the caller error (`failure`) of a change the store did not accept as is, while recording it — ★the one line recording the refusal is here alone★ (where that request becomes an error on this surface). The store's log is the file-side fact (what blocked),
 /// this line the request-side fact (which request). `action` = what it was trying to do. Caller-typed values (names · paths) are not logged.
 // ADR-0291 R17
-fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
+pub(crate) fn store_error(
+    action: &'static str,
+    error: &StoreError,
+    failure: CommandError,
+) -> CommandError {
     tracing::warn!(
         action,
-        file = AGENTS_FILE,
+        file = PROFILES_FILE,
         %error,
         "the store did not accept it, so this request is returned as an error (command bus)"
     );
@@ -1680,7 +3543,40 @@ fn started_payload(started: StartedAgent, created: bool) -> AgentSpawnOk {
         name: started.name,
         state: state_of(Some(&started.status)).to_string(),
         created,
+        notices: started.notices.into_iter().map(launch_notice_row).collect(),
     }
+}
+
+/// A launch notice as the declared row — its text by [`notice_text`].
+pub fn launch_notice_row(notice: Notice) -> LaunchNoticeRow {
+    LaunchNoticeRow {
+        text: notice_text(&notice),
+        code: notice.code,
+        args: notice.args,
+        line: notice.line,
+    }
+}
+
+/// The start of every `agent.spawn` refusal of a launch before any process (a block or a race — `CONFLICT`). Such a
+/// message ends with its own next step, so a surface adds no recovery tail of its own (daemon `control::agent`).
+pub const LAUNCH_REFUSAL: &str = "launch refused";
+
+/// Why a launch raced — the cause only; the next step belongs to the message that carries it.
+const LAUNCH_RACED_CAUSE: &str = "its launch inputs (presets or their library files, command or env) changed while it was being prepared";
+
+/// Why a launch lost its reservation to a working-folder change — the cause only, as [`LAUNCH_RACED_CAUSE`].
+// ADR-0386
+const WORKING_FOLDER_CHANGING_CAUSE: &str =
+    "its working folder is being changed (agent.setWorkspace)";
+
+/// The cause of a launch block, without a next step — English, like the rest of this surface. The reasons
+/// themselves travel in the error's args ([`LaunchBlocked::to_args`]), so `LaunchBlocked`'s `Display` is not
+/// used here.
+fn launch_blocked_reason(blocked: &LaunchBlocked) -> String {
+    format!(
+        "its launch is blocked — {} reason(s) in args.reasons (a broken or unreadable item, a conflict, or a library mount that cannot be read)",
+        blocked.reasons.len()
+    )
 }
 
 /// **The single mapping** of state → wire vocabulary; the predicate is [`AgentStatus::is_live`] alone (ADR-0116).
@@ -1699,7 +3595,10 @@ fn state_of(status: Option<&AgentStatus>) -> &'static str {
 /// ★Do not bring in a lenient resolver★: people and LLMs read the mail recipient token and the control pointing token as the same X; diverging resolution would make the agent that got the mail differ from the one renamed — guarded by the daemon crate's cross-check
 /// test running [`resolve_in`].
 // ADR-0132
-fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, CommandError> {
+pub(crate) fn resolve(
+    host: &dyn AgentCommandHost,
+    token: &str,
+) -> Result<ResolvedAgent, CommandError> {
     resolve_in(&host.roster(), token)
 }
 
@@ -1815,7 +3714,7 @@ fn not_found_message(token: &str) -> String {
 /// ★Emitted **all gathered**, not cut per field★: cutting at the first would make a caller sending three blanks repeat rejection and fix three times (like the entry's unknown-field check — `CommandTable::check_args`).
 /// ★Guidance differs **per field** (load-bearing)★: a caller (especially an LLM) rejected again after doing as told circles the same place — telling a required field "may be omitted" gets the omitting retry rejected as 「missing」, and telling a field where `null` is an
 /// active instruction only "fill in a value" hides that branch. Each field gets **the way that works for that field** ([`Blank`]).
-fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandError> {
+pub(crate) fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandError> {
     let advice: Vec<String> = fields
         .iter()
         .filter(|(_, given, _)| is_blank(*given))
@@ -1835,7 +3734,7 @@ fn reject_blanks(fields: &[(&str, Option<&str>, Blank)]) -> Result<(), CommandEr
 }
 
 /// **What actually works** for a field that came blank.
-enum Blank<'a> {
+pub(crate) enum Blank<'a> {
     /// A value is required (omitting it is rejected as 「missing」).
     NeedsValue,
     /// Putting a value in or omitting the field entirely works.
@@ -1866,6 +3765,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::launch::{notice_row, BlockReason, Reason};
 
     /// Fake manager — ★neither a process nor a PTY★. If this harness does not stand, T-1 is broken.
     #[derive(Default)]
@@ -1876,13 +3776,21 @@ mod tests {
         rename_result: Mutex<Option<RenameOutcome>>,
         reparent_ok: Mutex<bool>,
         start_fails: Mutex<bool>,
+        /// The next activation's error (taken once) — a launch block or race.
+        start_error: Mutex<Option<PtyError>>,
+        /// The notices every successful activation returns.
+        start_notices: Mutex<Vec<Notice>>,
+        /// The next create's error (taken once) — `create_agent`'s, and for `create_and_activate` a refusal before
+        /// the add (nothing registered).
         create_fails: Mutex<Option<PtyError>>,
+        /// Every `create_and_activate` call — the profile the body built and the delivery it asked for.
+        creates: Mutex<Vec<(AgentProfile, NoticeDelivery)>>,
         /// When on, the three that change the roster and activation come back with a save refusal (a file written by a newer edition) — the roster is unchanged.
         // ADR-0291 R17
         store_refuses: Mutex<bool>,
-        /// The store state `agent.list` carries — by default both writable.
+        /// The store state `agent.list` carries — writable by default.
         // ADR-0291 R17 (D6)
-        store_status: Mutex<RosterStoreStatus>,
+        store_status: Mutex<StoreStatus>,
         /// The target to delete from the roster **inside** the reparent call — reproduces 「vanished in the meantime」 (child or parent). ★Deleted regardless of apply success★: after a failure it exercises the reason branch, after success the response name's fallback;
         /// one side only would leave the other side's code unreached.
         vanish_on_reparent: Mutex<Option<AgentId>>,
@@ -1891,8 +3799,6 @@ mod tests {
         started_status: Mutex<Option<AgentStatus>>,
         /// The new name the child gets right after a reparent succeeds — reproduces 「a rename slipped in after applying」.
         rename_on_reparent: Mutex<Option<String>>,
-        /// Registered path bookmarks (id → cwd) — the material measuring that preset pointing **actually fetches a folder**.
-        presets: Mutex<HashMap<String, String>>,
         /// The answer of the waiting-list query. `None` = no live session.
         queued_listing: Mutex<Option<QueuedListing>>,
         /// The answer of the queued input cancellation (used once and emptied). `NotFound` if empty.
@@ -1903,6 +3809,14 @@ mod tests {
         interrupt_answer: Mutex<Option<Result<(), PtyError>>>,
         /// The pointing the interrupt handed to the manager.
         interrupt_calls: Mutex<Vec<AgentId>>,
+        /// The next `set_workspace` answer (taken once). Empty = set: the agent's row name and the folder as given.
+        workspace_answer: Mutex<Option<Result<WorkspaceSet, WorkspaceRefusal>>>,
+        /// What the handler handed `set_workspace` — the resolved id and the folder as typed.
+        workspace_calls: Mutex<Vec<(AgentId, String)>>,
+        /// The next `duplicate_agent` answer (taken once). Empty = a copy named `<name>(1)`, not registered.
+        duplicate_answer: Mutex<Option<Result<AgentProfile, PtyError>>>,
+        /// What the handler handed `duplicate_agent`.
+        duplicate_calls: Mutex<Vec<AgentId>>,
     }
 
     /// Roster notification counter — the watcher of 「renamed but the tree shows the old roster」.
@@ -1940,11 +3854,22 @@ mod tests {
     }
 
     fn wiring(host: &Arc<FakeHost>) -> (CommandTable, Arc<FakeNotify>) {
+        wiring_with_library(
+            host,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
+        )
+    }
+
+    fn wiring_with_library(
+        host: &Arc<FakeHost>,
+        library: Arc<dyn LibraryCommandHost>,
+    ) -> (CommandTable, Arc<FakeNotify>) {
         let notify = Arc::new(FakeNotify::default());
         let table = make_table(
             Arc::clone(host) as Arc<dyn AgentCommandHost>,
             Arc::clone(&notify) as Arc<dyn RosterChanged>,
             Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            library,
         );
         (table, notify)
     }
@@ -1969,13 +3894,6 @@ mod tests {
 
         fn with_agent(self: &Arc<Self>, name: &str, live: bool, resumable: bool) -> AgentId {
             self.with_status(name, live.then_some(AgentStatus::Running), resumable)
-        }
-
-        fn with_preset(self: &Arc<Self>, id: &str, cwd: &str) {
-            self.presets
-                .lock()
-                .unwrap()
-                .insert(id.to_string(), cwd.to_string());
         }
 
         /// Plants the row's state **as is** — to measure what word a terminal-state row comes out as in `list`,
@@ -2031,6 +3949,19 @@ mod tests {
         }
     }
 
+    /// A fake's conditional create: the fakes hold no registry lock, so `still` is asked right before the create —
+    /// enough for a handler test on one thread.
+    fn ask_then_create(
+        host: &dyn AgentCommandHost,
+        profile: AgentProfile,
+        still: &dyn Fn() -> bool,
+    ) -> Result<Option<AgentProfile>, PtyError> {
+        if !still() {
+            return Ok(None);
+        }
+        host.create_agent(profile).map(Some)
+    }
+
     impl AgentCommandHost for FakeHost {
         fn roster(&self) -> Vec<AgentRosterRow> {
             self.rows
@@ -2047,7 +3978,7 @@ mod tests {
                 .collect()
         }
 
-        fn store_status(&self) -> RosterStoreStatus {
+        fn store_status(&self) -> StoreStatus {
             *self.store_status.lock().unwrap()
         }
 
@@ -2073,6 +4004,14 @@ mod tests {
             Ok(profile)
         }
 
+        fn create_agent_if(
+            &self,
+            profile: AgentProfile,
+            still: &dyn Fn() -> bool,
+        ) -> Result<Option<AgentProfile>, PtyError> {
+            ask_then_create(self, profile, still)
+        }
+
         fn activate_profile(
             &self,
             profile: &AgentProfile,
@@ -2080,6 +4019,9 @@ mod tests {
         ) -> Result<StartedAgent, PtyError> {
             if *self.start_fails.lock().unwrap() {
                 return Err(PtyError::SpawnFailed("fake".to_string()));
+            }
+            if let Some(error) = self.start_error.lock().unwrap().take() {
+                return Err(error);
             }
             self.refuse_if_set()?;
             let resumed = matches!(mode, SpawnMode::Resume);
@@ -2094,6 +4036,35 @@ mod tests {
                 id: profile.id,
                 name: profile.canonical_name_when_live(),
                 status,
+                notices: self.start_notices.lock().unwrap().clone(),
+            })
+        }
+
+        /// The real split: a refusal before the add registers nothing; after the add every start failure leaves the
+        /// row (`created: true`).
+        fn create_and_activate(
+            &self,
+            profile: &AgentProfile,
+            delivery: NoticeDelivery,
+        ) -> Result<Activated, NotStarted> {
+            self.creates
+                .lock()
+                .unwrap()
+                .push((profile.clone(), delivery));
+            self.create_agent(profile.clone())
+                .map_err(|error| NotStarted {
+                    error,
+                    created: false,
+                })?;
+            let started = self
+                .activate_profile(profile, SpawnMode::Fresh)
+                .map_err(|error| NotStarted {
+                    error,
+                    created: true,
+                })?;
+            Ok(Activated {
+                info: fake_info(&started),
+                notices: started.notices,
             })
         }
 
@@ -2135,8 +4106,44 @@ mod tests {
             Ok(ok)
         }
 
-        fn preset_cwd(&self, id: &str) -> Option<String> {
-            self.presets.lock().unwrap().get(id).cloned()
+        fn set_workspace(&self, id: AgentId, cwd: &str) -> Result<WorkspaceSet, WorkspaceRefusal> {
+            self.workspace_calls
+                .lock()
+                .unwrap()
+                .push((id, cwd.to_string()));
+            self.workspace_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    let name = self
+                        .rows
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .find(|row| row.id == id)
+                        .map(|row| row.canonical_name.clone())
+                        .unwrap_or_default();
+                    Ok(WorkspaceSet {
+                        name,
+                        cwd: cwd.to_string(),
+                    })
+                })
+        }
+
+        fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+            self.duplicate_calls.lock().unwrap().push(id);
+            self.duplicate_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    let original = self.agent_snapshot(id).ok_or(PtyError::NotFound(id))?;
+                    let mut copy = original.clone();
+                    copy.id = uuid::Uuid::new_v4();
+                    copy.display_name = Some(format!("{}(1)", original.canonical_name_when_live()));
+                    Ok(copy)
+                })
         }
 
         fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
@@ -2180,6 +4187,58 @@ mod tests {
         block_on(future)
     }
 
+    /// The `AgentInfo` of a fake start — only the fields this table reads come from `started`.
+    fn fake_info(started: &StartedAgent) -> crate::types::AgentInfo {
+        use crate::types::{
+            BackendCaps, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps, SessionCaps,
+            TransportCaps,
+        };
+        crate::types::AgentInfo {
+            id: started.id,
+            name: started.name.clone(),
+            cwd: String::new(),
+            status: started.status.clone(),
+            cols: 80,
+            rows: 24,
+            epoch: 1,
+            capabilities: Capabilities::compose(
+                TransportCaps {
+                    input: InputCaps {
+                        raw: true,
+                        message: false,
+                        attachment: false,
+                    },
+                    output: OutputCaps {
+                        terminal_bytes: true,
+                        structured: false,
+                        markdown: false,
+                        tool_events: false,
+                        usage: false,
+                    },
+                    control: ControlCaps {
+                        resize: true,
+                        interrupt: false,
+                        cancel: false,
+                        graceful_shutdown: false,
+                    },
+                },
+                BackendCaps {
+                    session: SessionCaps {
+                        resume: false,
+                        snapshot: false,
+                        cwd_env: true,
+                    },
+                    model: ModelCaps {
+                        select: false,
+                        temperature: false,
+                        max_tokens: false,
+                    },
+                },
+            ),
+            reads_messages: false,
+        }
+    }
+
     #[test]
     fn table_holds_exactly_the_declared_verbs() {
         let (table, _notify) = wiring(&FakeHost::new());
@@ -2187,20 +4246,78 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "agent.attachPreset",
                 "agent.cancelQueuedInput",
+                "agent.detachPreset",
+                "agent.duplicate",
                 "agent.interrupt",
                 "agent.list",
                 "agent.listQueuedInputs",
                 "agent.move",
                 "agent.new",
+                "agent.presets",
                 "agent.rename",
+                "agent.reorderPresets",
                 "agent.resolve",
+                "agent.setWorkspace",
                 "agent.spawn",
+                "library.addMount",
+                "library.copy",
+                "library.delete",
+                "library.emptyTrash",
+                "library.folders",
+                "library.list",
+                "library.listTrash",
+                "library.move",
+                "library.newFile",
+                "library.newFolder",
+                "library.read",
+                "library.refresh",
+                "library.relink",
+                "library.relocateMount",
+                "library.removeMount",
+                "library.rename",
+                "library.renameMount",
+                "library.restore",
+                "library.status",
+                "preset.add",
+                "preset.check",
+                "preset.get",
+                "preset.previewFolder",
+                "preset.remove",
+                "preset.reorder",
+                "preset.save",
+                "preset.setBackend",
                 "usage.get",
                 "usage.refresh"
             ]
         );
         assert_eq!(names.len(), COMMAND_SPECS.len());
+    }
+
+    /// ADR-0369 · ADR-0419: `agent.spawn` launches and the six library file writes can outlast the ordinary wait (a
+    /// copy across volumes, emptying a large trash), so a shell-socket seat takes the launch bound and the CLI waits by
+    /// the launch budget; every other verb here — `library.listTrash` among them — keeps the shared waits.
+    #[test]
+    fn only_agent_spawn_and_the_library_file_writes_are_declared_with_the_launch_deadline() {
+        let mut launches: Vec<&str> = COMMAND_SPECS
+            .iter()
+            .filter(|spec| spec.deadline == engram_dashboard_command::DeadlineClass::Launch)
+            .map(|spec| spec.name)
+            .collect();
+        launches.sort_unstable();
+        assert_eq!(
+            launches,
+            [
+                "agent.spawn",
+                "library.copy",
+                "library.delete",
+                "library.emptyTrash",
+                "library.move",
+                "library.rename",
+                "library.restore"
+            ]
+        );
     }
 
     #[test]
@@ -2235,47 +4352,44 @@ mod tests {
     /// ★The three store states are carried in `agent.list` with their reasons (D6)★ — without `Refusing`, a refusal during the run would look `Writable` while changes come back `CONFLICT`, leaving the error unexplained.
     // ADR-0291 R17 (D6)
     #[test]
-    fn list_reports_each_store_status_with_its_reason() {
+    fn list_reports_the_store_status_with_its_reason() {
         let host = FakeHost::new();
         let (table, _notify) = wiring(&host);
-        let writable = json!({ "state": "Writable", "reason": null, "file_version": null });
 
         let out = call(&table, "agent.list", json!({})).expect("query succeeds");
         assert_eq!(
             out["store"],
-            json!({ "agents": writable, "presets": writable })
+            json!({ "agents": { "state": "Writable", "reason": null, "file_version": null } })
         );
 
-        for (status, expected_agents, expected_presets) in [
+        for (status, expected) in [
             (
-                RosterStoreStatus {
-                    agents: StoreStatus::ReadOnly(Refusal::Newer { found: 3 }),
-                    presets: StoreStatus::Refusing(Refusal::Unreadable),
-                },
+                StoreStatus::ReadOnly(Refusal::Newer { found: 3 }),
                 json!({ "state": "ReadOnly", "reason": "Newer", "file_version": 3 }),
+            ),
+            (
+                StoreStatus::Refusing(Refusal::Unreadable),
                 json!({ "state": "Refusing", "reason": "Unreadable", "file_version": null }),
             ),
             (
-                RosterStoreStatus {
-                    agents: StoreStatus::Refusing(Refusal::Newer { found: 4 }),
-                    presets: StoreStatus::ReadOnly(Refusal::Unreadable),
-                },
+                StoreStatus::Refusing(Refusal::Newer { found: 4 }),
                 json!({ "state": "Refusing", "reason": "Newer", "file_version": 4 }),
+            ),
+            (
+                StoreStatus::ReadOnly(Refusal::Unreadable),
                 json!({ "state": "ReadOnly", "reason": "Unreadable", "file_version": null }),
             ),
         ] {
             *host.store_status.lock().unwrap() = status;
             let out = call(&table, "agent.list", json!({})).expect("query succeeds");
-            assert_eq!(out["store"]["agents"], expected_agents, "{status:?}");
-            assert_eq!(out["store"]["presets"], expected_presets, "{status:?}");
+            assert_eq!(out["store"], json!({ "agents": expected }), "{status:?}");
         }
     }
 
-    /// ★The real manager carries the two stores' states each in its own place (D6)★ — the fake only returns planted fields, so a manager swapping the two or always leaving one `Writable` is caught only with the real thing.
+    /// ★The real manager carries the roster store's state (D6)★ — the fake only returns planted fields, so a manager always leaving that state `Writable` is caught only with the real thing.
     // ADR-0291 R17 (D6)
     #[test]
-    fn a_real_manager_reports_each_store_in_its_own_slot() {
-        use crate::preset::{Preset, PresetRegistry, PresetStore};
+    fn a_real_manager_reports_its_store_status() {
         use crate::profile::{ProfileRegistry, ProfileStore};
         use crate::session_tracker::{SessionTracker, TrackerConfig};
         use crate::types::{AgentInfo, StatusSink};
@@ -2297,23 +4411,10 @@ mod tests {
                 StoreStatus::ReadOnly(Refusal::Newer { found: 9 })
             }
         }
-        struct RefusingPresets;
-        impl PresetStore for RefusingPresets {
-            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-                Err(StoreError::Refused(Refusal::Unreadable))
-            }
-            fn load(&self) -> Vec<Preset> {
-                vec![]
-            }
-            fn status(&self) -> StoreStatus {
-                StoreStatus::Refusing(Refusal::Unreadable)
-            }
-        }
 
         let manager = Arc::new(AgentManager::new(
             Arc::new(NoStatus),
             Arc::new(ProfileRegistry::new(Arc::new(NewerAgents))),
-            Arc::new(PresetRegistry::new(Arc::new(RefusingPresets))),
             Arc::new(SessionTracker::new(
                 TrackerConfig {
                     enabled: false,
@@ -2326,6 +4427,7 @@ mod tests {
             manager as Arc<dyn AgentCommandHost>,
             Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
             Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
         );
 
         let out = call(&table, "agent.list", json!({})).expect("query succeeds");
@@ -2333,7 +4435,6 @@ mod tests {
             out["store"],
             json!({
                 "agents": { "state": "ReadOnly", "reason": "Newer", "file_version": 9 },
-                "presets": { "state": "Refusing", "reason": "Unreadable", "file_version": null },
             })
         );
     }
@@ -2403,7 +4504,7 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 1);
     }
 
-    /// ★Resume is not derived from a stored sid alone (ADR-0185)★ — a sid on a command that cannot resume exists today (hand-edited `agents.json` · a profile that switched backends); launching it as Resume **opens a new conversation but reports 「resumed」**, and the
+    /// ★Resume is not derived from a stored sid alone (ADR-0185)★ — a sid on a command that cannot resume exists today (a hand-edited profile file · a profile that switched backends); launching it as Resume **opens a new conversation but reports 「resumed」**, and the
     /// wire has no marker for a new conversation, so neither screen nor LLM can tell. ★The WS entry has the same pair★ (CLAUDE.md 「LLM-first control」).
     // ADR-0185
     /// ★The sample being shell is intended — do not bring the codex terminal mode back here★: by ADR-0208 that mode uses `codex resume <id>` and its resume axis is **true**; shell is the only sample with the axis off, and replacing it would remove what this entry measures.
@@ -2468,6 +4569,10 @@ mod tests {
         assert_eq!(host.started.lock().unwrap().as_slice(), &[(id, false)]);
     }
 
+    /// The bus create goes through the one body: one `create_and_activate` (the Fresh activation path) that delivers
+    /// the notices, with the normalized folder, the given name and the shared default launch command — and one roster
+    /// notify, after the activation.
+    // ADR-0348
     #[test]
     fn spawn_by_cwd_creates_then_starts() {
         let host = FakeHost::new();
@@ -2476,16 +4581,27 @@ mod tests {
         let out = call(
             &table,
             "agent.spawn",
-            json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+            json!({ "cwd": r#"C:\work\gamma"#, "name": "gamma" }),
         )
         .expect("create + launch");
         assert_eq!(out["created"], true);
         assert_eq!(out["name"], "gamma");
         assert_eq!(host.started.lock().unwrap().len(), 1);
+        let creates = host.creates.lock().unwrap();
+        assert_eq!(creates.len(), 1, "one create-and-activate call");
+        let (profile, delivery) = &creates[0];
+        assert_eq!(*delivery, NoticeDelivery::Delivered);
+        assert_eq!(profile.cwd, PathBuf::from("C:/work/gamma"));
+        assert_eq!(profile.display_name.as_deref(), Some("gamma"));
+        assert_eq!(
+            profile.command,
+            backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT)
+        );
+        assert_eq!(out["agent_id"], profile.id.to_string());
         assert_eq!(
             *notify.calls.lock().unwrap(),
-            2,
-            "once right after registration (new entry) + once right after activation (the last failure outcome, ADR-0172)"
+            1,
+            "one notify after the activation (its last-failure outcome, ADR-0172) — none before it"
         );
     }
 
@@ -2493,7 +4609,7 @@ mod tests {
     fn a_created_agent_that_fails_to_start_is_not_rolled_back() {
         let host = FakeHost::new();
         *host.start_fails.lock().unwrap() = true;
-        let (table, _notify) = wiring(&host);
+        let (table, notify) = wiring(&host);
 
         let err = call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" }))
             .expect_err("start fails");
@@ -2503,6 +4619,899 @@ mod tests {
             1,
             "it remains in the roster"
         );
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "the asleep row is announced"
+        );
+    }
+
+    // ── Launch answers (TRD S25 step 16) ──
+
+    fn blocked() -> LaunchBlocked {
+        LaunchBlocked {
+            reasons: vec![
+                BlockReason::Missing {
+                    item: "rules/a.md".into(),
+                    via: vec!["team.yaml".into()],
+                    reason: Reason {
+                        code: "not-found".into(),
+                        args: json!({ "path": "rules/a.md" }),
+                        line: Some(3),
+                    },
+                },
+                BlockReason::LibraryUnavailable {
+                    reason: Reason {
+                        code: "library-unset".into(),
+                        args: json!({}),
+                        line: None,
+                    },
+                },
+            ],
+        }
+    }
+
+    /// A wake refused before any process is a `CONFLICT` — the daemon then releases the request id
+    /// (`command_delivery::retains_the_id`), so the retry after the fix is not swallowed — and carries every reason in
+    /// `args`. The roster is still announced (the failure is recorded — ADR-0172).
+    #[test]
+    fn a_blocked_wake_is_a_conflict_carrying_the_reasons() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.start_error.lock().unwrap() = Some(PtyError::LaunchBlocked(blocked()));
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("the launch is blocked");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::Never, "{message}");
+        assert_eq!(err.args(), Some(&blocked().to_args()), "{message}");
+        assert!(
+            message.starts_with(&format!("{LAUNCH_REFUSAL} for agent 'alpha'"))
+                && message.contains("2 reason(s)")
+                && message.ends_with("fix the listed items, then start it again"),
+            "{message}"
+        );
+        assert!(host.started.lock().unwrap().is_empty(), "nothing started");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_raced_wake_is_a_conflict_to_try_again() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.start_error.lock().unwrap() = Some(PtyError::LaunchRaced);
+        let (table, _notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("the launch raced");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::AfterCondition, "{message}");
+        assert_eq!(err.args(), None, "{message}");
+        assert!(
+            message.starts_with(&format!("{LAUNCH_REFUSAL} for agent 'alpha'"))
+                && message.ends_with("try again"),
+            "{message}"
+        );
+    }
+
+    /// A wake that lost the reservation to a working-folder change is a retryable `CONFLICT` launch refusal — not
+    /// `INTERNAL`, which would keep the request id and swallow the retry (ADR-0386).
+    #[test]
+    fn a_wake_during_a_working_folder_change_is_a_conflict_to_retry_after_it() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.start_error.lock().unwrap() = Some(PtyError::WorkingFolderChanging);
+        let (table, _notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("the working folder is being changed");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::AfterCondition, "{message}");
+        assert_eq!(err.args(), None, "{message}");
+        assert!(
+            message.starts_with(&format!("{LAUNCH_REFUSAL} for agent 'alpha'"))
+                && message.ends_with("start it again once that change is done"),
+            "{message}"
+        );
+    }
+
+    // ── agent.setWorkspace · agent.duplicate (ADR-0386) ──
+
+    #[test]
+    fn set_workspace_hands_the_resolved_id_and_the_typed_folder_and_announces() {
+        let host = FakeHost::new();
+        let id = host.with_agent("alpha", false, false);
+        let (table, notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.setWorkspace",
+            json!({ "target": "alpha", "cwd": "C:/new" }),
+        )
+        .expect("set");
+
+        assert_eq!(
+            out,
+            json!({ "agent_id": id.to_string(), "name": "alpha", "cwd": "C:/new" })
+        );
+        assert_eq!(
+            *host.workspace_calls.lock().unwrap(),
+            vec![(id, "C:/new".to_string())]
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn set_workspace_refusals_carry_their_code_and_args_and_announce_nothing() {
+        let coded =
+            |code: &str, args: serde_json::Value| Some(json!({ "code": code, "args": args }));
+        let cases = vec![
+            (
+                WorkspaceRefusal::FolderNotFound {
+                    cwd: "C:/gone".into(),
+                    why: "timeout".into(),
+                },
+                ErrorCode::InvalidArgument,
+                coded(
+                    WORKSPACE_NOT_FOUND,
+                    json!({ "cwd": "C:/gone", "why": "timeout" }),
+                ),
+            ),
+            (
+                WorkspaceRefusal::Locked(crate::profile_edit::WorkspaceLock::Running),
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "running" })),
+            ),
+            (
+                WorkspaceRefusal::Locked(crate::profile_edit::WorkspaceLock::Preparing),
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "preparing" })),
+            ),
+            (
+                WorkspaceRefusal::Locked(crate::profile_edit::WorkspaceLock::Conversed),
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "conversed" })),
+            ),
+            (
+                WorkspaceRefusal::Changing,
+                ErrorCode::Conflict,
+                coded(WORKSPACE_LOCKED, json!({ "reason": "changing" })),
+            ),
+            (WorkspaceRefusal::NotFound, ErrorCode::NotFound, None),
+            (
+                WorkspaceRefusal::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                ErrorCode::Internal,
+                None,
+            ),
+            (
+                WorkspaceRefusal::Store(StoreError::ReadOnly(crate::profile::Refusal::Newer {
+                    found: 2,
+                })),
+                ErrorCode::Conflict,
+                None,
+            ),
+        ];
+        for (refusal, code, args) in cases {
+            let label = format!("{refusal:?}");
+            let host = FakeHost::new();
+            host.with_agent("alpha", false, false);
+            *host.workspace_answer.lock().unwrap() = Some(Err(refusal));
+            let (table, notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.setWorkspace",
+                json!({ "target": "alpha", "cwd": "C:/gone" }),
+            )
+            .expect_err(&label);
+
+            assert_eq!(err.code(), code, "{label}: {}", err.message());
+            assert_eq!(
+                err.args().cloned().map(serde_json::Value::Object),
+                args,
+                "{label}"
+            );
+            assert!(
+                err.message().starts_with("agent.setWorkspace: ") || code == ErrorCode::NotFound,
+                "{label}: {}",
+                err.message()
+            );
+            assert_eq!(*notify.calls.lock().unwrap(), 0, "{label}");
+        }
+    }
+
+    /// The refusals that clear by themselves — a stat that timed out, a share not reachable, a launch preparing,
+    /// another change — carry the retry directive and its words; the ones only a different call or state fixes do not
+    /// (ADR-0386 decision 14 · ADR-0387).
+    #[test]
+    fn set_workspace_refusals_that_clear_by_themselves_say_retry() {
+        use crate::profile_edit::WorkspaceLock;
+        let folder = |why: &str| WorkspaceRefusal::FolderNotFound {
+            cwd: "C:/w".into(),
+            why: why.into(),
+        };
+        let cases = vec![
+            (folder(crate::launch::STAT_TIMED_OUT), true),
+            (folder(crate::launch::SHARE_NOT_REACHABLE), true),
+            (WorkspaceRefusal::Locked(WorkspaceLock::Preparing), true),
+            (WorkspaceRefusal::Changing, true),
+            (folder("missing"), false),
+            (folder("not a folder"), false),
+            (folder("not absolute"), false),
+            (WorkspaceRefusal::Locked(WorkspaceLock::Running), false),
+            (WorkspaceRefusal::Locked(WorkspaceLock::Conversed), false),
+        ];
+        for (refusal, clearable) in cases {
+            let label = format!("{refusal:?}");
+            let host = FakeHost::new();
+            host.with_agent("alpha", false, false);
+            *host.workspace_answer.lock().unwrap() = Some(Err(refusal));
+            let (table, _notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.setWorkspace",
+                json!({ "target": "alpha", "cwd": "C:/w" }),
+            )
+            .expect_err(&label);
+
+            assert_eq!(
+                err.retry() == RetryMode::AfterCondition,
+                clearable,
+                "{label}: {:?}",
+                err.retry()
+            );
+            assert_eq!(
+                err.message()
+                    .ends_with("clear the cause, then repeat the same call"),
+                clearable,
+                "{label}: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn set_workspace_rejects_blanks_and_resolves_the_target_first() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+        for args in [
+            json!({ "target": "alpha", "cwd": "  " }),
+            json!({ "target": " ", "cwd": "C:/new" }),
+        ] {
+            let err = call(&table, "agent.setWorkspace", args.clone()).expect_err("blank");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+        }
+        let err = call(
+            &table,
+            "agent.setWorkspace",
+            json!({ "target": "ghost", "cwd": "C:/new" }),
+        )
+        .expect_err("no such agent");
+        assert_eq!(err.code(), ErrorCode::NotFound);
+        assert!(host.workspace_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn duplicate_registers_through_the_host_and_announces() {
+        let host = FakeHost::new();
+        let id = host.with_agent("alpha", false, false);
+        let (table, notify) = wiring(&host);
+
+        let out = call(&table, "agent.duplicate", json!({ "target": "alpha" })).expect("copied");
+
+        assert_eq!(out["name"], "alpha(1)");
+        assert_eq!(out["state"], AGENT_STATE_SLEEPING);
+        assert_ne!(out["agent_id"], id.to_string());
+        assert_eq!(*host.duplicate_calls.lock().unwrap(), vec![id]);
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// A duplicate is an LLM creation door: an original whose backend this surface does not create is refused with the
+    /// policy text naming that backend, before the host is called (ADR-0279 · ADR-0386).
+    #[test]
+    fn duplicate_refuses_an_original_whose_backend_the_policy_closes() {
+        let host = FakeHost::new();
+        host.with_status_command(
+            "sh",
+            None,
+            false,
+            AgentCommand::Shell {
+                program: "sh".into(),
+                args: vec![],
+            },
+        );
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.duplicate", json!({ "target": "sh" })).expect_err("closed");
+
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{}", err.message());
+        assert!(
+            err.message().starts_with("backend 'shell' is a known word"),
+            "{}",
+            err.message()
+        );
+        assert!(host.duplicate_calls.lock().unwrap().is_empty());
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn duplicate_refusals_map_like_a_create_and_announce_nothing() {
+        let cases = [
+            (
+                PtyError::RosterFull {
+                    current: 512,
+                    limit: 512,
+                },
+                ErrorCode::Conflict,
+            ),
+            (
+                PtyError::Unsupported("name suffix space exhausted".into()),
+                ErrorCode::Conflict,
+            ),
+            (
+                PtyError::NotFound(uuid::Uuid::new_v4()),
+                ErrorCode::NotFound,
+            ),
+            (
+                PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                ErrorCode::Internal,
+            ),
+        ];
+        for (error, code) in cases {
+            let label = error.to_string();
+            let host = FakeHost::new();
+            host.with_agent("alpha", false, false);
+            *host.duplicate_answer.lock().unwrap() = Some(Err(error));
+            let (table, notify) = wiring(&host);
+
+            let err =
+                call(&table, "agent.duplicate", json!({ "target": "alpha" })).expect_err(&label);
+
+            assert_eq!(err.code(), code, "{label}: {}", err.message());
+            assert_eq!(*notify.calls.lock().unwrap(), 0, "{label}");
+        }
+    }
+
+    /// With `cwd` the agent exists before its start fails, so the answer stays `INTERNAL` — a `CONFLICT` would release
+    /// the request id and the same id's retry would create a second agent (ADR-0122). Every such answer names the
+    /// created agent in `args.agent_id` (a block adds its reasons) so the recovery starts that one. The text carries
+    /// no instruction but its tail: no "try again" (it reads as "create again"), and a block says fix first — waiting
+    /// does not clear it.
+    #[test]
+    fn a_start_failure_after_the_create_stays_internal_and_names_the_created_agent() {
+        const AGAIN: &str = "start it again by that name (in a moment) instead of creating another";
+        const FIX_FIRST: &str =
+            "fix the listed items first, then start it by that name instead of creating another";
+        let cases = [
+            (
+                PtyError::LaunchBlocked(blocked()),
+                blocked().to_args(),
+                FIX_FIRST,
+            ),
+            (PtyError::LaunchRaced, serde_json::Map::new(), AGAIN),
+            (
+                PtyError::SpawnFailed("fake".into()),
+                serde_json::Map::new(),
+                AGAIN,
+            ),
+            (
+                PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                serde_json::Map::new(),
+                AGAIN,
+            ),
+        ];
+        for (error, mut want, tail) in cases {
+            let host = FakeHost::new();
+            *host.start_error.lock().unwrap() = Some(error);
+            let (table, notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.spawn",
+                json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+            )
+            .expect_err("the launch is refused after the create");
+
+            let message = err.message();
+            assert_eq!(err.code(), ErrorCode::Internal, "{message}");
+            let rows = host.rows.lock().unwrap();
+            assert_eq!(rows.len(), 1, "the created agent stays");
+            want.insert("agent_id".into(), rows[0].id.to_string().into());
+            assert_eq!(err.args(), Some(&want), "{message}");
+            assert!(
+                message.contains("was created but did not start") && message.ends_with(tail),
+                "{message}"
+            );
+            assert!(!message.contains("try again"), "{message}");
+            assert_eq!(
+                message.matches("fix the listed items").count(),
+                usize::from(tail == FIX_FIRST),
+                "{message}"
+            );
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                1,
+                "once, after the activation"
+            );
+        }
+    }
+
+    /// The success answer carries the activation's notices as rows of the [`notice_row`] shape (`line` is `null`
+    /// when the notice names none), and an empty list when there are none.
+    #[test]
+    fn the_spawn_answer_carries_the_launch_notices_as_rows() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        let (table, _notify) = wiring(&host);
+
+        let quiet = call(&table, "agent.spawn", json!({ "target": "alpha" })).expect("wake");
+        assert_eq!(quiet["notices"], json!([]), "{quiet}");
+
+        let lined = Reason {
+            code: "omitted".into(),
+            args: json!({ "names": ["a.md"], "backend": "codex" }),
+            line: Some(4),
+        };
+        let bare = Reason {
+            code: "other".into(),
+            args: json!({}),
+            line: None,
+        };
+        *host.start_notices.lock().unwrap() = vec![lined.clone(), bare.clone()];
+        let out =
+            call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" })).expect("create + start");
+
+        let mut bare_row = notice_row(&bare);
+        bare_row["line"] = serde_json::Value::Null;
+        assert_eq!(
+            out["notices"],
+            json!([notice_row(&lined), bare_row]),
+            "{out}"
+        );
+    }
+
+    // ── The one creation body (TRD S25 step 20 — ADR-0348) ──
+
+    fn open_policy(_word: &str) -> Option<&'static str> {
+        None
+    }
+
+    fn new_agent(backend: AgentBackend, policy: fn(&str) -> Option<&'static str>) -> NewAgent {
+        NewAgent {
+            cwd: "C:/work/gamma".into(),
+            name: Some("gamma".into()),
+            backend,
+            policy,
+            delivery: NoticeDelivery::Delivered,
+        }
+    }
+
+    /// A block found before the add creates nothing, so it is a `CONFLICT` — the daemon releases the request id and the
+    /// fixed retry runs — carrying every reason, with no notify and no row.
+    #[test]
+    fn a_cwd_launch_blocked_before_the_add_is_a_conflict_that_creates_nothing() {
+        let host = FakeHost::new();
+        *host.create_fails.lock().unwrap() = Some(PtyError::LaunchBlocked(blocked()));
+        let (table, notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.spawn",
+            json!({ "cwd": r#"C:\work\gamma"#, "name": "gamma" }),
+        )
+        .expect_err("the launch is blocked before the add");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::Never, "{message}");
+        assert_eq!(err.args(), Some(&blocked().to_args()), "{message}");
+        assert!(
+            message.starts_with(&format!(
+                "{LAUNCH_REFUSAL} for a new agent in 'C:/work/gamma'"
+            )) && message.contains("2 reason(s)")
+                && message.contains("nothing was created")
+                && message.ends_with("fix the listed items, then try again"),
+            "{message}"
+        );
+        assert!(host.rows.lock().unwrap().is_empty(), "nothing registered");
+        assert!(host.started.lock().unwrap().is_empty(), "nothing started");
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    /// *Defensive* — the real pre-create check returns only a block; the mapping stays total for a race.
+    #[test]
+    fn a_cwd_launch_raced_before_the_add_is_a_conflict_to_try_again() {
+        let host = FakeHost::new();
+        *host.create_fails.lock().unwrap() = Some(PtyError::LaunchRaced);
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" }))
+            .expect_err("the launch raced before the add");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::AfterCondition, "{message}");
+        assert_eq!(err.args(), None, "{message}");
+        assert!(
+            message.starts_with(&format!(
+                "{LAUNCH_REFUSAL} for a new agent in 'C:/work/gamma'"
+            )) && message.contains("nothing was created")
+                && message.ends_with("try again"),
+            "{message}"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    /// The policy is asked before anything else: a closed backend never reaches the host and announces nothing. The
+    /// bus answer is `agent.new`'s policy wording (`INVALID_ARGUMENT`).
+    #[test]
+    fn the_body_refuses_a_closed_backend_before_calling_the_host() {
+        fn closes_claude(word: &str) -> Option<&'static str> {
+            word.eq_ignore_ascii_case("claude")
+                .then_some("closed for this test")
+        }
+        let host = FakeHost::new();
+        let notify = FakeNotify::default();
+
+        let refused = create_and_start(
+            host.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, closes_claude),
+        )
+        .expect_err("the policy closes claude");
+
+        assert!(
+            matches!(
+                refused,
+                CreateRefused::Policy {
+                    reason: "closed for this test"
+                }
+            ),
+            "{refused:?}"
+        );
+        assert!(host.creates.lock().unwrap().is_empty(), "host not called");
+        assert!(host.rows.lock().unwrap().is_empty());
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+
+        let err = spawn_create_refusal(refused, "C:/work/gamma", "Claude");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("backend 'Claude'")
+                && err.message().ends_with("closed for this test"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(err.args(), None);
+    }
+
+    /// The body asks with the declared spelling (`Claude`, `Codex`) — the same word `agent.new` asks with.
+    #[test]
+    fn the_body_asks_the_policy_with_the_declared_spelling() {
+        static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn recording(word: &str) -> Option<&'static str> {
+            ASKED.lock().unwrap().push(word.to_string());
+            None
+        }
+        for backend in [AgentBackend::Claude, AgentBackend::Codex] {
+            let host = FakeHost::new();
+            create_and_start(
+                host.as_ref(),
+                &FakeNotify::default(),
+                new_agent(backend, recording),
+            )
+            .expect("an open policy creates");
+        }
+        assert_eq!(*ASKED.lock().unwrap(), vec!["Claude", "Codex"]);
+    }
+
+    /// One roster notify, after the activation, exactly when the agent was registered — a start (1), a start failure
+    /// after the add (1, the asleep row and its last failure reach the screen only this way), a refusal before the add
+    /// (0) or by the policy (0).
+    #[test]
+    fn the_body_announces_the_roster_once_exactly_when_it_registered_an_agent() {
+        let started = FakeHost::new();
+        let notify = FakeNotify::default();
+        create_and_start(
+            started.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect("starts");
+        assert_eq!(*notify.calls.lock().unwrap(), 1, "a start");
+
+        let asleep = FakeHost::new();
+        *asleep.start_fails.lock().unwrap() = true;
+        let notify = FakeNotify::default();
+        let refused = create_and_start(
+            asleep.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect_err("the start fails after the add");
+        let rows = asleep.rows.lock().unwrap();
+        match refused {
+            CreateRefused::CreatedAsleep { id, name, .. } => {
+                assert_eq!(id, rows[0].id, "the registered agent");
+                assert_eq!(name, "gamma", "its registered name");
+            }
+            other => panic!("created asleep expected: {other:?}"),
+        }
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "a start failure after the add"
+        );
+
+        let not_created = FakeHost::new();
+        *not_created.create_fails.lock().unwrap() = Some(PtyError::RosterFull {
+            current: 40,
+            limit: 40,
+        });
+        let notify = FakeNotify::default();
+        let refused = create_and_start(
+            not_created.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect_err("refused before the add");
+        assert!(
+            matches!(
+                refused,
+                CreateRefused::NotCreated(PtyError::RosterFull { .. })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "a refusal before the add");
+    }
+
+    /// The body hands the caller's delivery to the host as given — a withheld caller must not mark the set as shown.
+    #[test]
+    fn the_body_passes_the_callers_delivery_to_the_host() {
+        for delivery in [NoticeDelivery::Withheld, NoticeDelivery::Delivered] {
+            let host = FakeHost::new();
+            create_and_start(
+                host.as_ref(),
+                &FakeNotify::default(),
+                NewAgent {
+                    delivery,
+                    ..new_agent(AgentBackend::Claude, open_policy)
+                },
+            )
+            .expect("creates");
+            let creates = host.creates.lock().unwrap();
+            assert_eq!(creates.len(), 1);
+            assert_eq!(creates[0].1, delivery);
+        }
+    }
+
+    /// A created-asleep answer names the agent by the name it was registered under, which can differ from the
+    /// requested one (roster uniqueness suffix) — the caller wakes it by that name.
+    #[test]
+    fn a_created_asleep_answer_names_the_registered_name_not_the_requested_one() {
+        // Registers the agent under a suffixed name (as the real roster does when the name is taken), then fails to
+        // start it.
+        struct SuffixesThenFails(Arc<FakeHost>);
+        impl AgentCommandHost for SuffixesThenFails {
+            fn roster(&self) -> Vec<AgentRosterRow> {
+                self.0.roster()
+            }
+            fn store_status(&self) -> StoreStatus {
+                self.0.store_status()
+            }
+            fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
+                self.0.agent_snapshot(id)
+            }
+            fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+                self.0.create_agent(profile)
+            }
+            fn create_agent_if(
+                &self,
+                profile: AgentProfile,
+                still: &dyn Fn() -> bool,
+            ) -> Result<Option<AgentProfile>, PtyError> {
+                ask_then_create(self, profile, still)
+            }
+            fn activate_profile(
+                &self,
+                profile: &AgentProfile,
+                mode: SpawnMode,
+            ) -> Result<StartedAgent, PtyError> {
+                self.0.activate_profile(profile, mode)
+            }
+            fn create_and_activate(
+                &self,
+                profile: &AgentProfile,
+                _delivery: NoticeDelivery,
+            ) -> Result<Activated, NotStarted> {
+                let mut registered = profile.clone();
+                registered.display_name = Some("gamma(2)".into());
+                self.0
+                    .create_agent(registered)
+                    .map_err(|error| NotStarted {
+                        error,
+                        created: false,
+                    })?;
+                Err(NotStarted {
+                    error: PtyError::SpawnFailed("fake".into()),
+                    created: true,
+                })
+            }
+            fn rename_agent(
+                &self,
+                id: AgentId,
+                display_name: Option<String>,
+            ) -> Result<RenameOutcome, PtyError> {
+                self.0.rename_agent(id, display_name)
+            }
+            fn reparent_agent(
+                &self,
+                child: AgentId,
+                parent: Option<AgentId>,
+            ) -> Result<bool, PtyError> {
+                self.0.reparent_agent(child, parent)
+            }
+            fn set_workspace(
+                &self,
+                id: AgentId,
+                cwd: &str,
+            ) -> Result<WorkspaceSet, WorkspaceRefusal> {
+                self.0.set_workspace(id, cwd)
+            }
+            fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+                self.0.duplicate_agent(id)
+            }
+            fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+                self.0.list_queued_inputs(id)
+            }
+            fn cancel_queued_input(
+                &self,
+                id: AgentId,
+                input_id: &str,
+            ) -> Result<CancelOutcome, CancelError> {
+                self.0.cancel_queued_input(id, input_id)
+            }
+            fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+                self.0.interrupt_agent(id)
+            }
+        }
+
+        let host = FakeHost::new();
+        let refused = create_and_start(
+            &SuffixesThenFails(Arc::clone(&host)),
+            &FakeNotify::default(),
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect_err("the start fails after the add");
+        let id = host.rows.lock().unwrap()[0].id;
+        match &refused {
+            CreateRefused::CreatedAsleep { id: got, name, .. } => {
+                assert_eq!(*got, id);
+                assert_eq!(
+                    name, "gamma(2)",
+                    "the registered name, not the requested 'gamma'"
+                );
+            }
+            other => panic!("created asleep expected: {other:?}"),
+        }
+        let err = spawn_create_refusal(refused, "C:/work/gamma", "Claude");
+        assert!(
+            err.message().starts_with(&format!(
+                "agent 'gamma(2)' ({id}) was created but did not start"
+            )),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// Door ③ of the policy table: the bus cwd arm hands the production policy to the body. A behaviour test cannot
+    /// tell it from an always-open policy today (the table closes nothing), so the wiring is pinned in the source.
+    // ADR-0348
+    #[test]
+    fn the_bus_cwd_arm_hands_the_production_policy_to_the_body() {
+        let src = include_str!("commands.rs");
+        let production = src.split("mod tests {").next().expect("production part");
+        let arm: String = production
+            .split("fn verb_spawn(")
+            .nth(1)
+            .expect("`verb_spawn` body")
+            .split("fn wake_existing(")
+            .next()
+            .expect("up to the next function")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .collect::<String>()
+            .split_whitespace()
+            .collect();
+        assert!(
+            arm.contains("(None,Some(cwd))=>create_and_start(")
+                && arm.contains("policy:llm_creation_refusal,"),
+            "the bus cwd arm does not hand `llm_creation_refusal` to the body: {arm}"
+        );
+    }
+
+    /// The body fills one shared default mode for every backend — the entrances carry no mode field, so the body
+    /// invents the value; [`NEW_AGENT_OUTPUT_FORMAT`] is its only home (its literal is pinned by
+    /// `the_new_agent_default_output_format_is_pinned_to_a_literal`).
+    #[test]
+    fn the_body_builds_one_shared_default_launch_command_for_every_backend() {
+        for backend in [AgentBackend::Claude, AgentBackend::Codex] {
+            let host = FakeHost::new();
+            create_and_start(
+                host.as_ref(),
+                &FakeNotify::default(),
+                new_agent(backend.clone(), open_policy),
+            )
+            .expect("creates");
+            let creates = host.creates.lock().unwrap();
+            let command = &creates[0].0.command;
+            match (&backend, command) {
+                (
+                    AgentBackend::Claude,
+                    AgentCommand::Claude {
+                        extra_args,
+                        output_format,
+                    },
+                )
+                | (
+                    AgentBackend::Codex,
+                    AgentCommand::Codex {
+                        extra_args,
+                        output_format,
+                    },
+                ) => {
+                    assert!(extra_args.is_empty(), "{command:?}");
+                    assert_eq!(*output_format, NEW_AGENT_OUTPUT_FORMAT, "{command:?}");
+                }
+                _ => panic!("{backend:?} built {command:?}"),
+            }
+        }
+    }
+
+    /// The created-asleep text names the agent, carries the cause without an instruction, and ends with the one next
+    /// step — fix first for a block (waiting does not clear it), start it again by that name otherwise.
+    #[test]
+    fn created_but_not_started_names_the_agent_and_says_what_to_do_per_error_kind() {
+        let id = AgentId::new_v4();
+        let head = format!("agent 'gamma' ({id}) was created but did not start: ");
+        const AGAIN: &str = " — it is registered and asleep, so start it again by that name (in a moment) instead of creating another";
+        let cases = [
+            (
+                PtyError::LaunchBlocked(blocked()),
+                format!(
+                    "{} — it is registered and asleep, so fix the listed items first, then start it by that name instead of creating another",
+                    launch_blocked_reason(&blocked())
+                ),
+            ),
+            (
+                PtyError::LaunchRaced,
+                format!("{LAUNCH_RACED_CAUSE}{AGAIN}"),
+            ),
+            (
+                PtyError::Store(StoreError::Refused(crate::profile::Refusal::Unreadable)),
+                format!("{PROFILES_FILE} could not be read just now and was not overwritten{AGAIN}"),
+            ),
+            (
+                PtyError::SpawnFailed("os error 267".into()),
+                format!("spawn failed: os error 267{AGAIN}"),
+            ),
+        ];
+        for (error, tail) in cases {
+            assert_eq!(
+                created_but_not_started("gamma", id, &error),
+                format!("{head}{tail}"),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]
@@ -2523,6 +5532,189 @@ mod tests {
             1,
             "announces the roster change"
         );
+    }
+
+    // ── `agent.new {presets}` (ADR-0386 decision 5) ────────────────────────────────────────────────────
+
+    /// With `presets`, the library judges them over the profile about to be created (the Default slot on, nothing
+    /// attached) with the given root generation, before anything is registered; the agent is created holding exactly
+    /// the attachments the judgement accepted, and the answer carries its skips as judged.
+    #[test]
+    fn new_with_presets_creates_the_agent_with_the_judged_attachments_and_answers_the_skips() {
+        let host = FakeHost::new();
+        let skipped = json!([{ "item": "M.yaml", "code": "not-found", "args": { "path": "M.yaml" }, "line": null }]);
+        let library = crate::library_commands::fake::FakeLibrary::answering(Ok(json!({
+            "default_preset": true, "presets": ["team/P.yaml", "Q.yaml"], "skipped": skipped,
+        })));
+        let (table, notify) =
+            wiring_with_library(&host, Arc::clone(&library) as Arc<dyn LibraryCommandHost>);
+
+        let out = call(
+            &table,
+            "agent.new",
+            json!({
+                "cwd": "C:/work/delta", "backend": "Claude",
+                "presets": ["team/P.yaml", "M.yaml", "Q.yaml"], "root_generation": 41,
+            }),
+        )
+        .expect("register");
+
+        assert_eq!(
+            library.calls(),
+            vec![(
+                "judge_new_presets",
+                json!({
+                    "profile": { "default_preset": true, "presets": [] },
+                    "presets": ["team/P.yaml", "M.yaml", "Q.yaml"], "root_generation": 41,
+                })
+            )]
+        );
+        let id = AgentId::parse_str(out["agent_id"].as_str().expect("an id")).expect("a uuid");
+        let created = host.profiles.lock().unwrap()[&id].clone();
+        let attached: Vec<&str> = created.presets.iter().map(|p| p.path.as_str()).collect();
+        assert_eq!(
+            (created.default_preset, attached),
+            (true, vec!["team/P.yaml", "Q.yaml"]),
+            "created with the accepted list"
+        );
+        assert_eq!(out["skipped"], skipped);
+        assert_eq!(out["state"], "sleeping");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// ADR-0400 decision 18: the insert compares the library's change number with the one the judgement was made at;
+    /// a library change in between inserts nothing and the request — its paths as given — is judged again, and the
+    /// agent is created with the second judgement's list and answers its skips.
+    #[test]
+    fn new_with_presets_judges_again_when_the_library_changed_before_the_insert() {
+        let host = FakeHost::new();
+        let library = crate::library_commands::fake::FakeLibrary::answering(Ok(json!({
+            "default_preset": true, "presets": ["team/P.yaml"], "skipped": [], "change": 5,
+        })));
+        let skipped = json!([{ "item": "team/P.yaml", "code": "not-found", "args": { "path": "team/P.yaml" }, "line": null }]);
+        library.then.lock().unwrap().push_back(Ok(json!({
+            "default_preset": true, "presets": [], "skipped": skipped, "change": 6,
+        })));
+        library.change_numbers.lock().unwrap().extend([6, 6]);
+        let (table, notify) =
+            wiring_with_library(&host, Arc::clone(&library) as Arc<dyn LibraryCommandHost>);
+
+        let out = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/delta", "backend": "Claude", "presets": ["team/P.yaml"] }),
+        )
+        .expect("register");
+
+        let methods: Vec<&str> = library.calls().iter().map(|(method, _)| *method).collect();
+        assert_eq!(
+            methods,
+            [
+                "judge_new_presets",
+                "change_number",
+                "judge_new_presets",
+                "change_number"
+            ],
+            "judged, compared (moved), judged again, compared (equal)"
+        );
+        let calls = library.calls();
+        assert_eq!(
+            calls[0].1, calls[2].1,
+            "judged again with the paths as given"
+        );
+        let id = AgentId::parse_str(out["agent_id"].as_str().expect("an id")).expect("a uuid");
+        let created = host.profiles.lock().unwrap()[&id].clone();
+        assert!(created.presets.is_empty(), "the second judgement's list");
+        assert_eq!(out["skipped"], skipped);
+        assert_eq!(host.profiles.lock().unwrap().len(), 1, "created once");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// A judgement that refuses — a library preset with no library, a stale root generation — refuses the whole call
+    /// with the library's code and creates nothing: no roster row, no notification.
+    #[test]
+    fn new_whose_presets_the_library_refuses_creates_nothing() {
+        let cases = [
+            (
+                "library-unavailable",
+                json!({ "message": "no root" }),
+                RetryMode::AfterCondition,
+            ),
+            (
+                "root-generation-stale",
+                json!({ "given": 3, "current": 4 }),
+                ErrorCode::Conflict.default_retry(),
+            ),
+        ];
+        for (code, args, retry) in cases {
+            let host = FakeHost::new();
+            let library = crate::library_commands::fake::FakeLibrary::answering(Err(
+                crate::library_commands::PortRefusal::Refused {
+                    class: if code == "library-unavailable" {
+                        crate::library_commands::PortClass::Unavailable
+                    } else {
+                        crate::library_commands::PortClass::Conflict
+                    },
+                    reason: Reason {
+                        code: code.to_owned(),
+                        args: args.clone(),
+                        line: None,
+                    },
+                },
+            ));
+            let (table, notify) = wiring_with_library(&host, library);
+
+            let err = call(
+                &table,
+                "agent.new",
+                json!({
+                    "cwd": "C:/work/delta", "backend": "Claude", "presets": ["P.yaml"],
+                    "root_generation": 3,
+                }),
+            )
+            .expect_err("refused");
+
+            assert_eq!(
+                (err.code(), err.retry()),
+                (ErrorCode::Conflict, retry),
+                "{code}"
+            );
+            assert_eq!(
+                serde_json::Value::Object(err.args().expect("args").clone()),
+                json!({ "code": code, "args": args }),
+                "{code}"
+            );
+            assert!(
+                host.rows.lock().unwrap().is_empty(),
+                "{code}: nothing created"
+            );
+            assert!(host.profiles.lock().unwrap().is_empty(), "{code}");
+            assert_eq!(*notify.calls.lock().unwrap(), 0, "{code}");
+        }
+    }
+
+    /// Without `presets` nothing is judged — the library is never asked, so `root_generation` is not read even when
+    /// given — and the agent is created as before, with the Default slot only and no skips.
+    #[test]
+    fn new_without_presets_asks_the_library_nothing() {
+        let host = FakeHost::new();
+        // Every call to this port refuses: a judgement would fail the create.
+        let library = Arc::new(crate::library_commands::fake::FakeLibrary::default());
+        let (table, _notify) =
+            wiring_with_library(&host, Arc::clone(&library) as Arc<dyn LibraryCommandHost>);
+
+        let out = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/delta", "backend": "Claude", "root_generation": 99 }),
+        )
+        .expect("register");
+
+        assert!(library.calls().is_empty(), "the library was asked");
+        assert_eq!(out["skipped"], json!([]));
+        let id = AgentId::parse_str(out["agent_id"].as_str().expect("an id")).expect("a uuid");
+        let created = host.profiles.lock().unwrap()[&id].clone();
+        assert!(created.default_preset && created.presets.is_empty());
     }
 
     // ── Spelling of hand-typed words ───────────────────────────────────────────────────────────────
@@ -2573,7 +5765,7 @@ mod tests {
         );
     }
 
-    /// The two doors passing through the common registration part (`agent.new` · `agent.spawn --cwd`) seat the same spelling in the roster.
+    /// Both create doors (`agent.new` · `agent.spawn --cwd`) put the same normalized spelling in the roster.
     #[test]
     fn a_windows_path_in_quotes_is_registered_with_the_normalized_spelling() {
         for verb in ["agent.new", "agent.spawn"] {
@@ -2669,7 +5861,7 @@ mod tests {
             if from_store {
                 // The text names which file did not accept and why — so the caller finds the place to fix.
                 assert!(
-                    err.message().contains("agents.json")
+                    err.message().contains(PROFILES_FILE)
                         && err.message().contains("nothing was registered"),
                     "{}",
                     err.message()
@@ -2683,108 +5875,40 @@ mod tests {
     #[test]
     fn store_refusal_reasons_are_english_and_name_the_way_out() {
         use crate::profile::Refusal;
-        let at_load = store_error_reason("agents.json", &StoreError::ReadOnly(Refusal::Unreadable));
+        let at_load = store_error_reason("x.json", &StoreError::ReadOnly(Refusal::Unreadable));
         assert!(
-            at_load.starts_with("agents.json could not be read")
+            at_load.starts_with("x.json could not be read")
                 && at_load.contains("restart the daemon"),
             "{at_load}"
         );
-        let newer = store_error_reason(
-            "presets.json",
-            &StoreError::Refused(Refusal::Newer { found: 3 }),
-        );
+        let newer = store_error_reason("x.json", &StoreError::Refused(Refusal::Newer { found: 3 }));
         assert!(
-            newer.starts_with("presets.json was written by a newer build (version 3)")
+            newer.starts_with("x.json was written by a newer build (version 3)")
                 && newer.contains("retrying will not help"),
             "{newer}"
         );
-        let transient =
-            store_error_reason("agents.json", &StoreError::Refused(Refusal::Unreadable));
+        let transient = store_error_reason("x.json", &StoreError::Refused(Refusal::Unreadable));
         assert!(transient.contains("retry in a moment"), "{transient}");
         assert_eq!(
             store_error_reason(
-                "agents.json",
+                "x.json",
                 &StoreError::Io(std::io::Error::other("disk full"))
             ),
-            "writing agents.json failed: disk full"
+            "writing x.json failed: disk full"
         );
     }
 
-    /// ★A way to register without a dialog★ — one preset id decides the working folder (the path bookmarks of ADR-0061).
+    /// ★No create without a working folder★ — an agent with no place to work sitting in the roster has no verb to remove it
+    /// (ADR-0122).
     #[test]
-    fn new_resolves_a_preset_id_to_its_folder() {
+    fn new_without_a_cwd_is_refused_and_registers_nothing() {
         let host = FakeHost::new();
-        host.with_preset("bookmark-1", "C:/work/from-preset");
         let (table, notify) = wiring(&host);
 
-        let out = call(
-            &table,
-            "agent.new",
-            json!({ "preset": "bookmark-1", "backend": "Claude" }),
-        )
-        .expect("register");
-
-        assert_eq!(out["state"], "sleeping");
-        assert_eq!(
-            host.rows.lock().unwrap()[0].cwd,
-            "C:/work/from-preset",
-            "it must be registered with the folder the preset pointed at"
-        );
-        assert_eq!(*notify.calls.lock().unwrap(), 1);
-    }
-
-    /// ★Giving both or nothing **does not silently choose one**★ — choosing would create the agent in a folder other than the one the caller intended
-    /// (and there is no way to delete it — ADR-0122).
-    #[test]
-    fn new_refuses_both_a_folder_and_a_preset_and_refuses_neither() {
-        let host = FakeHost::new();
-        host.with_preset("bookmark-1", "C:/work/from-preset");
-        let (table, notify) = wiring(&host);
-
-        for args in [
-            json!({ "cwd": "C:/work/x", "preset": "bookmark-1", "backend": "Claude" }),
-            json!({ "backend": "Claude" }),
-        ] {
-            let err = call(&table, "agent.new", args.clone()).expect_err("no ground to choose");
-            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
-            assert!(
-                err.message().contains("cwd") && err.message().contains("preset"),
-                "must say what to give for it to work: {}",
-                err.message()
-            );
-        }
-        assert!(
-            host.rows.lock().unwrap().is_empty(),
-            "a rejection does not register"
-        );
-        assert_eq!(
-            *notify.calls.lock().unwrap(),
-            0,
-            "a rejection does not notify"
-        );
-    }
-
-    /// ★The preset branch does not **bypass** the empty-folder check★ — that registration has no value validation, so a bookmark holding only whitespace
-    /// can actually exist, and letting it through would leave an agent with an empty working folder with no means of deleting it.
-    #[test]
-    fn a_preset_holding_a_blank_folder_is_refused_like_a_blank_cwd() {
-        let host = FakeHost::new();
-        host.with_preset("blank-bookmark", "   ");
-        let (table, notify) = wiring(&host);
-
-        let err = call(
-            &table,
-            "agent.new",
-            json!({ "preset": "blank-bookmark", "backend": "Claude" }),
-        )
-        .expect_err("an empty folder is not a registration target");
-
+        let err = call(&table, "agent.new", json!({ "backend": "Claude" }))
+            .expect_err("no place to create");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
-        assert!(
-            err.message().contains("blank-bookmark"),
-            "must point out which bookmark: {}",
-            err.message()
-        );
+        assert!(err.message().contains("cwd"), "{}", err.message());
         assert!(
             host.rows.lock().unwrap().is_empty(),
             "a rejection does not register"
@@ -2796,22 +5920,21 @@ mod tests {
         );
     }
 
+    /// ★`preset` is not a field of `agent.new`★ — the entry check (`CommandTable::check_args`) rejects it as an unknown field.
+    ///   Deserialization drops unknown fields (the additive rule), so without this check an old call carrying a path bookmark id
+    ///   would lose that field and be created with `cwd`.
     #[test]
-    fn an_unknown_preset_is_not_found() {
-        let host = FakeHost::new();
-        let (table, _notify) = wiring(&host);
+    fn preset_is_not_an_argument_of_new() {
+        let (table, _notify) = wiring(&FakeHost::new());
 
-        let err = call(
-            &table,
-            "agent.new",
-            json!({ "preset": "no-such-bookmark", "backend": "Claude" }),
-        )
-        .expect_err("a missing bookmark");
-        assert_eq!(err.code(), ErrorCode::NotFound);
-        assert!(
-            host.rows.lock().unwrap().is_empty(),
-            "a rejection does not register"
-        );
+        let err = table
+            .check_args(
+                "agent.new",
+                &json!({ "cwd": "C:/work/x", "preset": "bookmark-1", "backend": "Claude" }),
+            )
+            .expect_err("a field not in the declaration");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(err.message().contains(r#""preset""#), "{}", err.message());
     }
 
     /// ★Unspecified is StreamJson, values outside the vocabulary are rejected★ — with a silent fallback it would become "created it, but the screen is different"
@@ -2883,7 +6006,6 @@ mod tests {
         let host = FakeHost::new();
         host.with_agent("alpha", false, false);
         host.with_agent("lead", false, false);
-        host.with_preset("blank-bookmark", "   ");
         let (table, notify) = wiring(&host);
         let snapshot = || -> Vec<(AgentId, String, Option<AgentId>)> {
             host.roster()
@@ -2896,18 +6018,7 @@ mod tests {
         // Sweeps the branches where rejections happen, per verb — the codes differ but all must be 「before touching anything」.
         let rejections = [
             ("agent.new", json!({ "cwd": "   ", "backend": "Claude" })),
-            (
-                "agent.new",
-                json!({ "preset": "no-such-bookmark", "backend": "Claude" }),
-            ),
-            (
-                "agent.new",
-                json!({ "preset": "blank-bookmark", "backend": "Claude" }),
-            ),
-            (
-                "agent.new",
-                json!({ "cwd": "C:/x", "preset": "b", "backend": "Claude" }),
-            ),
+            ("agent.new", json!({ "backend": "Claude" })),
             ("agent.rename", json!({ "target": "ghost", "name": "beta" })),
             ("agent.rename", json!({ "target": "alpha", "name": "  " })),
             ("agent.move", json!({ "target": "ghost", "parent": null })),
@@ -2973,7 +6084,7 @@ mod tests {
         .expect_err("the rename comes back as a save refusal — not Renamed");
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
-            err.message().contains("agents.json")
+            err.message().contains(PROFILES_FILE)
                 && err.message().contains("the name was left as it is"),
             "{}",
             err.message()
@@ -2986,7 +6097,7 @@ mod tests {
         )
         .expect_err("the move comes back as a save refusal");
         assert_eq!(err.code(), ErrorCode::Conflict);
-        assert!(err.message().contains("agents.json"), "{}", err.message());
+        assert!(err.message().contains(PROFILES_FILE), "{}", err.message());
 
         assert_eq!(*notify.calls.lock().unwrap(), 0, "nothing changed");
     }
@@ -3006,7 +6117,7 @@ mod tests {
         assert_eq!(err.code(), ErrorCode::Conflict);
         assert!(
             err.message().contains("could not start agent 'alpha'")
-                && err.message().contains("agents.json"),
+                && err.message().contains(PROFILES_FILE),
             "{}",
             err.message()
         );
@@ -3045,14 +6156,15 @@ mod tests {
     // ADR-0291 R17
     #[test]
     fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
-        // The create is saved and the launch's registration is refused — the shape where the file changed in between. The second field
-        //   makes the refusal cause.
+        // *Defensive* — the add is stored, then the start's registry write is refused. The real manager does not write
+        //   the registry after the add (`inserted` skips `register_for_spawn` · ADR-0348), so this pins the answer shape
+        //   only.
         struct RefuseOnStart(Arc<FakeHost>, fn() -> StoreError);
         impl AgentCommandHost for RefuseOnStart {
             fn roster(&self) -> Vec<AgentRosterRow> {
                 self.0.roster()
             }
-            fn store_status(&self) -> RosterStoreStatus {
+            fn store_status(&self) -> StoreStatus {
                 self.0.store_status()
             }
             fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
@@ -3063,6 +6175,13 @@ mod tests {
                 *self.0.store_refuses.lock().unwrap() = true;
                 Ok(stored)
             }
+            fn create_agent_if(
+                &self,
+                profile: AgentProfile,
+                still: &dyn Fn() -> bool,
+            ) -> Result<Option<AgentProfile>, PtyError> {
+                ask_then_create(self, profile, still)
+            }
             fn activate_profile(
                 &self,
                 profile: &AgentProfile,
@@ -3072,6 +6191,23 @@ mod tests {
                     return Err(PtyError::Store((self.1)()));
                 }
                 self.0.activate_profile(profile, mode)
+            }
+            // The add is stored, then the start's own registry write is refused.
+            fn create_and_activate(
+                &self,
+                profile: &AgentProfile,
+                _delivery: NoticeDelivery,
+            ) -> Result<Activated, NotStarted> {
+                self.0
+                    .create_agent(profile.clone())
+                    .map_err(|error| NotStarted {
+                        error,
+                        created: false,
+                    })?;
+                Err(NotStarted {
+                    error: PtyError::Store((self.1)()),
+                    created: true,
+                })
             }
             fn rename_agent(
                 &self,
@@ -3087,8 +6223,15 @@ mod tests {
             ) -> Result<bool, PtyError> {
                 self.0.reparent_agent(child, parent)
             }
-            fn preset_cwd(&self, id: &str) -> Option<String> {
-                self.0.preset_cwd(id)
+            fn set_workspace(
+                &self,
+                id: AgentId,
+                cwd: &str,
+            ) -> Result<WorkspaceSet, WorkspaceRefusal> {
+                self.0.set_workspace(id, cwd)
+            }
+            fn duplicate_agent(&self, id: AgentId) -> Result<AgentProfile, PtyError> {
+                self.0.duplicate_agent(id)
             }
             fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
                 self.0.list_queued_inputs(id)
@@ -3105,18 +6248,18 @@ mod tests {
             }
         }
         use crate::profile::Refusal;
-        let causes: [(fn() -> StoreError, &str); 3] = [
+        let causes: [(fn() -> StoreError, String); 3] = [
             (
                 || StoreError::Refused(Refusal::Unreadable),
-                "agents.json could not be read just now",
+                format!("{PROFILES_FILE} could not be read just now"),
             ),
             (
                 || StoreError::Refused(Refusal::Newer { found: 2 }),
-                "agents.json was written by a newer build (version 2)",
+                format!("{PROFILES_FILE} was written by a newer build (version 2)"),
             ),
             (
                 || StoreError::Io(std::io::Error::other("disk full")),
-                "writing agents.json failed: disk full",
+                format!("writing {PROFILES_FILE} failed: disk full"),
             ),
         ];
 
@@ -3127,6 +6270,7 @@ mod tests {
                 Arc::new(RefuseOnStart(Arc::clone(&host), refusal)) as Arc<dyn AgentCommandHost>,
                 Arc::clone(&notify) as Arc<dyn RosterChanged>,
                 Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+                crate::library_commands::fake::FakeLibrary::unplugged(),
             );
 
             let err = call(
@@ -3140,7 +6284,7 @@ mod tests {
             assert_eq!(err.code(), ErrorCode::Internal, "{message}");
             assert!(
                 message.contains("was created but did not start")
-                    && message.contains(cause)
+                    && message.contains(&cause)
                     && message.contains(
                         "start it again by that name (in a moment) instead of creating another"
                     ),
@@ -3161,8 +6305,8 @@ mod tests {
             assert!(host.started.lock().unwrap().is_empty());
             assert_eq!(
                 *notify.calls.lock().unwrap(),
-                2,
-                "after creating · after activation (E2) — the current contract as is"
+                1,
+                "once, after the activation (E2) — the pre-activation frame is gone (ADR-0348)"
             );
         }
     }
@@ -3173,7 +6317,6 @@ mod tests {
     // ADR-0291 R17 (D3 · E2)
     #[test]
     fn a_real_manager_behind_the_bus_changes_nothing_while_its_store_does_not_save() {
-        use crate::preset::{Preset, PresetRegistry, PresetStore};
         use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
         use crate::profile::ProfileRegistry;
         use crate::session_tracker::{SessionTracker, TrackerConfig};
@@ -3184,16 +6327,6 @@ mod tests {
             fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
-        struct NoPresets;
-        impl PresetStore for NoPresets {
-            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-                Ok(())
-            }
-            fn load(&self) -> Vec<Preset> {
-                vec![]
-            }
-        }
-
         for failure in FAILURES {
             let expected = match failure {
                 Outcome::FailsIo => ErrorCode::Internal,
@@ -3203,7 +6336,6 @@ mod tests {
             let manager = Arc::new(AgentManager::new(
                 Arc::new(NoStatus),
                 Arc::new(ProfileRegistry::new(store.clone())),
-                Arc::new(PresetRegistry::new(Arc::new(NoPresets))),
                 Arc::new(SessionTracker::new(
                     TrackerConfig {
                         enabled: false,
@@ -3250,6 +6382,7 @@ mod tests {
                 manager.clone() as Arc<dyn AgentCommandHost>,
                 Arc::clone(&notify) as Arc<dyn RosterChanged>,
                 Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+                crate::library_commands::fake::FakeLibrary::unplugged(),
             );
 
             for (name, args) in [
@@ -3266,7 +6399,7 @@ mod tests {
                     .expect_err("an error if the store does not accept: {name} {args}");
                 assert_eq!(err.code(), expected, "{failure:?} · {name} {args}");
                 assert!(
-                    err.message().contains("agents.json"),
+                    err.message().contains(PROFILES_FILE),
                     "{failure:?} · {name}: {}",
                     err.message()
                 );
@@ -3388,9 +6521,9 @@ mod tests {
                 Some(declared),
                 "{word}: the run command the declaration vocabulary builds does not read back into that vocabulary"
             );
-            // ★Even the core-side wire spelling is bound★: `AgentCommand` is written to disk as is with `#[serde(tag = "kind")]`
-            //   (`agents.json`), so a changed tag value must be caught here — else the declaration and stored vocabularies silently
-            //   diverge and old builds cannot read the file.
+            // ★Binds the core-side wire spelling too★: `AgentCommand` is written to disk as is with `#[serde(tag = "kind")]`
+            //   (the profile file), so changing that tag value must be caught here — otherwise the declared vocabulary and the
+            //   stored vocabulary diverge silently, and the divergence shows up as an old build unable to read the file.
             assert_eq!(
                 serde_json::to_value(&built).expect("core serialization")["kind"],
                 serde_json::Value::String(word.clone()),
@@ -3836,12 +6969,12 @@ mod tests {
         .message()
         .to_string();
         assert!(
-            required.contains("cwd needs a folder path") && required.contains("preset"),
-            "must say to fill in a value or use the sibling field: {required}"
+            required.contains("cwd needs a real value"),
+            "must say to fill the value: {required}"
         );
         assert!(
             !required.contains("left out"),
-            "saying only to omit it gets that retry rejected again as one-of-the-two-must-be-given: {required}"
+            "saying to omit it gets the retry rejected again as 「missing」: {required}"
         );
         // ★A rejection creates nothing★ — if the check were pushed after registration, a call with blank arguments would create an agent
         //   and then
@@ -5010,6 +8143,7 @@ mod tests {
             FakeHost::new() as Arc<dyn AgentCommandHost>,
             Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
             Arc::clone(usage) as Arc<dyn UsageCommandHost>,
+            crate::library_commands::fake::FakeLibrary::unplugged(),
         )
     }
 

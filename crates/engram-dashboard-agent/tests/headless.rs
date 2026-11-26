@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -108,10 +107,8 @@ impl ControlChannel for CountingControl {
             // ADR-0099: config_path is an Option — this test double does not verify the MCP channel physics, so None.
             config_path: None,
             send_exe: None,
-            priming_file: None,
             // ADR-0094
             grants: vec![],
-            settings_file: None,
             // ADR-0133: computing mail authorization is out of concern too — it only imitates the daemon's computation rule (the
             //   ingredients are two).
             mail_allowed: needs.uses_mail && !needs.accepts_mcp_config,
@@ -139,10 +136,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         std::env::temp_dir().join(format!("engram-test-race-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    let preset_store = Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-test-race-preset-{}", Uuid::new_v4())),
-    ));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -153,7 +146,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
     let manager = Arc::new(AgentManager::new_with_control(
         status_dyn,
         profiles,
-        presets,
         tracker,
         control_dyn,
     ));
@@ -253,10 +245,6 @@ fn make_manager_with(control: Arc<dyn ControlChannel>) -> Arc<AgentManager> {
         std::env::temp_dir().join(format!("engram-test-f3-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    let preset_store = Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-test-f3-preset-{}", Uuid::new_v4())),
-    ));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -265,7 +253,7 @@ fn make_manager_with(control: Arc<dyn ControlChannel>) -> Arc<AgentManager> {
         Arc::new(|_, _| {}),
     ));
     Arc::new(AgentManager::new_with_control(
-        status_dyn, profiles, presets, tracker, control,
+        status_dyn, profiles, tracker, control,
     ))
 }
 
@@ -345,10 +333,6 @@ fn manager_spawn_write_resize_kill() {
         std::env::temp_dir().join(format!("engram-test-headless-{}", Uuid::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(store));
-    let preset_store = Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-test-headless-preset-{}", Uuid::new_v4())),
-    ));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -356,7 +340,7 @@ fn manager_spawn_write_resize_kill() {
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = AgentManager::new(status_dyn, profiles, presets, tracker);
+    let manager = AgentManager::new(status_dyn, profiles, tracker);
 
     let profile = AgentProfile::new(
         "headless".into(),

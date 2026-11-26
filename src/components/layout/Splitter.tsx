@@ -205,7 +205,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
     const dir = split.dir
     const size = dir === 'left_right' ? rect.width : rect.height
     if (!(size > 0)) return
-    // Do not preventDefault — it removes the compat mousedown, so open menus and popups that close on document mousedown (SlotContextMenu·AgentList·PresetPalette) would not close on a divider press. Text selection is blocked by the divider's `user-select: none`, the body lock during the drag and pointermove's preventDefault.
+    // Do not preventDefault — it removes the compat mousedown, so open menus and popups that close on document mousedown (SlotContextMenu·AgentList) would not close on a divider press. Text selection is blocked by the divider's `user-select: none`, the body lock during the drag and pointermove's preventDefault.
     const start = axisOf(dir, e)
     const el = e.currentTarget
     press = {

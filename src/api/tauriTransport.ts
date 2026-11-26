@@ -238,14 +238,6 @@ export class TauriTransport implements Transport {
           })
         }),
       )
-      registered.push(
-        await listen<unknown>('preset-list-updated', (e) => {
-          this.messageCb?.({
-            kind: 'control',
-            event: { PresetListUpdated: { presets: e.payload } },
-          })
-        }),
-      )
       // The shell emits to every webview; the target is picked by the payload's `labels` (windows that have a usage slot) — dropped if its own label is not in it.
       //   The label is given by Tauri (inferred from the hash route, every window other than `#/popup?window=` would read as `main`).
       //   `socketEpoch` is a shell-added field, camelCase so it does not mix with the daemon wire (`subscribed` is used by the shell only for the check, not carried).

@@ -12,7 +12,6 @@ import type {
   AgentProfile,
   AgentStatus,
   AgentOutputFormat,
-  Preset,
   RestoreReport,
 } from './types'
 
@@ -181,8 +180,6 @@ export interface AgentClient {
   onRestoreResult(cb: (report: RestoreReport) => void): () => void
   /** Live update of the profile list (create/delete/activate broadcast, AgentEvent::ProfileListUpdated routing); the store mirror is updated. */
   onProfileListUpdated(cb: (profiles: AgentProfile[]) => void): () => void
-  /** Live update of the preset list (ADR-0061 — same shape as the profile version); the store mirror is updated (AgentEvent::PresetListUpdated routing). */
-  onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
   /**
    * Usage snapshot broadcast (TRD S21 usage-limit-slot §1-8). Only the ones the shell picked for this window come. `socketEpoch` = that of [`UsageSnapshotPull`]; daemon frames of the direct carrier (no shell) carry none and come as `0`.
    * An old copy of the same vendor can come late (no ordering guarantee vs the pull) — telling them apart is the receiver's job.
@@ -257,20 +254,4 @@ export interface AgentClient {
    * Reply=Ack(void); the hierarchy update comes with the next ProfileListUpdated broadcast (no optimistic update). Human drag and LLM calls share the entry point.
    */
   reparentProfile(childId: string, parentId: string | null): Promise<void>
-
-  // ── preset CRUD (ADR-0061 — cwd bookmarks, no spawn) ─────────────────────────────
-  /** Queries all saved presets. Collected through the PresetList-only reply (request_id echo). */
-  listPresets(): Promise<Preset[]>
-  /**
-   * Preset creation (cwd bookmark). The name is not passed — the backend stores only {id,cwd}; the frontend derives the display name from the cwd basename (ADR-0061).
-   * Reply=Ack(void); the created Preset reaches the store only through the PresetListUpdated broadcast (unlike CreateProfile returning Created{profile}).
-   */
-  createPreset(cwd: string): Promise<void>
-  /** Preset deletion (agents live on regardless — ADR-0061). no-op (Ack) for an unknown id. */
-  deletePreset(id: string): Promise<void>
-  /**
-   * Set/clear the preset display-name override (ADR-0061, §5): string → store, null → clear. trim, empty-string refusal and unchanged-value skipping are the caller's (UI) job.
-   * Reply=Ack(void); the update comes with the next PresetListUpdated broadcast (no optimistic update). no-op (Ack) for an unknown id.
-   */
-  renamePreset(id: string, name: string | null): Promise<void>
 }

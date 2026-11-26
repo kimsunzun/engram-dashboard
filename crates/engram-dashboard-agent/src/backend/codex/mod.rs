@@ -1,8 +1,11 @@
 //! CodexBackend — produces the codex-CLI-specific CommandSpec.
 //!
-//! ★Codex knowledge lives only in this folder (ADR-0004)★. Rationale, gates and what the gates cannot see: the `backend/claude/mod.rs` header (read it with the names swapped).
-//! Only two surfaces go outward: the [`crate::backend::AgentBackend`] implementation and the usage prober singleton [`CODEX_USAGE_PROBE`]. Session id recovery polling
-//! runs inside [`thread_lock`]; this folder is its only caller (ADR-0218 decision 11).
+//! ★The rule this folder sets = codex knowledge lives only in here (ADR-0004)★. The rationale, the gates and
+//! what the gates cannot see are written once in the `backend/claude/mod.rs` header — read it with the names
+//! swapped. The surfaces that leave this folder are the [`crate::backend::AgentBackend`] impl and two singletons,
+//! the usage probe [`CODEX_USAGE_PROBE`] and the settings check [`CODEX_SETTINGS_CHECK`] (why they are not trait
+//! slots is in that header too) — the session-id recovery polling also runs inside [`thread_lock`], and only this
+//! folder calls that module (ADR-0218 decision 11).
 //!
 //! ★The codex facts here were measured on codex-cli 0.153.4 (this PC, authenticated, 2026-09-08)★; later measurements carry their own version at their spot.
 //! `tests/backend_contract.rs` launches the argv `build_spec` emits as is — but that lane is `#[ignore]` (not CI), so it runs only when called.
@@ -28,32 +31,41 @@
 //!
 //! tauri import 0.
 
+mod cmdline;
 pub(crate) mod decoder;
+// ADR-0420
+mod hook_assembly;
+// ADR-0420
+mod hook_check;
+mod launch;
 pub(crate) mod protocol;
+mod settings;
 // ADR-0218
 pub(crate) mod thread_lock;
 pub(crate) mod transport;
 mod usage;
 mod usage_probe;
 
+pub(crate) use settings::CODEX_SETTINGS_CHECK;
 pub(crate) use usage_probe::CODEX_USAGE_PROBE;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use engram_dashboard_platform::shell::console_command;
+use engram_dashboard_platform::shell::{console_command, text_is_cli_safe};
 use uuid::Uuid;
 
 use self::decoder::CodexAppServerDecoder;
 use self::protocol::{
     AskForApproval, SandboxMode, ThreadOpen, ThreadResumeParams, ThreadStartParams,
 };
-use self::transport::CodexAppServerTransport;
+use self::transport::{AppServerOpen, CodexAppServerTransport};
 use crate::backend::{
     inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink, SpawnParts,
     TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
+use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit};
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
@@ -89,16 +101,25 @@ fn is_app_server(command: &AgentCommand) -> bool {
 ///   line would be dropped**, and the handshake would wait to its deadline. That outcome is indistinguishable from `thread/resume` being refused with a JSON-RPC error — the peer is alive
 ///   and answered, we only see 「handshake failed on its deadline, child fine」 — and if that shape does not close the link's stdin, child · reader · writer are held as a wedge nobody reaps
 ///   (see that close in `transport.rs`). So if upstream ignores `excludeTurns`, this argument blocks nothing and that close is the only defence. Whether upstream honours it is unverified.
-/// ★`developer_instructions` is carried only on the open branch★ — [`ThreadResumeParams`] has no such field by decision (see its doc), so a resumed app-server thread gets no priming
-///   (terminal mode is argv, so it is carried on resume; the gap is this branch only).
-/// ★The received value is carried untouched★ — the JSON body has no command-line cap, `%` substitution or newline truncation; the terminal branch's conversion
-///   ([`developer_instructions_override`]) here would only break the document the agent reads.
+/// ★`developer_instructions` goes on **both** branches★ — on a resume too, changed or not: codex holds it in the
+///   resumed process and rebuilds the initial context from it at a compaction there; without it that rebuild has no
+///   instructions at all (the reason and the version gate: the [`ThreadResumeParams`] field doc). It does not reach
+///   the next turn on a resume — a change reaches it through the first turn's context ([`app_server_open`]).
+/// ★The value goes **unmodified**★ — a JSON body has no command-line limit, no `%` expansion and no line-break cut.
+///   Bringing the terminal branch's conversion ([`cmdline::priming_value`]) here would guard against nothing and only
+///   damage the document the agent reads.
+/// ★`config` goes on **both** branches too★ — the hook assembly's thread config (`{"hooks": …}`) is not saved with the
+///   thread, so a resume without it has no hooks (measure-3 M2). `None` = the field is absent.
 // ADR-0185
 // ADR-0215
+// ADR-0337
+// ADR-0354
+// ADR-0420
 fn thread_open(
     spec: &CommandSpec,
     resume_session_id: Option<Uuid>,
     developer_instructions: Option<String>,
+    config: Option<serde_json::Value>,
 ) -> ThreadOpen {
     let cwd = Some(spec.cwd.to_string_lossy().into_owned());
     let approval_policy = Some(AskForApproval::OnRequest);
@@ -110,15 +131,88 @@ fn thread_open(
             approval_policy,
             sandbox,
             exclude_turns: Some(true),
+            developer_instructions,
+            config,
         }),
         None => ThreadOpen::Start(ThreadStartParams {
             cwd,
             approval_policy,
             sandbox,
             developer_instructions,
+            config,
         }),
     }
 }
+
+/// What an app-server spawn opens with — the tests pin it through this function (the Noop handshake regression · TRD
+/// S25 §5-2 4).
+///
+/// - Noop (`!artifacts.real`): no instructions, no roots, no context, no thread config, no hook check.
+/// - Real: the merged instructions text ([`LaunchArtifacts::instructions_text`]); the skill roots; the thread config
+///   `{"hooks": …}` when the hook assembly wrote one ([`LaunchArtifacts::hook_config`], on start and resume alike);
+///   the expected trust entries for the post-open check whenever there is a thread config; and the
+///   instructions-change context only on a resume whose instructions changed. A Fresh spawn never carries it, even with `instructions_changed`: a new
+///   thread receives the full text through `developerInstructions` at `thread/start`.
+// ADR-0337
+// ADR-0370
+// ADR-0420
+fn app_server_open(
+    spec: &CommandSpec,
+    resume_session_id: Option<Uuid>,
+    artifacts: &LaunchArtifacts,
+) -> Result<AppServerOpen, PtyError> {
+    if !artifacts.real {
+        return Ok(AppServerOpen {
+            thread: thread_open(spec, resume_session_id, None, None),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+            expected_hooks: None,
+        });
+    }
+    let extra_roots = artifacts
+        .skill_roots
+        .iter()
+        .map(|root| {
+            root.to_str().map(str::to_owned).ok_or_else(|| {
+                PtyError::SpawnFailed(format!(
+                    "codex skill root is not valid UTF-8: {}",
+                    root.display()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first_turn_context = match &artifacts.instructions_text {
+        Some(text) if resume_session_id.is_some() && artifacts.instructions_changed => {
+            Some(format!("{INSTRUCTIONS_CHANGED_PREFACE}\n\n{text}"))
+        }
+        _ => None,
+    };
+    let config = artifacts
+        .hook_config
+        .clone()
+        .map(|hooks| serde_json::json!({ HOOKS_CONFIG_KEY: hooks }));
+    let expected_hooks = config.is_some().then(|| artifacts.hook_trust.clone());
+    Ok(AppServerOpen {
+        thread: thread_open(
+            spec,
+            resume_session_id,
+            artifacts.instructions_text.clone(),
+            config,
+        ),
+        extra_roots,
+        first_turn_context,
+        expected_hooks,
+    })
+}
+
+/// The one key of the JSON thread config Engram sends — the whole `hooks` table (events and `state`), never a dotted
+/// `"hooks.…"` key beside it (codex applies request keys in hash-map order — ADR-0420).
+// ADR-0420
+const HOOKS_CONFIG_KEY: &str = "hooks";
+
+/// The line in front of the full instructions text in the instructions-change context (main's decision #3).
+// ADR-0337
+const INSTRUCTIONS_CHANGED_PREFACE: &str = "The instructions for this agent changed since its last launch. The current instructions follow and take precedence over earlier instructions in this conversation.";
 
 /// Launches the name as resolved through PATH (TRD §6-H).
 ///
@@ -214,97 +308,10 @@ const NEWLINE_REPLACEMENT: &str = "\\n";
 
 /// The total command-line length `cmd.exe` accepts (UTF-16 code units).
 ///
-/// ★Not ours alone★ — the policy flags · pass-through · the two overrides share the line, so the decision is **the remainder after counting the already-assembled arguments**
-///   ([`command_line_cost`]), not a fixed-constant comparison.
+/// ★The budget is not our value's alone★ — the policy flags, the pass-through and the overrides share one line, so
+///   the check counts the whole assembled line ([`cmdline::assembled`]).
 // ADR-0215
 const CMD_LINE_LIMIT_UTF16: usize = 8191;
-
-/// The length share of the wrapping (`cmd.exe /c codex`) that `console_command` adds on Windows.
-const CMD_WRAPPER_COST: usize = "cmd.exe /c ".len() + CODEX_PROGRAM.len();
-
-/// A **conservative** estimate of the command-line length the already-assembled arguments used (UTF-16 code units).
-///
-/// ★Deliberately generous instead of reproducing the quoting rules★ — every argument adds one space and two enclosing quotes. Exact counting would reimplement portable-pty's quoting **and** `cmd`'s
-///   re-parsing and go stale with upstream; over-counting (skipping priming) is cheaper than under-counting (a cut erases trailing arguments without an error).
-/// ★The wrapping share is added regardless of platform★ — the cap applies only on Windows, but a platform split would carry the same brief on some machines and not others.
-/// ★UTF-16 is intended★: the Windows command line and its cap are in that unit; bytes overestimate non-ASCII, `chars()` underestimates characters outside the BMP.
-// ADR-0215
-fn command_line_cost(args: &[String]) -> usize {
-    CMD_WRAPPER_COST
-        + args
-            .iter()
-            .map(|a| a.encode_utf16().count() + 3)
-            .sum::<usize>()
-}
-
-/// The **content** of the priming brief to carry on this spawn. `None` = nothing to carry (path absent · read failure · empty file).
-///
-/// ★A read failure is fail-open★ — warn and return `None`; priming is nice to have, the spawn is required (ADR-0216: never fail the spawn on any branch).
-/// ★This crate reads the content — where it splits from claude★: that side passes a path and claude reads it (ADR-0092); codex has no path key ([`DEVELOPER_INSTRUCTIONS_KEY`]). That the read is
-///   inside the backend folder is ADR-0004 — the daemon's priming provider still handles **only the path**.
-/// An empty file is `None` too — empty instructions only spend command line.
-// ADR-0004
-// ADR-0092
-// ADR-0215
-// ADR-0216
-fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
-    let path = control?.priming_file.as_deref()?;
-    match std::fs::read_to_string(path) {
-        Ok(text) if text.trim().is_empty() => {
-            tracing::warn!(
-                "codex priming not injected — the brief file is empty: {}",
-                path.display()
-            );
-            None
-        }
-        Ok(text) => Some(text),
-        Err(e) => {
-            tracing::warn!(
-                "codex priming not injected — could not read the brief file ({}): {e}",
-                path.display()
-            );
-            None
-        }
-    }
-}
-
-/// The `-c developer_instructions='…'` value to carry on a terminal-mode spawn. `None` = not carried — ★only a warning is left and the spawn goes ahead★ (ADR-0216).
-///
-/// `args_so_far` = the arguments already assembled; used only for the command-line budget decision.
-///
-/// ★Wrapped as a TOML literal string (single quotes)★ — no escapes, so the value crosses byte for byte; measured to survive `cmd.exe /c` + the `.cmd` shim (ADR-0210). A single quote itself cannot be held.
-/// ★A character that cannot be carried makes it skip instead of inventing an escape★ — each breaks a different layer: the single quote breaks the TOML literal; the double quote and backslash break the
-///   **command-line quoting** outside it (portable-pty escapes `\"`, `cmd` does not know that and only counts quotes); `%` breaks cmd's variable substitution (**expanded even inside quotes** —
-///   `build_spec`'s same-named limit comment is the source of truth). ★Do not remove the guard because it never trips today★: the brief is markdown people edit and one contraction (`don't`) brings in a single quote.
-/// ★Control characters including tab are cut too★ — only the newline is replaced with [`NEWLINE_REPLACEMENT`]; `cmd`'s token splitting is unverified for the rest, and all symptoms are 「a silently skewed command line」.
-/// ★The guard looks at the original **before** replacement★ — after it, our inserted backslashes would trip our own guard.
-// ADR-0215
-// ADR-0216
-fn developer_instructions_override(text: &str, args_so_far: &[String]) -> Option<String> {
-    if let Some(bad) = text.chars().find(|c| {
-        matches!(c, '\'' | '"' | '%' | '\\') || (c.is_control() && *c != '\n' && *c != '\r')
-    }) {
-        tracing::warn!(
-            "codex priming not injected — the brief has a character that cannot be carried on the command line ({bad:?})"
-        );
-        return None;
-    }
-    let single_line = text
-        .replace("\r\n", NEWLINE_REPLACEMENT)
-        .replace('\n', NEWLINE_REPLACEMENT)
-        .replace('\r', NEWLINE_REPLACEMENT);
-    let value = format!("{DEVELOPER_INSTRUCTIONS_KEY}='{single_line}'");
-    // The share taken by `-c` and the value itself — counted with the same arithmetic as [`command_line_cost`] above.
-    let cost = CONFIG_OVERRIDE_FLAG.encode_utf16().count() + 3 + value.encode_utf16().count() + 3;
-    let used = command_line_cost(args_so_far);
-    if used + cost > CMD_LINE_LIMIT_UTF16 {
-        tracing::warn!(
-            "codex priming not injected — exceeds the command-line budget (already {used}, needs {cost} more, cap {CMD_LINE_LIMIT_UTF16})"
-        );
-        return None;
-    }
-    Some(value)
-}
 
 /// The **single decision** of whether to attach the daemon MCP server to this spawn; [`AgentBackend::build_spec`] (the attachment) and [`AgentBackend::precheck_control_endpoint`] (the fail-closed gate) read **this
 /// same value**. ★If each decided, the gate would go hollow★ — a spawn it passed as 「can attach」 could come up unattached with no signal. The one decision is [`mcp_attachment`].
@@ -325,15 +332,18 @@ enum McpAttachment {
 ///   decision arrives digested via [`ControlEndpoint::grants_mcp_send`]. A second reader would make two authorities and 「claude off, codex on」 would happen silently.
 ///
 /// ★This branch has no plaintext token file — but this function is not what guarantees it★: the token stays out of argv via [`MCP_BEARER_ENV_KEY`], and out of disk because
-///   [`AgentBackend::writes_mcp_config_file`] is false (the daemon's `control::provision` picks `mcp_config::write_config`/`write_settings` by that one field; the file's content and lifetime:
+///   [`AgentBackend::writes_mcp_config_file`] is false (the daemon's `control::provision` picks `mcp_config::write_config` by that one field; the file's content and lifetime:
 ///   `control/mcp_config.rs`). That this function creates no file and that no file appears for that spawn are different statements.
 /// ★TOML literal string (single quotes)★ — no escapes, byte for byte, measured to survive `cmd.exe /c` + the `.cmd` shim (ADR-0210); a single quote itself cannot be held.
 /// ★A character that cannot be carried stops it instead of inventing an escape★ — a single quote · whitespace · control characters break the value or the TOML line, and `%` is expanded by cmd **even inside
 ///   quotes** (`build_spec`'s same-named limit comment), pointing at a different address. All share one symptom, 「mail silently does not work」, so we make noise.
 ///   It never trips today (the url is daemon-authored `http://127.0.0.1:<port>/mcp`); the check is for the day that form changes.
+/// ★`"` and `& ^ | < >` are refused as well★ — a `"` flips cmd's quote state for every later argument, and the
+///   metacharacters act wherever that state is off (the same set as the preset `-c` guard, `cmdline::config_args`).
 // ADR-0004
 // ADR-0128
 // ADR-0209
+// ADR-0337
 fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
     let Some(endpoint) = control else {
         return McpAttachment::NotWanted;
@@ -344,17 +354,39 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
         return McpAttachment::NotWanted;
     }
     let url = endpoint.url.as_str();
-    if let Some(bad) = url
-        .chars()
-        .find(|c| *c == '\'' || *c == '%' || c.is_control() || c.is_whitespace())
-    {
+    if let Some(bad) = url.chars().find(|c| {
+        *c == '\''
+            || *c == '%'
+            || c.is_control()
+            || c.is_whitespace()
+            || *c == '"'
+            || !text_is_cli_safe(c.encode_utf8(&mut [0; 4]))
+    }) {
         return McpAttachment::Unrepresentable(format!(
             "cannot attach the codex MCP server — the control channel address has a character that cannot be carried ({bad:?}): {url}"
         ));
     }
-    McpAttachment::Attach(format!(
+    // ADR-0337: the command-line count holds the URL to this bound.
+    if cmdline::units(url) > MCP_URL_BUDGET {
+        return McpAttachment::Unrepresentable(format!(
+            "codex MCP server cannot be attached — the control channel URL is over its command-line bound ({MCP_URL_BUDGET} units): {url}"
+        ));
+    }
+    McpAttachment::Attach(mcp_override_value(url))
+}
+
+/// The most a control channel URL may cost on the codex command line, in [`cmdline::units`]. The daemon's URL is
+/// `http://127.0.0.1:<port>/mcp` (at most 26); a longer one is refused by [`mcp_attachment`] — which
+/// `precheck_control_endpoint` turns into a failed spawn — so the bound the command-line count uses is never below
+/// the real value.
+// ADR-0337
+const MCP_URL_BUDGET: usize = 128;
+
+/// The `-c` value that attaches the daemon MCP server at `url`.
+fn mcp_override_value(url: &str) -> String {
+    format!(
         "{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}={{url='{url}',{MCP_BEARER_ENV_KEY}='{TOKEN_ENV}',{MCP_APPROVAL_MODE_KEY}='{MCP_APPROVAL_MODE_VALUE}'}}"
-    ))
+    )
 }
 
 /// The subcommand that launches it as a resident JSON server, and its transport (measured 0.154.0: `--stdio` equals `--listen stdio://` and is the default). Stated explicitly: this link
@@ -367,6 +399,7 @@ const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 /// ★Catches one shape only: the **next slot** after `-c` starts with `key`★ (`-c developer_instructions=…`).
 /// ★Known holes★: `-c` with the value joined in one word · the long-name flag · a higher key overriding a whole table (`-c tui=…` · `-c mcp_servers=…`) · another key that only starts with that key.
 ///   Do not grow the list toward 「certain」 — it becomes a reimplementation of codex's override syntax that goes stale. A miss loses **only the warning**; that ours wins is guaranteed by the order in `build_spec`.
+/// ★Not the pass-through hooks refusal★ — a refusal must not miss, so `hook_assembly` reads every spelling clap reads (`codex-passthrough-hooks`, ADR-0420 U5).
 /// Taking the key as an argument is intended: several overrides exist (MCP attachment · the brief) and per-key duplication leaves the warning half-fixed.
 fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
@@ -486,6 +519,19 @@ impl AgentBackend for CodexBackend {
         false
     }
 
+    /// The translation and its refusals are [`launch::materialize`]'s; this reads the merged instructions file from
+    /// disk.
+    // ADR-0337
+    fn materialize(
+        &self,
+        command: &AgentCommand,
+        kit: &LaunchKit,
+        cwd: &Path,
+        fs: &dyn LaunchFs,
+    ) -> Result<LaunchArtifacts, String> {
+        launch::materialize(command, kit, cwd, fs, &|path| std::fs::read_to_string(path))
+    }
+
     /// ★Once false — keep the reason it was dropped★: the old basis was 「this method does not receive `command`, so it cannot tell the two modes apart」. app-server mode emits turn signals (the link reads
     /// `turn/completed`; `turn/started` is **deliberately** not read — see that link's `TURN_COMPLETED` doc) and [`classify_turn`] emits `Ended`; terminal mode has no decoder, so the signal is 0 and
     /// true would **open that mode too**.
@@ -499,8 +545,9 @@ impl AgentBackend for CodexBackend {
         true
     }
 
-    /// ★What this field buys★: the daemon's `build_grants` **short-circuits without emitting a line** if false (send entrance grants 0), and the priming variant choice is cut by `needs.uses_mail.then_some(…)`.
-    /// So with only `accepts_mcp_config` on and this closed, the agent **holds the MCP tools with nobody telling it they exist**.
+    /// ★What this field buys, exactly★: when it is false the daemon's `build_grants` emits **nothing** (zero
+    /// send-entrance grants). Closing it while opening only `accepts_mcp_config` above leaves the agent holding the MCP
+    /// tool with no grant for it.
     /// ★Separate from the control verbs★ — this opens mail; the CLI entrance (token · address) and control routes are opened by `supports_control_channel` above.
     /// The receiving axis is open ([`AgentBackend::reads_messages`] is true: on the `messaging_host` delivery roster, so a `request`'s reply has somewhere to return), so ADR-0209 decision 4's 「receive first」 order holds.
     ///   ★Closing the receiving axis while leaving only this open revives the asymmetry.★
@@ -581,6 +628,7 @@ impl AgentBackend for CodexBackend {
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Codex {
@@ -628,7 +676,20 @@ impl AgentBackend for CodexBackend {
                 //   `.bat` trick (`%%cd:~,%` at every `%`) presumes `cmd /e:ON` + `/c "one string"` (the RUSTSEC-2024-0006 response), while portable-pty hands an argument array to `CreateProcessW` with no `%`
                 //   handling, so moving it is an unverified port; ③ that port touches `console_command`, **shared with claude**, and a mistake kills every running spawn.
                 //   ★To fix it★: measure that claude and codex both come up under a `cmd` wrapped in that form.
+                // On real materials the terminal working folder never holds two `%` (`materialize` refuses it); a single
+                //   `%` passes, so there this limit is left to `extra_args` — a `%…%` of their own, or one `%` in them
+                //   pairing with the folder's lone `%` (tracking T-102).
                 // ADR-0004
+                // ADR-0353
+
+                // Real materials: the preset `-c` lines (model and effort included — there is never a `-m`), after the
+                //   pass-through and before our overrides, so ours still come last and win. Empty for Noop materials.
+                // ADR-0337
+                args.extend(artifacts.config_args.iter().cloned());
+                // The codex terminal hook lines go right after the preset lines they were folded from — still before
+                //   our overrides. Empty in JSON mode (the thread config carries the hooks) and for Noop materials.
+                // ADR-0420
+                args.extend(artifacts.hook_args.iter().cloned());
 
                 // ★The overrides are all **after** the pass-through — this place is the source of truth for that discipline★★ (sibling blocks point here). Measured (0.155.0): passing the same config key twice with `-c`,
                 //   **the last one wins** — no merge, no duplicate-key error. In front, one line of user arguments would erase our value with no signal. ★Do not move these blocks back into the terminal branch
@@ -644,12 +705,16 @@ impl AgentBackend for CodexBackend {
                 //   failure-to-build side as a spawn abort is [`AgentBackend::precheck_control_endpoint`]'s job, this function only builds arguments.
                 match mcp_attachment(control.as_ref()) {
                     McpAttachment::Attach(value) => {
-                        if passthrough_overrides_key(
-                            extra_args,
-                            &format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}"),
-                        ) {
+                        let key = format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}");
+                        if passthrough_overrides_key(extra_args, &key) {
                             tracing::warn!(
                                 "the codex pass-through set `{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}` directly — carrying our attachment after it for the mail entrance, overriding that value (the last `-c` wins)"
+                            );
+                        }
+                        // ADR-0337
+                        if passthrough_overrides_key(&artifacts.config_args, &key) {
+                            tracing::warn!(
+                                "a codex preset `-c` line sets `{key}` — our MCP attachment comes later and overrides it (the last `-c` wins)"
                             );
                         }
                         args.push(CONFIG_OVERRIDE_FLAG.to_string());
@@ -661,43 +726,48 @@ impl AgentBackend for CodexBackend {
                 // ★Do not revive the `SessionStart` hook here (ADR-0216/ADR-0218)★ — recovery is the writer-lock name this child holds ([`thread_lock`]) and the hook machinery was removed. Not because the hook was broken
                 //   (it ran, 0.155.0): codex hashes the hook **command string** and requires human approval, and that string embeds our exe's absolute path, which changes every release (folder named after the tag),
                 //   so the approval screen returns every release and **while it is up, terminal codex does not come up at all.**
+                //   Hook components (ADR-0420) are the user's own hooks, trusted per run in the hook lines above; they do not bring this one back (U3).
 
                 // ★Priming injection — only terminal mode is assembled here★: app-server carries the same content in the handshake JSON (`developerInstructions` of `thread/start`, [`AgentBackend::open_spawn`]) —
                 //   same value, different means per mode, like resume.
                 // ★Why modes are told apart★: this command line has an 8191-character cap the brief can eat whole; the JSON body has no cap (measured up to 8 MB), so carrying it on the command line in both modes
                 //   would burden app-server with the cap and the `%` · newline risks for nothing.
                 // ★It is **after** the pass-through★ (last `-c` wins; reason: the MCP attachment block above).
-                // ★Never fail the spawn on any branch★ — unreadable file, uncarriable character, over budget: warn and do not carry (ADR-0216). Priming is nice to have, the spawn is required.
+                // ★The value is the one `materialize` built from the merged instructions file★ — a value the line
+                //   could not carry already failed the spawn there. Without real materials there is none.
                 // ADR-0004
                 // ADR-0092
                 // ADR-0215
-                // ADR-0216
+                // ADR-0337
+                // ADR-0370
                 if matches!(output_format, AgentOutputFormat::Terminal) {
-                    if let Some(text) = priming_text(control.as_ref()) {
-                        if let Some(value) = developer_instructions_override(&text, &args) {
-                            if passthrough_overrides_key(extra_args, DEVELOPER_INSTRUCTIONS_KEY) {
-                                tracing::warn!(
-                                    "the codex pass-through set `{DEVELOPER_INSTRUCTIONS_KEY}` directly — carrying our value after it for the receive-contract priming, overriding that value (the last `-c` wins)"
-                                );
-                            }
-                            args.push(CONFIG_OVERRIDE_FLAG.to_string());
-                            args.push(value);
+                    if let Some(value) = artifacts.instructions_override.clone() {
+                        if passthrough_overrides_key(extra_args, DEVELOPER_INSTRUCTIONS_KEY) {
+                            tracing::warn!(
+                                "the codex pass-through set `{DEVELOPER_INSTRUCTIONS_KEY}` directly — carrying our value after it for the receive-contract priming, overriding that value (the last `-c` wins)"
+                            );
                         }
+                        if passthrough_overrides_key(
+                            &artifacts.config_args,
+                            DEVELOPER_INSTRUCTIONS_KEY,
+                        ) {
+                            tracing::warn!(
+                                "a codex preset `-c` line sets `{DEVELOPER_INSTRUCTIONS_KEY}` — our priming comes later and overrides it (the last `-c` wins)"
+                            );
+                        }
+                        args.push(CONFIG_OVERRIDE_FLAG.to_string());
+                        args.push(value);
                     }
                 }
 
                 // ADR-0086 step 2 (CLI entrance) — ★does not tell modes apart★: only three env values are planted, and what reads them is **the children codex launches** (shell tools · the user's own hooks) — both modes launch children.
-                // ★`config_path` · `settings_file` **do not come — the declared result**★: both are **files claude reads by path**, and codex has no such flag (0.155.0: no `--mcp-config`, no `--settings`, no `--config <file>`
+                // ★`config_path` **does not come — the declared result**★: it is a **file claude reads by path**, and codex has no such flag (0.155.0: no `--mcp-config`, no `--settings`, no `--config <file>`
                 //   for settings), so this folder declares [`AgentBackend::writes_mcp_config_file`] false and the daemon decides the write by that one field. MCP attachment is the single `-c` value above.
                 //   ★Before that field was split off, **a plaintext token file nobody reads appeared** on every spawn★ (the derived axis served both 「uses MCP for mail」 and 「takes our mcp-config file」); reviving that
                 //   dual role (removing the field or deriving it from `accepts_mcp_config`) brings back the waste and the fail-closed abort risk.
-                //   ★The injection below ignores the two fields even if they come as `Some` — keep that defence★: the control channel is not used by this backend alone, and copying claude's flags because 「it is Some」
+                //   ★The injection below ignores that field even if it comes as `Some` — keep that defence★: the control channel is not used by this backend alone, and copying claude's flags because 「it is Some」
                 //   kills the launch (`the_daemon_written_files_are_still_not_translated_into_argv`).
                 // ★`grants` is not used either★ — it is **pre-approval** of permission prompts, not a tool allow list (ADR-0094); translating it into `enabled_tools` changes 「approved in advance」 into 「only these exist」.
-                // ★`priming_file` **is used — its content, not its path**★: the only path-taking instruction key (`model_instructions_file`) **replaces** codex's own instructions and `developer_instructions_file` does not
-                //   exist (0.155.0). So this backend **reads** the file and carries it as [`DEVELOPER_INSTRUCTIONS_KEY`] (terminal) or `developerInstructions` of `thread/start` (app-server).
-                //   ★Do not revert it with 「reading content goes against ADR-0092」★ — that ADR gave the consuming program **path resolution**, still borne by the daemon's provider alone (this folder reads the path carried in and
-                //   does not choose the file); 「under which key and in what shape」 has nowhere else to go (ADR-0004).
                 // ADR-0086 / ADR-0092 / ADR-0133 / ADR-0209
                 //
                 // ★The incarnation marker is inside the same door — do not take it outside★: a spawn with no endpoint has nothing to do with our control plane, and outside the door our marker would remain in such
@@ -771,10 +841,15 @@ impl AgentBackend for CodexBackend {
     ///   another branch touching the profile directly bypasses it (ADR-0218 decision 6).
     /// ★`thread/start` vs `thread/resume` is also picked here★ by the single `resume_session_id` the assembly point passed ([`thread_open`]); the link is not asked again (two deciding places otherwise).
     /// ★`resume_session_id` is unused in the terminal branch — **not** because there is no handle★: that mode's resume already went out in argv ([`AgentBackend::build_spec`]); using it here would resume by two means.
-    /// ★`control` is likewise read only in the app-server branch★ — what is taken is the priming content ([`priming_text`]), which the terminal branch already sent as `-c developer_instructions=…`.
+    /// ★`artifacts` is read **only on the app-server branch, by the same rule**★ — what comes out of it is the open
+    ///   plan ([`app_server_open`]: the instructions — the merged text on a real spawn, none on a Noop one —, the skill
+    ///   roots and the first-turn context). The terminal branch already put its instructions and settings on the command
+    ///   line (`build_spec`), so it does not reach the PTY constructor. `control` is not read: codex carries no
+    ///   control-plane data in the handshake (ADR-0370).
     // ADR-0185
     // ADR-0191
     // ADR-0215
+    // ADR-0337
     fn open_spawn(
         &self,
         command: &AgentCommand,
@@ -785,7 +860,8 @@ impl AgentBackend for CodexBackend {
         first_turn_sink: Option<FirstTurnSink>,
         resume_session_id: Option<Uuid>,
         link_sink: Option<LinkSink>,
-        control: Option<&ControlEndpoint>,
+        _control: Option<&ControlEndpoint>,
+        artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid, mid_turn, delivery_ack): (
             Box<dyn AgentTransport>,
@@ -802,7 +878,7 @@ impl AgentBackend for CodexBackend {
                 spec,
                 true,
                 decoder,
-                thread_open(spec, resume_session_id, priming_text(control)),
+                app_server_open(spec, resume_session_id, artifacts)?,
                 sid_sink,
                 link_sink,
             )?;
@@ -957,6 +1033,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
+    use super::protocol::method;
     use super::*;
     use crate::types::{ToolGrant, TurnOutcome, CLI_EXE_ENV};
 
@@ -983,6 +1060,7 @@ mod tests {
             PathBuf::from(cwd),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1003,7 +1081,9 @@ mod tests {
         }
     }
 
-    /// ★This value must **always be `None`** — the hook registration and its builder were removed (ADR-0216)★; the test only measures that it has not come back.
+    /// The `hooks.SessionStart` line of an argv. ★With no hook output written it must **always be `None`** — Engram's own
+    /// session-id hook stays removed (ADR-0216, U3)★; a hook component's line is the user's (ADR-0420), and
+    /// [`tests::a_hook_components_session_start_line_carries_only_the_users_command`] measures that it holds nothing of ours.
     /// ★The key is a literal on purpose★ — production code must hold none of this string, and a revived constant would blur that.
     /// ★Do not count by the **existence** of `-c`★ — two things carry it today (MCP attachment · the brief); a flag-only count turned false-positive with each new one.
     fn hook_override_value(argv: &[String]) -> Option<String> {
@@ -1087,6 +1167,7 @@ mod tests {
             PathBuf::from("."),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         assert!(
             !s.args.iter().any(|a| a.contains(&sid.to_string())),
@@ -1121,6 +1202,7 @@ mod tests {
             PathBuf::from(cwd),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1247,9 +1329,6 @@ mod tests {
             //   does it leak into argv」; `None` would make that hollow and a collapsed daemon-side gate would go uncaught.
             config_path: Some(std::path::PathBuf::from("C:/engram/mcp-config.json")),
             send_exe: Some(std::path::PathBuf::from("C:/engram/bin/engram.exe")),
-            // ★This path is **a file that does not exist**, intended★: this backend reads the brief's **content** (ADR-0215), and a real file would add a priming override to every test using this fixture and shake the adjacency · order
-            //   assertions. A read failure is fail-open (lands as 「not carried」); the injection items bake a real file with [`bake_priming`].
-            priming_file: Some(std::path::PathBuf::from("C:/engram/priming.md")),
             // ★This field is the concrete form of 「the daemon authorized the MCP send entrance for this spawn」 — do not leave it empty★: an empty list is the operator-**turned-off** state ([`endpoint_without_mcp_send`]), and every
             //   MCP-attachment test would measure the 「not attaching is correct」 side and go hollow.
             //   Pinning tool names here is not retyping — the decision looks **only at the server name** (`ControlEndpoint::grants_mcp_send`); the tool names' source of truth is the daemon side.
@@ -1257,7 +1336,6 @@ mod tests {
                 server: MCP_SERVER_NAME.to_string(),
                 tool: "eg_send".to_string(),
             }],
-            settings_file: Some(std::path::PathBuf::from("C:/engram/session.json")),
             // ★The value production carries for this backend is `false`★ — this folder declares it that way (`uses_mail`) and the daemon
             //   derives from that declaration. The sibling test below separately measures that the opposite value is followed too.
             mail_allowed: false,
@@ -1284,6 +1362,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             control,
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -1386,6 +1465,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&s);
         assert!(
@@ -1410,6 +1490,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&s);
         assert!(
@@ -1457,6 +1538,7 @@ mod tests {
                     PathBuf::from("C:/workspace"),
                     vec![],
                     None,
+                    &LaunchArtifacts::default(),
                 );
                 let argv_resumes = codex_argv(&s)
                     .first()
@@ -1542,9 +1624,13 @@ mod tests {
 
     // ── ADR-0216: the hook registration was removed ───────────────────────────────────────────────
     //
-    // ★The order · conflict-warning axis is measured on the living overrides★ — `the_priming_override_follows_the_passthrough` and `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered`.
+    // ★The order · conflict-warning axis is measured on the living overrides★ — `the_instructions_override_follows_the_passthrough` and `a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered`.
+    // ★Scope since ADR-0420★: these three assert a spawn **with no hook output written** carries no hook — Engram's own
+    //   session-id hook stays removed (ADR-0216, U3). Hook components and codex settings hooks lines come back as the
+    //   user's own hooks, trusted per run; their line carries only the user's command (the test after these three).
 
-    /// ★Terminal spawns no longer carry the hook★ — this one line nails down ADR-0216's replacement of the recovery path.
+    /// ★Terminal spawns with no hook output written carry no hook★ — Engram's own session-id hook stays removed
+    /// (ADR-0216, U3); this one line nails down ADR-0216's replacement of the recovery path.
     /// If carried, codex's trust review screen comes back and **the agent does not come up until approval.**
     #[test]
     fn the_terminal_spawn_no_longer_registers_the_session_start_hook() {
@@ -1556,8 +1642,9 @@ mod tests {
         );
     }
 
-    /// The same for app-server mode. ★These two once split — back then the hook was terminal-only★ (app-server
-    /// received the id directly in the `thread/start` response). Today neither mode sets it.
+    /// The same for app-server mode with no hook output written. ★These two once split — back then the hook was
+    /// terminal-only★ (app-server received the id directly in the `thread/start` response). Today neither mode sets it
+    /// (ADR-0216, U3).
     #[test]
     fn the_app_server_spawn_registers_no_hook() {
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
@@ -1583,6 +1670,74 @@ mod tests {
         );
     }
 
+    /// ★A hook component's `SessionStart` line carries only the user's command★ (ADR-0420 on ADR-0216) — a real terminal
+    /// kit with one component: the line is the assembly's (`hooks.SessionStart=[…]`, followed by the state line), its
+    /// command is the component's as written (placeholder rewritten), and nothing of Engram's own past hook (the
+    /// `hook session-start` subcommand, an Engram executable path) rides it.
+    // ADR-0216
+    // ADR-0420
+    #[test]
+    fn a_hook_components_session_start_line_carries_only_the_users_command() {
+        use crate::backend::hooks::HookRef;
+        use crate::launch::{LaunchKitSource, MemLaunchFs, NoopLaunchKits};
+        use crate::profile::AgentProfile;
+
+        let work = std::path::absolute("/fake-root/codex-0216/work").unwrap();
+        let folder = std::path::absolute("/fake-root/codex-0216/library/notify").unwrap();
+        let profile = AgentProfile::new(
+            "adr-0216".to_string(),
+            codex(vec![]),
+            work.clone(),
+            Vec::new(),
+            false,
+        );
+        let plan = NoopLaunchKits.check(&profile).unwrap();
+        let mut kit = NoopLaunchKits.prepare(plan, profile.id, 1).unwrap();
+        kit.plan.real = true;
+        let serde_json::Value::Object(definition) = serde_json::json!({"SessionStart": [{"hooks": [
+            {"type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/notify.js\" start"}
+        ]}]}) else {
+            unreachable!()
+        };
+        kit.plan.hooks = vec![HookRef {
+            path: "team/hooks/notify".to_string(),
+            dir: folder.clone(),
+            definition,
+        }];
+        let artifacts =
+            crate::backend::materialize(&codex(vec![]), &kit, &work, &MemLaunchFs::default())
+                .expect("materialize");
+        let argv = codex_argv(&CodexBackend.build_spec(
+            &codex(vec![]),
+            SpawnMode::Fresh,
+            None,
+            None,
+            work,
+            vec![],
+            Some(endpoint()),
+            &artifacts,
+        ));
+        let line = hook_override_value(&argv).expect("the component's SessionStart line");
+        assert_eq!(Some(&line), artifacts.hook_args.get(1), "{argv:?}");
+        let folder = engram_dashboard_platform::fs::forward_slash_text(&folder);
+        assert!(
+            line.contains(&format!("node \"{folder}/notify.js\" start")),
+            "{line}"
+        );
+        assert!(!line.contains("hook session-start"), "{line}");
+        assert!(
+            !line.contains("engram"),
+            "an Engram path rode the line: {line}"
+        );
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.starts_with("hooks.SessionStart"))
+                .count(),
+            1,
+            "{argv:?}"
+        );
+    }
+
     /// Passing another key with `-c` is not a conflict — spammed warnings go unread. ★Measured on the **living** key (the brief)★: a removed key would not tread the axis this helper drives.
     #[test]
     fn an_unrelated_config_passthrough_is_not_a_conflict() {
@@ -1601,7 +1756,8 @@ mod tests {
 
     /// On the resume branch too, the subcommand is at the very front and our overrides are after the pass-through.
     ///
-    /// ★「At the very end」 is not pinned★ — the sibling override (the brief) takes that slot when a priming file exists; the invariant is only **after the pass-through**.
+    /// ★It does not pin 「last」★ — that spot goes to the sibling override (the instructions) when real materials carry
+    ///   one, and that is not a regression. The real invariant is only **after the pass-through**.
     #[test]
     fn a_resuming_spawn_still_carries_our_override_after_the_passthrough() {
         let s = CodexBackend.build_spec(
@@ -1612,6 +1768,7 @@ mod tests {
             PathBuf::from("C:/workspace"),
             vec![],
             Some(endpoint()),
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&s);
         assert_eq!(&argv[..1], &[RESUME_SUBCOMMAND.to_string()]);
@@ -1691,8 +1848,19 @@ mod tests {
             cwd: PathBuf::from("."),
         };
         let open = |command: &AgentCommand| {
-            crate::backend::open_spawn(command, &probe, 80, 24, None, None, None, None, None)
-                .expect("open_spawn")
+            crate::backend::open_spawn(
+                command,
+                &probe,
+                80,
+                24,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &LaunchArtifacts::default(),
+            )
+            .expect("open_spawn")
         };
 
         let json = open(&codex_app_server(vec![]));
@@ -1980,7 +2148,7 @@ mod tests {
 
     /// What the fake answers to `thread/resume`.
     #[cfg(windows)]
-    enum FakeResume {
+    pub(super) enum FakeResume {
         /// Returns the received `threadId` with a prefix — the point is that it becomes a value **different** from the one we sent.
         EchoesTheThreadId,
         /// Refuses with `-32600`. ★That code is not exclusive to 「unknown thread」 (ADR-0082's codex-side addendum)★ — an unknown method, a duplicate `initialize` and a config error come with it too (0.154.0; this folder's `protocol` and the link
@@ -1997,36 +2165,77 @@ mod tests {
     #[cfg(windows)]
     const FAKE_READY_ENV: &str = "ENGRAM_FAKE_APP_SERVER_READY";
 
+    /// The environment variable that carries the path of the fake's received-line log ([`FakeAppServer::received`]).
+    #[cfg(windows)]
+    const FAKE_LOG_ENV: &str = "ENGRAM_FAKE_APP_SERVER_LOG";
+
     /// One baked fake app-server.
     ///
     /// ★Holding the two paths together is a contract★ — each item must remove them with [`FakeAppServer::remove`] and raise a failure to remove as an assertion.
     #[cfg(windows)]
-    struct FakeAppServer {
-        spec: CommandSpec,
+    pub(super) struct FakeAppServer {
+        pub(super) spec: CommandSpec,
         script: std::path::PathBuf,
         /// The empty file the fake creates as it enters its read loop — [`wait_for_the_fake_to_listen`] waits for it.
         ready: std::path::PathBuf,
+        /// Every line the fake received, in order, one per line — [`FakeAppServer::received`] reads it.
+        log: std::path::PathBuf,
     }
 
     #[cfg(windows)]
     impl FakeAppServer {
-        /// Removes the script and the marker and returns **the paths it could not remove** — if empty, both were removed.
+        /// Removes the script, the marker and the method log, and returns the paths it **could not** remove — empty =
+        /// all removed.
         #[must_use = "dropping the fact that it could not remove quietly piles up leftovers — raise it as an assertion"]
-        fn remove(&self) -> Vec<&std::path::Path> {
-            [self.script.as_path(), self.ready.as_path()]
-                .into_iter()
-                .filter(|path| !remove_fake_file(path))
+        pub(super) fn remove(&self) -> Vec<&std::path::Path> {
+            [
+                self.script.as_path(),
+                self.ready.as_path(),
+                self.log.as_path(),
+            ]
+            .into_iter()
+            .filter(|path| !remove_fake_file(path))
+            .collect()
+        }
+
+        /// Every line the fake received so far, parsed, in order (requests and the `initialized` notification).
+        pub(super) fn received(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("the fake logged a non-JSON line"))
                 .collect()
         }
 
-        /// One **PowerShell** line to run this fake by hand (not cmd · bash). ★The marker path variable is written together★ — without it the script dies at the marker-writing line (`$ErrorActionPreference = 'Stop'`) and the failure does
-        /// not reproduce. All values are single-quoted with inner `'` doubled, so spaces · `$` in paths are not interpreted.
+        /// The `method` of every received line, in order.
+        pub(super) fn methods(&self) -> Vec<String> {
+            self.received()
+                .iter()
+                .map(|v| v["method"].as_str().unwrap_or_default().to_string())
+                .collect()
+        }
+
+        /// The params of the first received request of `method_name`.
+        pub(super) fn params_of(&self, method_name: &str) -> Option<serde_json::Value> {
+            self.received()
+                .into_iter()
+                .find(|v| v["method"] == method_name)
+                .map(|v| v["params"].clone())
+        }
+
+        /// A **PowerShell** line that runs this fake by hand (it does not run as is in cmd or bash).
+        /// ★It sets the marker and log path variables too★ — without them the script dies at the line that writes
+        /// the marker or the log (`$ErrorActionPreference = 'Stop'`) and the failure is not reproduced.
+        /// Every value is wrapped in single quotes with an inner `'` doubled — so spaces and `$` in a path are not
+        /// interpreted.
         fn hand_run(&self) -> String {
             let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
             let args: Vec<String> = self.spec.args.iter().map(|a| quote(a)).collect();
             format!(
-                "$env:{FAKE_READY_ENV}={}; {} {}",
+                "$env:{FAKE_READY_ENV}={}; $env:{FAKE_LOG_ENV}={}; {} {}",
                 quote(&self.ready.to_string_lossy()),
+                quote(&self.log.to_string_lossy()),
                 self.spec.program,
                 args.join(" ")
             )
@@ -2036,6 +2245,82 @@ mod tests {
     /// Bakes a fake app-server into a temp file. `start_thread_id` = the id this fake answers to `thread/start` with.
     #[cfg(windows)]
     fn bake_fake_app_server(start_thread_id: &str, resume: FakeResume) -> FakeAppServer {
+        bake_fake_app_server_with(start_thread_id, resume, FakeOptions::default())
+    }
+
+    /// What else the fake answers with — [`bake_fake_app_server_with`].
+    #[cfg(windows)]
+    pub(super) struct FakeOptions {
+        /// The `initialize` `userAgent`. The default `engram-fake/0` carries no version the transport can read.
+        pub(super) user_agent: &'static str,
+        pub(super) extra_roots: FakeExtraRoots,
+        pub(super) hooks_list: FakeHooksList,
+    }
+
+    #[cfg(windows)]
+    impl Default for FakeOptions {
+        fn default() -> Self {
+            FakeOptions {
+                user_agent: "engram-fake/0",
+                extra_roots: FakeExtraRoots::Answers,
+                hooks_list: FakeHooksList::Rejects,
+            }
+        }
+    }
+
+    /// How the fake answers `hooks/list`.
+    // ADR-0420
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    pub(super) enum FakeHooksList {
+        /// `-32601` — what a codex without the method would answer.
+        Rejects,
+        /// `{"result": <this JSON>}` — no `'` inside (it goes into a powershell single-quoted string).
+        Answers(&'static str),
+        /// No answer at all — a codex that accepts the request and never replies (the cap
+        /// `transport::HOOKS_LIST_CAP` ends the wait).
+        Silent,
+    }
+
+    /// [`FakeHooksList::Rejects`]'s message.
+    #[cfg(windows)]
+    const FAKE_HOOKS_LIST_REJECTION: &str = "method not found: hooks/list";
+
+    /// How the fake answers `skills/extraRoots/set`.
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    pub(super) enum FakeExtraRoots {
+        /// `{}` — what codex 0.163.0 answers.
+        Answers,
+        /// `-32601` — what a codex without the method would answer (R16).
+        Rejects,
+    }
+
+    /// [`FakeExtraRoots::Rejects`]'s message.
+    #[cfg(windows)]
+    const FAKE_EXTRA_ROOTS_REJECTION: &str = "method not found: skills/extraRoots/set";
+
+    /// [`bake_fake_app_server`] with a chosen `userAgent` and `skills/extraRoots/set` answer.
+    #[cfg(windows)]
+    pub(super) fn bake_fake_app_server_with(
+        start_thread_id: &str,
+        resume: FakeResume,
+        options: FakeOptions,
+    ) -> FakeAppServer {
+        let extra_roots_reply = match options.extra_roots {
+            FakeExtraRoots::Answers => r#"'"result":{}'"#.to_string(),
+            FakeExtraRoots::Rejects => {
+                format!(r#"'"error":{{"code":-32601,"message":"{FAKE_EXTRA_ROOTS_REJECTION}"}}'"#)
+            }
+        };
+        let send = |reply: String| format!(r#"Send ('{{"id":' + $rid + ',' + {reply} + '}}')"#);
+        let hooks_list_answer = match options.hooks_list {
+            FakeHooksList::Rejects => send(format!(
+                r#"'"error":{{"code":-32601,"message":"{FAKE_HOOKS_LIST_REJECTION}"}}'"#
+            )),
+            FakeHooksList::Answers(result) => send(format!(r#"'"result":{result}'"#)),
+            FakeHooksList::Silent => "# no answer (FakeHooksList::Silent)".to_string(),
+        };
         let resume_reply = match resume {
             FakeResume::EchoesTheThreadId => {
                 r#"'"result":{"thread":{"id":"resumed-' + $tid + '","cliVersion":"0.0.0-fake"}}'"#
@@ -2048,10 +2333,15 @@ mod tests {
         let script = FAKE_APP_SERVER_PS1
             .replace("THREAD_ID_PLACEHOLDER", start_thread_id)
             .replace("RESUME_REPLY_PLACEHOLDER", &resume_reply)
-            .replace("READY_ENV_PLACEHOLDER", FAKE_READY_ENV);
+            .replace("EXTRA_ROOTS_REPLY_PLACEHOLDER", &extra_roots_reply)
+            .replace("HOOKS_LIST_ANSWER_PLACEHOLDER", &hooks_list_answer)
+            .replace("USER_AGENT_PLACEHOLDER", options.user_agent)
+            .replace("READY_ENV_PLACEHOLDER", FAKE_READY_ENV)
+            .replace("LOG_ENV_PLACEHOLDER", FAKE_LOG_ENV);
         let stem = format!("engram-fake-app-server-{}", Uuid::new_v4());
         let script_path = std::env::temp_dir().join(format!("{stem}.ps1"));
         let ready = std::env::temp_dir().join(format!("{stem}.ready"));
+        let log = std::env::temp_dir().join(format!("{stem}.log"));
         std::fs::write(&script_path, script).expect("write the fake app-server");
 
         let spec = CommandSpec {
@@ -2063,13 +2353,17 @@ mod tests {
                 "-File".into(),
                 script_path.to_string_lossy().into_owned(),
             ],
-            env: vec![(FAKE_READY_ENV.into(), ready.to_string_lossy().into_owned())],
+            env: vec![
+                (FAKE_READY_ENV.into(), ready.to_string_lossy().into_owned()),
+                (FAKE_LOG_ENV.into(), log.to_string_lossy().into_owned()),
+            ],
             cwd: PathBuf::from("."),
         };
         FakeAppServer {
             spec,
             script: script_path,
             ready,
+            log,
         }
     }
 
@@ -2081,7 +2375,7 @@ mod tests {
     /// ★The budget is not raised to fit★ — that value is production behaviour; `start()` has no handle to inject a bench budget and adding one needs a new production seam (ADR-0012).
     /// ★The marker guarantees only 「the script started running」★ — the first-run cost of the per-request response path (regex · write) is still inside the budget and unmeasured on a slow runner; if large, the symptom is the same deadline expiry.
     #[cfg(windows)]
-    fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
+    pub(super) fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
         wait_until(
             || fake.ready.exists(),
             &format!(
@@ -2128,7 +2422,7 @@ mod tests {
         }
         let resolution = delivered.lock().unwrap().first().cloned();
         match resolution {
-            Some(crate::transport::LinkResolution::Ready) => panic!(
+            Some(crate::transport::LinkResolution::Ready { .. }) => panic!(
                 "the connection stood without the record verb ever being called — the wiring is broken: the record port did not reach the link"
             ),
             Some(crate::transport::LinkResolution::Failed { reason }) => panic!(
@@ -2141,7 +2435,13 @@ mod tests {
         }
     }
 
-    /// A minimal app-server that answers only the two handshake requests. ★Not the real codex★ — what is measured is 「does the thread id the peer gave reach the verb handed to [`AgentBackend::open_spawn`]」, irrelevant to the real CLI (ADR-0012).
+    /// A minimal app-server: it answers the handshake requests (`initialize` with [`FakeOptions::user_agent`],
+    /// `skills/extraRoots/set` per [`FakeExtraRoots`], `thread/start`, `thread/resume`, `hooks/list` per
+    /// [`FakeHooksList`]) and `turn/start` (then echoes a
+    /// user message on the thread it opened), and appends every line it receives to its log, in order
+    /// ([`FakeAppServer::received`]). ★Not the real codex★ — what the tests measure is our side of the wire (the thread
+    /// id reaching the verb handed to [`AgentBackend::open_spawn`], what the handshake sends and in which order); the real
+    /// CLI does not matter for that (ADR-0012 isolation).
     /// ★Baked into a file, not passed as an argument★ — the script contains JSON `"`, which is chewed twice by Rust `Command` escaping and powershell command-line parsing.
     /// ★stdout is written as raw bytes★ — `Write-Output` drags encoding · BOM along with host settings, and one BOM byte makes the first line not JSON.
     ///
@@ -2161,21 +2461,28 @@ function Send([string]$s) {
   $so.Write($b, 0, $b.Length)
   $so.Flush()
 }
+$current = 'THREAD_ID_PLACEHOLDER'
 [IO.File]::WriteAllText($env:READY_ENV_PLACEHOLDER, '')
 while ($null -ne ($line = [Console]::In.ReadLine())) {
+  [IO.File]::AppendAllText($env:LOG_ENV_PLACEHOLDER, $line + "`n")
   if ($line -match '"id":(-?\d+)') {
     $rid = $Matches[1]
     if ($line -match '"method":"initialize"') {
-      Send ('{"id":' + $rid + ',"result":{"codexHome":"h","platformFamily":"windows","platformOs":"windows","userAgent":"engram-fake/0"}}')
+      Send ('{"id":' + $rid + ',"result":{"codexHome":"h","platformFamily":"windows","platformOs":"windows","userAgent":"USER_AGENT_PLACEHOLDER"}}')
+    } elseif ($line -match '"method":"skills/extraRoots/set"') {
+      Send ('{"id":' + $rid + ',' + EXTRA_ROOTS_REPLY_PLACEHOLDER + '}')
     } elseif ($line -match '"method":"thread/start"') {
       Send ('{"id":' + $rid + ',"result":{"thread":{"id":"THREAD_ID_PLACEHOLDER","cliVersion":"0.0.0-fake"}}}')
     } elseif ($line -match '"method":"thread/resume"') {
       $tid = 'MISSING'
       if ($line -match '"threadId":"([^"]+)"') { $tid = $Matches[1] }
+      $current = 'resumed-' + $tid
       Send ('{"id":' + $rid + ',' + RESUME_REPLY_PLACEHOLDER + '}')
+    } elseif ($line -match '"method":"hooks/list"') {
+      HOOKS_LIST_ANSWER_PLACEHOLDER
     } elseif ($line -match '"method":"turn/start"') {
       Send ('{"id":' + $rid + ',"result":{"turn":{"id":"fake-turn"}}}')
-      Send '{"method":"item/started","params":{"threadId":"THREAD_ID_PLACEHOLDER","turnId":"fake-turn","item":{"type":"userMessage","id":"fake-user-item","content":[{"type":"text","text":"echo"}]}}}'
+      Send ('{"method":"item/started","params":{"threadId":"' + $current + '","turnId":"fake-turn","item":{"type":"userMessage","id":"fake-user-item","content":[{"type":"text","text":"echo"}]}}}')
     }
   }
 }
@@ -2216,6 +2523,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             None,
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2288,6 +2596,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(resume_target),
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2392,6 +2701,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(resume_target),
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2554,6 +2864,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             None,
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
 
@@ -2674,7 +2985,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let first_turns = Arc::new(AtomicUsize::new(0));
         let first_turn: FirstTurnSink = {
             let first_turns = first_turns.clone();
-            Arc::new(move || {
+            Arc::new(move |_delivered: bool| {
                 first_turns.fetch_add(1, Ordering::SeqCst);
             })
         };
@@ -2690,6 +3001,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             None,
             Some(link_sink),
             None,
+            &LaunchArtifacts::default(),
         )
         .expect("open_spawn");
         assert!(
@@ -2711,7 +3023,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
         let ready = matches!(
             delivered.lock().unwrap().first(),
-            Some(crate::transport::LinkResolution::Ready)
+            Some(crate::transport::LinkResolution::Ready { .. })
         );
         let before_any_turn = first_turns.load(Ordering::SeqCst);
 
@@ -2934,6 +3246,55 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
     }
 
+    /// The command-line count holds the control URL to [`MCP_URL_BUDGET`] (`"` and `\` counted twice) — a longer
+    /// one is unrepresentable, so the spawn fails closed instead of outgrowing the count.
+    #[test]
+    fn a_control_url_over_its_command_line_bound_is_unrepresentable() {
+        let attachment = |url: String| {
+            let mut ep = endpoint();
+            ep.url = url;
+            mcp_attachment(Some(&ep))
+        };
+        let prefix = "http://127.0.0.1:1/";
+        let room = MCP_URL_BUDGET - prefix.len();
+        assert!(matches!(
+            attachment(format!("{prefix}{}", "m".repeat(room))),
+            McpAttachment::Attach(_)
+        ));
+        for over in [
+            format!("{prefix}{}", "m".repeat(room + 1)),
+            format!("{prefix}\\{}", "m".repeat(room - 1)),
+        ] {
+            assert!(
+                matches!(attachment(over.clone()), McpAttachment::Unrepresentable(_)),
+                "{over}"
+            );
+        }
+        let mut ep = endpoint();
+        ep.url = format!("{prefix}{}", "m".repeat(room + 1));
+        assert!(CodexBackend
+            .precheck_control_endpoint(&codex(vec![]), Some(&ep))
+            .is_err());
+    }
+
+    /// A `"` or a cmd metacharacter in the control URL would change how cmd reads the rest of the line — the
+    /// attachment is unrepresentable instead.
+    #[test]
+    fn a_control_url_with_a_quote_or_a_cmd_metachar_is_unrepresentable() {
+        for bad in ['"', '&', '|', '<', '>', '^'] {
+            let mut ep = endpoint();
+            ep.url = format!("http://127.0.0.1:1/m{bad}cp");
+            assert!(
+                matches!(mcp_attachment(Some(&ep)), McpAttachment::Unrepresentable(_)),
+                "{bad:?}"
+            );
+        }
+        assert!(matches!(
+            mcp_attachment(Some(&endpoint())),
+            McpAttachment::Attach(_)
+        ));
+    }
+
     /// ★Even if the pass-through sets the same key, ours is carried **after** it★ — the last `-c` wins, so this order
     /// is the life or death of the mail entrance. And user arguments are not erased (filtering is censorship).
     #[test]
@@ -2971,9 +3332,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
-    /// ★Even if the file fields come as `Some`, they do not reach argv★ — in production they come as `None` (`writes_mcp_config_file()` = false), but this test **deliberately** feeds the collapsed-gate state to measure the second wall. codex has no flag for those two,
-    /// so copying claude's flags because 「it is Some」 kills the launch.
-    /// ★The third field (`priming_file`) is here for a different reason★: that file **is read and carried** (ADR-0215), but a **path** must not reach argv (partner with a real file: `the_priming_path_never_reaches_the_command_line`).
+    /// ★The config path does not reach argv even when it comes as `Some`★ — production sends `None`
+    /// (`writes_mcp_config_file()` = false → the daemon writes no file), and this test feeds the broken-gate state on
+    /// purpose to measure the second wall. codex has no flag for that file, so copying claude's flags in 「since it is
+    /// Some, use it」 kills the launch.
     #[test]
     fn the_daemon_written_files_are_still_not_translated_into_argv() {
         let ep = endpoint();
@@ -2985,40 +3347,15 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 "claude's flag `{forbidden}` was carried in codex argv: {argv:?}"
             );
         }
-        for path in [ep.config_path, ep.settings_file, ep.priming_file] {
-            let path = path.expect("the fixture fills all three fields");
-            let path = path.to_string_lossy().into_owned();
-            assert!(
-                !argv.iter().any(|a| a.contains(&path)),
-                "the path `{path}` was carried in argv: {argv:?}"
-            );
-        }
+        let path = ep.config_path.expect("the fixture fills the config path");
+        let path = path.to_string_lossy().into_owned();
+        assert!(
+            !argv.iter().any(|a| a.contains(&path)),
+            "the path `{path}` was carried in argv: {argv:?}"
+        );
     }
 
-    // ── ADR-0215: priming injection (terminal = `-c developer_instructions=…` · app-server = handshake JSON) ──
-
-    /// Bakes a brief file into a temp folder and returns an endpoint pointing to it.
-    ///
-    /// ★Returning the path too is a contract★ — each item must remove it. The default fixture's `C:/engram/priming.md` **does not exist** and falls to the read-failure branch (so other tests' argv does not grow); measuring the injection needs a real file.
-    fn bake_priming(text: &str) -> (ControlEndpoint, std::path::PathBuf) {
-        let path = std::env::temp_dir().join(format!("engram-priming-{}.md", Uuid::new_v4()));
-        std::fs::write(&path, text).expect("write the priming file");
-        (
-            ControlEndpoint {
-                priming_file: Some(path.clone()),
-                ..endpoint()
-            },
-            path,
-        )
-    }
-
-    /// A spawn the daemon did not carry priming for (the endpoint shape of the non-MCP branch).
-    fn endpoint_without_priming() -> ControlEndpoint {
-        ControlEndpoint {
-            priming_file: None,
-            ..endpoint()
-        }
-    }
+    // ── ADR-0215: instructions (terminal = `-c developer_instructions=…` · app-server = handshake JSON) ──
 
     fn developer_instructions_value(argv: &[String]) -> Option<String> {
         let prefix = format!("{DEVELOPER_INSTRUCTIONS_KEY}=");
@@ -3027,120 +3364,30 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             .find(|v| v.starts_with(&prefix))
     }
 
-    /// Did the skipped branch **really change nothing** — argv byte-identical to a spawn without priming?
-    ///
-    /// ★「No injection」 alone is not enough★: a branch that could not build the value could still push in half an argument or shake the order and pass that assertion; this comparison is the concrete form of 「the spawn goes ahead as is」.
-    fn assert_argv_matches_a_spawn_without_priming(argv: &[String]) {
-        let bare = spec_with_control(&codex(vec![]), Some(endpoint_without_priming()));
-        assert_eq!(
-            argv,
-            codex_argv(&bare),
-            "the argv that skipped priming differs from a spawn without priming"
-        );
-    }
-
-    /// ★The value is pinned **literally**★ — it is a wire contract the codex config parser reads, and the single quote (TOML literal
-    /// string) and the replacement of newlines with two characters are both load-bearing.
+    /// ★Our instructions go **after** the pass-through★ — with the same key passed twice by `-c` the last one wins; put
+    /// first, one user argument line would erase the instructions without a signal (the same rule as the MCP attachment).
+    // ADR-0337
     #[test]
-    fn the_terminal_spawn_carries_the_priming_document_as_developer_instructions() {
-        let (ep, path) = bake_priming("line one\nline two\n");
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let value = developer_instructions_value(&codex_argv(&s)).expect("priming was not carried");
-        assert_eq!(value, "developer_instructions='line one\\nline two\\n'");
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★If even one real newline remains, cmd cuts the command line at that spot (no error)★ — the three forms
-    /// (`\r\n` · `\n` · `\r`) are mixed in one document to catch an implementation that replaces only one of them.
-    #[test]
-    fn every_line_break_shape_collapses_into_one_line() {
-        let (ep, path) = bake_priming("a\r\nb\rc\nd");
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let value = developer_instructions_value(&codex_argv(&s)).expect("priming was not carried");
-        assert_eq!(value, "developer_instructions='a\\nb\\nc\\nd'");
-        assert!(
-            !value.contains('\n') && !value.contains('\r'),
-            "a real newline remained in the value: {value:?}"
-        );
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★One single quote breaks the TOML literal string — one English contraction brings it in★.
-    #[test]
-    fn a_quoted_priming_document_is_skipped_and_the_spawn_still_stands() {
-        let (ep, path) = bake_priming("do not route around it — tell your principal you can't");
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let argv = codex_argv(&s);
-        assert!(
-            developer_instructions_value(&argv).is_none(),
-            "a brief containing a single quote was carried as is: {argv:?}"
-        );
-        assert_argv_matches_a_spawn_without_priming(&argv);
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★cmd expands `%NAME%` **even inside quotes**★ — carried as is, the document the agent reads gets this machine's
-    /// environment variable value embedded (substitution succeeded) or the sentence disappears entirely (undefined variable).
-    #[test]
-    fn a_priming_document_with_a_percent_sign_is_skipped_and_the_spawn_still_stands() {
-        let (ep, path) = bake_priming("progress is 50% done");
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let argv = codex_argv(&s);
-        assert!(
-            developer_instructions_value(&argv).is_none(),
-            "a brief containing `%` was carried as is: {argv:?}"
-        );
-        assert_argv_matches_a_spawn_without_priming(&argv);
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★A brief over budget is skipped **without killing the spawn**★ — a command line over the cap is punished not with an error
-    /// but with a cut, so the real price of that branch is the MCP attachment and the hook registration disappearing along with it.
-    #[test]
-    fn an_oversized_priming_document_is_skipped_and_the_spawn_still_stands() {
-        let (ep, path) = bake_priming(&"x".repeat(CMD_LINE_LIMIT_UTF16));
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let argv = codex_argv(&s);
-        assert!(
-            developer_instructions_value(&argv).is_none(),
-            "a brief over budget was carried (length {})",
-            argv.iter().map(|a| a.len()).sum::<usize>()
-        );
-        assert_argv_matches_a_spawn_without_priming(&argv);
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★The budget is decided by **the remainder** — it does not measure our value alone★: the same brief is skipped on a spawn
-    /// with a long pass-through. Reverting to a fixed-constant comparison breaks this item.
-    #[test]
-    fn the_budget_counts_what_the_rest_of_the_command_line_already_spent() {
-        let text = "y".repeat(CMD_LINE_LIMIT_UTF16 / 2);
-        let (ep, path) = bake_priming(&text);
-        let roomy = spec_with_control(&codex(vec![]), Some(ep.clone()));
-        assert!(
-            developer_instructions_value(&codex_argv(&roomy)).is_some(),
-            "skipped on a command line with room to spare"
-        );
-        let filler = "z".repeat(CMD_LINE_LIMIT_UTF16 / 2);
-        let crowded = spec_with_control(&codex(vec![filler.as_str()]), Some(ep));
-        assert!(
-            developer_instructions_value(&codex_argv(&crowded)).is_none(),
-            "carried it as is on a command line whose budget the pass-through used up"
-        );
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★It must be **after** the pass-through★ — passing the same key twice with `-c`, the last one wins. If placed in front, one line of user
-    /// arguments erases the receive-contract priming without any signal (the same discipline as the hook · MCP attachment).
-    #[test]
-    fn the_priming_override_follows_the_passthrough() {
-        let (ep, path) = bake_priming("teach the reply contract");
-        let s = spec_with_control(
+    fn the_instructions_override_follows_the_passthrough() {
+        let artifacts = LaunchArtifacts {
+            real: true,
+            instructions_override: Some(
+                "developer_instructions='teach the reply contract'".to_string(),
+            ),
+            ..LaunchArtifacts::default()
+        };
+        let s = CodexBackend.build_spec(
             &codex(vec![
                 CONFIG_OVERRIDE_FLAG,
                 "developer_instructions='theirs'",
             ]),
-            Some(ep),
+            SpawnMode::Fresh,
+            None,
+            None,
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+            &artifacts,
         );
         let values = config_override_values(&codex_argv(&s));
         let ours = values
@@ -3155,21 +3402,54 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             ours > theirs,
             "our value was carried in front (it is losing): {values:?}"
         );
-        std::fs::remove_file(&path).expect("remove the temp brief");
+    }
+
+    /// ★The terminal hook lines come right after the preset lines★ — after the pass-through, before the MCP attachment
+    /// and the priming, so our overrides still come last.
+    // ADR-0420
+    #[test]
+    fn the_terminal_hook_lines_follow_the_preset_lines_and_precede_our_overrides() {
+        let artifacts = LaunchArtifacts {
+            real: true,
+            config_args: vec![CONFIG_OVERRIDE_FLAG.to_string(), "model='o3'".to_string()],
+            hook_args: vec![
+                CONFIG_OVERRIDE_FLAG.to_string(),
+                "hooks.Stop=[]".to_string(),
+                CONFIG_OVERRIDE_FLAG.to_string(),
+                "hooks.state={}".to_string(),
+            ],
+            instructions_override: Some("developer_instructions='p'".to_string()),
+            ..LaunchArtifacts::default()
+        };
+        let s = CodexBackend.build_spec(
+            &codex(vec![CONFIG_OVERRIDE_FLAG, "theirs=1"]),
+            SpawnMode::Fresh,
+            None,
+            None,
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+            &artifacts,
+        );
+        let values = config_override_values(&codex_argv(&s));
+        assert_eq!(
+            values[..4],
+            ["theirs=1", "model='o3'", "hooks.Stop=[]", "hooks.state={}"]
+        );
+        assert!(
+            values[4].starts_with(MCP_SERVER_OVERRIDE_PREFIX),
+            "{values:?}"
+        );
+        assert_eq!(values[5], "developer_instructions='p'");
+        assert_eq!(values.len(), 6, "{values:?}");
     }
 
     /// ★The app-server branch does not touch the value★ — it uses none of the command line, so neither newlines nor the `'` · `%` the terminal branch cuts can break the JSON body; moving that conversion here would only break the document the agent reads.
     #[test]
     fn the_app_server_handshake_carries_the_document_unmodified() {
         let text = "line one\nyou can't skip 50% of it\n";
-        let (ep, path) = bake_priming(text);
-        let s = spec_with_control(&codex_app_server(vec![]), Some(ep.clone()));
-        assert!(
-            developer_instructions_value(&codex_argv(&s)).is_none(),
-            "the app-server branch carried it on the command line too: {:?}",
-            codex_argv(&s)
-        );
-        let params = match thread_open(&s, None, priming_text(Some(&ep))) {
+        let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
+        let params = match thread_open(&s, None, Some(text.to_string()), None) {
             ThreadOpen::Start(p) => p,
             ThreadOpen::Resume(_) => panic!("resume was picked although it is not a resume"),
         };
@@ -3179,89 +3459,784 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(text),
             "the instructions in the handshake JSON differ from the original: {v}"
         );
-        std::fs::remove_file(&path).expect("remove the temp brief");
     }
 
-    /// ★A resumed app-server thread gets no priming — a decision, not a regression★ (reason: `ThreadResumeParams`'s doc). When that field is confirmed by measurement and added, this item goes red and is fixed together.
+    /// ★A resumed app-server thread carries the instructions too★ — unmodified, like the start — so a compaction in the
+    /// resumed process rebuilds its initial context with them (M8; the reason's source = the `ThreadResumeParams` field
+    /// doc). Without the field that rebuild had no instructions at all.
+    // ADR-0337
     #[test]
-    fn a_resuming_app_server_handshake_carries_no_instructions_field() {
-        let (ep, path) = bake_priming("teach the reply contract");
-        let s = spec_with_control(&codex_app_server(vec![]), Some(ep.clone()));
-        let params = match thread_open(&s, Some(Uuid::new_v4()), priming_text(Some(&ep))) {
+    fn a_resuming_app_server_handshake_carries_the_instructions_field() {
+        let text = "teach the reply contract\nyou can't skip 50% of it\n";
+        let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
+        let params = match thread_open(&s, Some(Uuid::new_v4()), Some(text.to_string()), None) {
             ThreadOpen::Resume(p) => p,
             ThreadOpen::Start(_) => panic!("start was picked although it is a resume"),
         };
         let v = serde_json::to_value(&params).expect("serialize");
-        assert!(
-            v.get("developerInstructions").is_none(),
-            "a never-measured field was carried in the resume request: {v}"
+        assert_eq!(
+            v.get("developerInstructions").and_then(|v| v.as_str()),
+            Some(text),
+            "the resume request does not carry the document as is: {v}"
         );
-        std::fs::remove_file(&path).expect("remove the temp brief");
     }
 
-    /// A spawn the daemon did not carry priming for (the branch where `wants_priming` is false) does not grow argv by a single slot.
+    /// The Noop launch-material app-server handshake — pins the values for a new thread and a resume (no instructions in
+    /// either), plus the open plan's empty roots and context. A Noop spawn carries no instructions (ADR-0370).
+    // ADR-0370
     #[test]
-    fn without_a_priming_file_nothing_is_injected() {
-        for command in [codex(vec![]), codex_app_server(vec![])] {
-            let s = spec_with_control(&command, Some(endpoint_without_priming()));
-            assert!(
-                developer_instructions_value(&codex_argv(&s)).is_none(),
-                "{command:?}: carried although there is no path"
-            );
-        }
-        assert!(priming_text(Some(&endpoint_without_priming())).is_none());
-        assert!(priming_text(None).is_none());
-    }
-
-    /// ★A read failure is fail-open★ — only a warning is left and the spawn goes ahead. Raised as an error, codex spawns would die entirely
-    /// in an install where one brief file went missing.
-    #[test]
-    fn an_unreadable_priming_file_is_skipped_in_both_modes() {
-        let missing =
-            std::env::temp_dir().join(format!("engram-priming-absent-{}.md", Uuid::new_v4()));
-        let ep = ControlEndpoint {
-            priming_file: Some(missing),
-            ..endpoint()
+    fn the_app_server_handshake_is_pinned_for_a_spawn_without_launch_kit() {
+        let spec = CommandSpec {
+            program: CODEX_PROGRAM.to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: PathBuf::from("C:/workspace"),
         };
-        assert!(priming_text(Some(&ep)).is_none(), "a missing file was read");
-        for command in [codex(vec![]), codex_app_server(vec![])] {
-            let s = spec_with_control(&command, Some(ep.clone()));
-            let argv = codex_argv(&s);
+        let thread = Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
+        let handshake = |resume: Option<Uuid>| {
+            let open = app_server_open(&spec, resume, &LaunchArtifacts::default())
+                .expect("a Noop open plan");
+            assert!(open.extra_roots.is_empty(), "a Noop spawn sent skill roots");
             assert!(
-                developer_instructions_value(&argv).is_none(),
-                "{command:?}: carried although the file is missing"
+                open.first_turn_context.is_none(),
+                "a Noop spawn carries a first-turn context"
+            );
+            match open.thread {
+                ThreadOpen::Start(p) => serde_json::json!({ "start": p }),
+                ThreadOpen::Resume(p) => serde_json::json!({ "resume": p }),
+            }
+        };
+        assert_eq!(
+            handshake(None),
+            serde_json::json!({ "start": {
+                "cwd": "C:/workspace",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+            }}),
+            "fresh"
+        );
+        assert_eq!(
+            handshake(Some(thread)),
+            serde_json::json!({ "resume": {
+                "threadId": "22222222-2222-4222-8222-222222222222",
+                "cwd": "C:/workspace",
+                "approvalPolicy": "on-request",
+                "sandbox": "workspace-write",
+                "excludeTurns": true,
+            }}),
+            "resume"
+        );
+    }
+
+    // ── ADR-0337: the real JSON open plan (TRD S25 step 6 §4-7) ──────────────────────────────────
+
+    const MERGED: &str = "merged instructions\nsecond line\n";
+
+    fn real_json_artifacts(text: Option<&str>, changed: bool) -> LaunchArtifacts {
+        LaunchArtifacts {
+            real: true,
+            instructions_text: text.map(str::to_string),
+            instructions_changed: changed,
+            skill_roots: vec![
+                PathBuf::from("C:/vol/engram/skills"),
+                PathBuf::from("C:/rules/.agents/skills"),
+            ],
+            ..LaunchArtifacts::default()
+        }
+    }
+
+    fn open_plan(resume: Option<Uuid>, artifacts: &LaunchArtifacts) -> AppServerOpen {
+        let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
+        app_server_open(&s, resume, artifacts).expect("an open plan")
+    }
+
+    fn developer_instructions_of(plan: &AppServerOpen) -> Option<String> {
+        let v = match &plan.thread {
+            ThreadOpen::Start(p) => serde_json::to_value(p),
+            ThreadOpen::Resume(p) => serde_json::to_value(p),
+        }
+        .expect("serialize");
+        v.get("developerInstructions")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// Start · resume × changed · unchanged: the merged text goes as `developerInstructions` on both branches (M8 — on
+    /// every resume, changed or not), the roots go as given, and the context = preface + text only on a changed
+    /// resume — a Fresh spawn never carries it, even with `instructions_changed` (B10).
+    #[test]
+    fn a_real_open_plan_sends_the_merged_text_the_roots_and_a_context_only_on_a_changed_resume() {
+        let thread = Uuid::new_v4();
+        for (resume, changed, context) in [
+            (None, false, false),
+            (None, true, false),
+            (Some(thread), false, false),
+            (Some(thread), true, true),
+        ] {
+            let at = format!("resume={} changed={changed}", resume.is_some());
+            let plan = open_plan(resume, &real_json_artifacts(Some(MERGED), changed));
+            assert_eq!(
+                matches!(plan.thread, ThreadOpen::Resume(_)),
+                resume.is_some(),
+                "{at}"
+            );
+            assert_eq!(
+                developer_instructions_of(&plan).as_deref(),
+                Some(MERGED),
+                "{at}"
+            );
+            assert_eq!(
+                plan.extra_roots,
+                ["C:/vol/engram/skills", "C:/rules/.agents/skills"],
+                "{at}"
+            );
+            let expected = context.then(|| format!("{INSTRUCTIONS_CHANGED_PREFACE}\n\n{MERGED}"));
+            assert_eq!(plan.first_turn_context, expected, "{at}");
+        }
+        assert_eq!(
+            INSTRUCTIONS_CHANGED_PREFACE,
+            "The instructions for this agent changed since its last launch. The current instructions follow \
+             and take precedence over earlier instructions in this conversation."
+        );
+    }
+
+    /// A real kit with no instructions text sends no instructions field and no context; with no skill roots it sends no
+    /// roots.
+    #[test]
+    fn a_real_open_plan_without_instructions_carries_no_instructions_field() {
+        for resume in [None, Some(Uuid::new_v4())] {
+            let mut artifacts = real_json_artifacts(None, false);
+            artifacts.skill_roots.clear();
+            let plan = open_plan(resume, &artifacts);
+            assert_eq!(
+                developer_instructions_of(&plan),
+                None,
+                "resume={}",
+                resume.is_some()
+            );
+            assert!(plan.extra_roots.is_empty());
+            assert!(plan.first_turn_context.is_none());
+        }
+    }
+
+    fn hook_trust(key: &str, from: &str) -> crate::launch::HookTrust {
+        crate::launch::HookTrust {
+            key: key.to_string(),
+            hash: format!("sha256:{key}"),
+            from: from.to_string(),
+        }
+    }
+
+    fn params_value(plan: &AppServerOpen) -> serde_json::Value {
+        match &plan.thread {
+            ThreadOpen::Start(p) => serde_json::to_value(p),
+            ThreadOpen::Resume(p) => serde_json::to_value(p),
+        }
+        .expect("serialize")
+    }
+
+    /// ★The thread config rides start and resume alike★ — `config: {"hooks": …}` exactly as the assembly wrote it, and
+    /// the expected trust entries for the post-open check; with no hook output there is no `config` field at all and no
+    /// check (a Noop kit neither).
+    // ADR-0420
+    #[test]
+    fn the_open_plan_carries_the_hook_config_on_start_and_resume_and_expects_its_trust_entries() {
+        let hooks = serde_json::json!({
+            "Stop": [{"hooks": [{"command": "node s.js", "type": "command"}]}],
+            "state": {"k0": {"enabled": true, "trusted_hash": "sha256:k0"}},
+        });
+        for resume in [None, Some(Uuid::new_v4())] {
+            let at = format!("resume={}", resume.is_some());
+            let mut artifacts = real_json_artifacts(Some(MERGED), false);
+            artifacts.hook_config = Some(hooks.clone());
+            artifacts.hook_trust = vec![hook_trust("k0", "team/hooks/a")];
+            let plan = open_plan(resume, &artifacts);
+            assert_eq!(
+                params_value(&plan)["config"],
+                serde_json::json!({ "hooks": hooks }),
+                "{at}"
+            );
+            assert_eq!(
+                plan.expected_hooks,
+                Some(artifacts.hook_trust.clone()),
+                "{at}"
+            );
+
+            let plain = real_json_artifacts(Some(MERGED), false);
+            let plan = open_plan(resume, &plain);
+            assert!(params_value(&plan).get("config").is_none(), "{at}");
+            assert_eq!(plan.expected_hooks, None, "{at}");
+
+            let noop = LaunchArtifacts {
+                real: false,
+                ..artifacts
+            };
+            let plan = open_plan(resume, &noop);
+            assert!(params_value(&plan).get("config").is_none(), "{at}");
+            assert_eq!(plan.expected_hooks, None, "{at}");
+        }
+    }
+
+    /// The check follows the thread config: one with no trust entry (only carried other-source state) still runs it
+    /// (it watches for a foreign trusted session-flags hook); trust entries without a thread config (terminal mode's
+    /// record) do not.
+    // ADR-0420
+    #[test]
+    fn the_check_runs_exactly_when_a_thread_config_is_sent() {
+        let mut carried_only = real_json_artifacts(None, false);
+        carried_only.hook_config = Some(serde_json::json!({"state": {"u": {"enabled": true}}}));
+        assert_eq!(
+            open_plan(None, &carried_only).expected_hooks,
+            Some(Vec::new())
+        );
+
+        let mut entries_only = real_json_artifacts(None, false);
+        entries_only.hook_trust = vec![hook_trust("k0", "team/hooks/a")];
+        let plan = open_plan(None, &entries_only);
+        assert!(params_value(&plan).get("config").is_none());
+        assert_eq!(plan.expected_hooks, None);
+    }
+
+    /// What one run against the fake app-server saw.
+    #[cfg(windows)]
+    struct FakeRun {
+        methods: Vec<String>,
+        received: Vec<serde_json::Value>,
+        link: Vec<crate::transport::LinkResolution>,
+        /// The first-turn reports (`FirstTurnSink` arguments), in order.
+        reports: Vec<bool>,
+        /// From the transport's start to the link resolution's delivery.
+        resolved_after: std::time::Duration,
+    }
+
+    /// Opens a transport on `fake` with `plan`, waits for the link, sends one turn when the link is `Ready` and
+    /// `send_turn` is set (and waits for the first-turn report), shuts it down and removes the fake.
+    #[cfg(windows)]
+    fn run_on_fake(fake: FakeAppServer, plan: AppServerOpen, send_turn: bool) -> FakeRun {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, InputOrigin, StatusSink, TurnInput};
+        use std::sync::Mutex;
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let first_turn: FirstTurnSink = {
+            let reports = reports.clone();
+            Arc::new(move |delivered: bool| reports.lock().unwrap().push(delivered))
+        };
+        let (link_sink, delivered) = link_recorder();
+        let (t, _pid) =
+            CodexAppServerTransport::open(&fake.spec, true, None, plan, None, Some(link_sink))
+                .expect("open");
+        let t = t.with_first_turn(Some(first_turn));
+        wait_for_the_fake_to_listen(&fake);
+        let started = std::time::Instant::now();
+        t.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+        wait_until(
+            || !delivered.lock().unwrap().is_empty(),
+            "the link resolution is delivered",
+        );
+        let resolved_after = started.elapsed();
+        let ready = matches!(
+            delivered.lock().unwrap().first(),
+            Some(crate::transport::LinkResolution::Ready { .. })
+        );
+        if ready && send_turn {
+            t.send_turn(TurnInput {
+                id: "u-1".into(),
+                body: b"hi".to_vec(),
+                origin: InputOrigin::User,
+            })
+            .expect("accepted");
+            wait_until(
+                || !reports.lock().unwrap().is_empty(),
+                "the fake's echo calls the first-turn port",
             );
         }
-        assert_argv_matches_a_spawn_without_priming(&codex_argv(&spec_with_control(
-            &codex(vec![]),
-            Some(ep),
+        t.shutdown();
+        let run = FakeRun {
+            methods: fake.methods(),
+            received: fake.received(),
+            link: delivered.lock().unwrap().clone(),
+            reports: reports.lock().unwrap().clone(),
+            resolved_after,
+        };
+        let leftover = fake.remove();
+        assert!(
+            leftover.is_empty(),
+            "could not remove the fake app-server files: {leftover:?}"
+        );
+        run
+    }
+
+    /// ★The post-open check★ — with expected hooks, `hooks/list {threadId}` goes out right after the thread opens (start
+    /// and resume, with the id the peer answered), before the link is `Ready`, and the verdicts ride `Ready`: a key
+    /// listed untrusted is named; a trusted, enabled one is not. The thread request carries the config.
+    // ADR-0420
+    #[cfg(windows)]
+    #[test]
+    fn the_post_open_check_asks_hooks_list_after_the_thread_opens_and_its_verdicts_ride_ready() {
+        const LISTED: &str = r#"{"data":[{"cwd":"C:/workspace","hooks":[{"key":"k0","source":"sessionFlags","enabled":true,"trustStatus":"trusted","currentHash":"sha256:k0"},{"key":"k1","source":"sessionFlags","enabled":true,"trustStatus":"modified","currentHash":"sha256:other"}],"warnings":[],"errors":[]}]}"#;
+        let hooks = serde_json::json!({"Stop": [{"hooks": [{"command": "a", "type": "command"}, {"command": "b", "type": "command"}]}]});
+        for resume in [false, true] {
+            let at = format!("resume={resume}");
+            let fake = bake_fake_app_server_with(
+                "T-start",
+                FakeResume::EchoesTheThreadId,
+                FakeOptions {
+                    hooks_list: FakeHooksList::Answers(LISTED),
+                    ..FakeOptions::default()
+                },
+            );
+            let s = spec(&codex_app_server(vec![]), "C:/workspace");
+            let sent = Uuid::new_v4();
+            let plan = AppServerOpen {
+                thread: thread_open(
+                    &s,
+                    resume.then_some(sent),
+                    None,
+                    Some(serde_json::json!({ "hooks": hooks })),
+                ),
+                extra_roots: Vec::new(),
+                first_turn_context: None,
+                expected_hooks: Some(vec![
+                    hook_trust("k0", "team/hooks/a"),
+                    hook_trust("k1", "team/hooks/b"),
+                ]),
+            };
+            let run = run_on_fake(fake, plan, false);
+            let opened = if resume {
+                method::THREAD_RESUME
+            } else {
+                method::THREAD_START
+            };
+            assert_eq!(
+                run.methods,
+                ["initialize", "initialized", opened, method::HOOKS_LIST],
+                "{at}"
+            );
+            assert_eq!(
+                params_of(&run, opened)["config"],
+                serde_json::json!({ "hooks": hooks }),
+                "{at}"
+            );
+            let thread_id = if resume {
+                format!("resumed-{sent}")
+            } else {
+                "T-start".to_string()
+            };
+            assert_eq!(
+                params_of(&run, method::HOOKS_LIST),
+                serde_json::json!({ "threadId": thread_id }),
+                "{at}"
+            );
+            assert_eq!(
+                run.link,
+                [crate::transport::LinkResolution::Ready {
+                    notices: vec![crate::launch::Reason {
+                        code: crate::launch::CODEX_HOOKS_UNTRUSTED.to_string(),
+                        args: serde_json::json!({ "why": "untrusted", "hooks": ["team/hooks/b"] }),
+                        line: None,
+                    }],
+                }],
+                "{at}"
+            );
+        }
+    }
+
+    /// ★A failed `hooks/list` keeps `Ready`★ — an older codex without the method answers `-32601`; the link still
+    /// stands, with the `unchecked` run notice naming the hooks.
+    // ADR-0420
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_hooks_list_keeps_ready_with_an_unchecked_notice() {
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions::default(),
+        );
+        let s = spec(&codex_app_server(vec![]), "C:/workspace");
+        let plan = AppServerOpen {
+            thread: thread_open(&s, None, None, Some(serde_json::json!({"hooks": {}}))),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+            expected_hooks: Some(vec![hook_trust("k0", "team/hooks/a")]),
+        };
+        let run = run_on_fake(fake, plan, false);
+        let [crate::transport::LinkResolution::Ready { notices }] = run.link.as_slice() else {
+            panic!("the link did not stand: {:?}", run.link);
+        };
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].code, crate::launch::CODEX_HOOKS_UNTRUSTED);
+        assert_eq!(notices[0].args["why"], "unchecked");
+        assert_eq!(
+            notices[0].args["hooks"],
+            serde_json::json!(["team/hooks/a"])
+        );
+        assert!(
+            notices[0].args["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("hooks/list")),
+            "{notices:?}"
+        );
+    }
+
+    /// ★A silent `hooks/list` cannot eat the handshake budget★ — a codex that accepts the request and never answers
+    /// holds the link for at most [`transport::HOOKS_LIST_CAP`] (plus one 500 ms sweep), not the rest of the 10 s
+    /// handshake budget a resumed agent's history paging shares; `Ready` still comes, with the `unchecked` notice whose
+    /// error states the wait in milliseconds.
+    // ADR-0420
+    #[cfg(windows)]
+    #[test]
+    fn a_silent_hooks_list_keeps_ready_within_its_cap() {
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions {
+                hooks_list: FakeHooksList::Silent,
+                ..FakeOptions::default()
+            },
+        );
+        let s = spec(&codex_app_server(vec![]), "C:/workspace");
+        let plan = AppServerOpen {
+            thread: thread_open(&s, None, None, Some(serde_json::json!({"hooks": {}}))),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+            expected_hooks: Some(vec![hook_trust("k0", "team/hooks/a")]),
+        };
+        let run = run_on_fake(fake, plan, false);
+        let [crate::transport::LinkResolution::Ready { notices }] = run.link.as_slice() else {
+            panic!("the link did not stand: {:?}", run.link);
+        };
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].args["why"], "unchecked", "{notices:?}");
+        let error = notices[0].args["error"].as_str().unwrap_or_default();
+        let waited: u128 = error
+            .strip_prefix("hooks/list: no answer within ")
+            .and_then(|rest| rest.strip_suffix(" ms"))
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or_else(|| panic!("the error does not state the wait in ms: {error}"));
+        assert!(
+            waited > 0 && waited <= transport::HOOKS_LIST_CAP.as_millis(),
+            "{error}"
+        );
+        // Without the cap the wait is the rest of the 10 s budget; with it, the cap plus one sweep and the round trips.
+        assert!(
+            run.resolved_after < transport::HOOKS_LIST_CAP + std::time::Duration::from_secs(3),
+            "Ready came after {:?}",
+            run.resolved_after
+        );
+    }
+
+    #[cfg(windows)]
+    fn params_of(run: &FakeRun, method_name: &str) -> serde_json::Value {
+        run.received
+            .iter()
+            .find(|v| v["method"] == method_name)
+            .map(|v| v["params"].clone())
+            .unwrap_or_else(|| panic!("{method_name} was not sent: {:?}", run.methods))
+    }
+
+    #[cfg(windows)]
+    const FAKE_CODEX_0_163: &str =
+        "codex_cli_rs/0.163.0 (Windows 10.0.26200; x86_64) unknown (engram-dashboard; 0.1.0)";
+
+    /// The received order per start · resume × roots · no roots × context · no context: `initialize` (with
+    /// `experimentalApi` exactly when there is a context) → `initialized` → [`skills/extraRoots/set` with the roots —
+    /// on a resume too] → `thread/start` | `thread/resume`; with a context the first `turn/start` carries it and the
+    /// echo reports the instructions delivered.
+    #[cfg(windows)]
+    #[test]
+    fn the_handshake_sends_the_open_plan_in_order() {
+        for resume in [false, true] {
+            for roots in [false, true] {
+                for context in [false, true] {
+                    let at = format!("resume={resume} roots={roots} context={context}");
+                    let fake = bake_fake_app_server_with(
+                        "T-start",
+                        FakeResume::EchoesTheThreadId,
+                        FakeOptions {
+                            user_agent: FAKE_CODEX_0_163,
+                            ..FakeOptions::default()
+                        },
+                    );
+                    let s = spec(&codex_app_server(vec![]), "C:/workspace");
+                    let extra_roots: Vec<String> = if roots {
+                        vec![
+                            "C:/vol/engram/skills".into(),
+                            "C:/rules/.agents/skills".into(),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    let plan = AppServerOpen {
+                        thread: thread_open(
+                            &s,
+                            resume.then(Uuid::new_v4),
+                            Some("dev text".to_string()),
+                            None,
+                        ),
+                        extra_roots: extra_roots.clone(),
+                        first_turn_context: context.then(|| "ctx text".to_string()),
+                        expected_hooks: None,
+                    };
+                    let run = run_on_fake(fake, plan, context);
+                    assert!(
+                        matches!(
+                            run.link.first(),
+                            Some(crate::transport::LinkResolution::Ready { .. })
+                        ),
+                        "{at}: {:?}",
+                        run.link
+                    );
+
+                    let mut expected = vec!["initialize", "initialized"];
+                    if roots {
+                        expected.push(method::SKILLS_EXTRA_ROOTS_SET);
+                    }
+                    expected.push(if resume {
+                        method::THREAD_RESUME
+                    } else {
+                        method::THREAD_START
+                    });
+                    if context {
+                        expected.push(method::TURN_START);
+                    }
+                    assert_eq!(run.methods, expected, "{at}");
+
+                    let init = params_of(&run, method::INITIALIZE);
+                    if context {
+                        assert_eq!(
+                            init["capabilities"],
+                            serde_json::json!({"experimentalApi": true}),
+                            "{at}"
+                        );
+                    } else {
+                        assert!(init.get("capabilities").is_none(), "{at}: {init}");
+                    }
+                    if roots {
+                        assert_eq!(
+                            params_of(&run, method::SKILLS_EXTRA_ROOTS_SET),
+                            serde_json::json!({ "extraRoots": extra_roots }),
+                            "{at}"
+                        );
+                    }
+                    let opened = params_of(
+                        &run,
+                        if resume {
+                            method::THREAD_RESUME
+                        } else {
+                            method::THREAD_START
+                        },
+                    );
+                    assert_eq!(opened["developerInstructions"], "dev text", "{at}");
+                    if context {
+                        assert_eq!(
+                            params_of(&run, method::TURN_START)["additionalContext"],
+                            serde_json::json!({"engram-instructions": {"kind": "application", "value": "ctx text"}}),
+                            "{at}"
+                        );
+                        assert_eq!(run.reports, [true], "{at}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// M8 + the version gate (lead NS1): the resume carries `developerInstructions` for a codex at 0.155.0 or later read
+    /// from the `userAgent`; below it, or with a `userAgent` whose version cannot be read, the field is left out.
+    #[cfg(windows)]
+    #[test]
+    fn the_resume_carries_the_instructions_only_from_codex_0_155_0() {
+        for (user_agent, carried) in [
+            (FAKE_CODEX_0_163, true),
+            ("codex_cli_rs/0.154.0 (Windows 10.0.26200; x86_64)", false),
+            ("engram-fake/0", false),
+        ] {
+            let fake = bake_fake_app_server_with(
+                "T-start",
+                FakeResume::EchoesTheThreadId,
+                FakeOptions {
+                    user_agent,
+                    ..FakeOptions::default()
+                },
+            );
+            let s = spec(&codex_app_server(vec![]), "C:/workspace");
+            let plan = AppServerOpen {
+                thread: thread_open(&s, Some(Uuid::new_v4()), Some("dev text".to_string()), None),
+                extra_roots: Vec::new(),
+                first_turn_context: None,
+                expected_hooks: None,
+            };
+            let run = run_on_fake(fake, plan, false);
+            let resumed = params_of(&run, method::THREAD_RESUME);
+            assert_eq!(
+                resumed.get("developerInstructions").is_some(),
+                carried,
+                "{user_agent}: {resumed}"
+            );
+            assert_eq!(resumed["excludeTurns"], true, "{user_agent}");
+        }
+    }
+
+    /// An error answer to `skills/extraRoots/set` fails the link (fail closed — R16), and no thread is opened.
+    #[cfg(windows)]
+    #[test]
+    fn an_error_answer_to_the_extra_roots_fails_the_link() {
+        for resume in [false, true] {
+            let fake = bake_fake_app_server_with(
+                "T-start",
+                FakeResume::EchoesTheThreadId,
+                FakeOptions {
+                    user_agent: FAKE_CODEX_0_163,
+                    extra_roots: FakeExtraRoots::Rejects,
+                    ..FakeOptions::default()
+                },
+            );
+            let s = spec(&codex_app_server(vec![]), "C:/workspace");
+            let plan = AppServerOpen {
+                thread: thread_open(&s, resume.then(Uuid::new_v4), None, None),
+                extra_roots: vec!["C:/vol/engram/skills".into()],
+                first_turn_context: None,
+                expected_hooks: None,
+            };
+            let run = run_on_fake(fake, plan, false);
+            match run.link.first() {
+                Some(crate::transport::LinkResolution::Failed { reason }) => assert!(
+                    reason.contains(FAKE_EXTRA_ROOTS_REJECTION),
+                    "resume={resume}: {reason}"
+                ),
+                other => panic!("resume={resume}: the link did not fail: {other:?}"),
+            }
+            assert_eq!(
+                run.methods,
+                ["initialize", "initialized", method::SKILLS_EXTRA_ROOTS_SET],
+                "resume={resume}"
+            );
+        }
+    }
+
+    /// A real resume with changed instructions, through `open_spawn`: both channels carry the same text — the resume's
+    /// `developerInstructions` and the first turn's context (preface + text), with the opt-in on — plus the roots; the
+    /// echo of that turn reports the instructions delivered.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_changed_resume_through_open_spawn_sends_both_channels() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, InputOrigin, StatusSink, TurnInput};
+        use std::sync::Mutex;
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions {
+                user_agent: FAKE_CODEX_0_163,
+                ..FakeOptions::default()
+            },
+        );
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let first_turn: FirstTurnSink = {
+            let reports = reports.clone();
+            Arc::new(move |delivered: bool| reports.lock().unwrap().push(delivered))
+        };
+        let (link_sink, delivered) = link_recorder();
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &fake.spec,
+            80,
+            24,
+            None,
+            Some(first_turn),
+            Some(Uuid::new_v4()),
+            Some(link_sink),
+            None,
+            &real_json_artifacts(Some(MERGED), true),
+        )
+        .expect("open_spawn");
+        wait_for_the_fake_to_listen(&fake);
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
         )));
+        wait_until(
+            || !delivered.lock().unwrap().is_empty(),
+            "the link resolution is delivered",
+        );
+        parts
+            .transport
+            .send_turn(TurnInput {
+                id: "u-1".into(),
+                body: b"hi".to_vec(),
+                origin: InputOrigin::User,
+            })
+            .expect("accepted");
+        wait_until(
+            || !reports.lock().unwrap().is_empty(),
+            "the fake's echo calls the first-turn port",
+        );
+        parts.transport.shutdown();
+        let initialize = fake.params_of(method::INITIALIZE);
+        let roots = fake.params_of(method::SKILLS_EXTRA_ROOTS_SET);
+        let resumed = fake.params_of(method::THREAD_RESUME);
+        let turn = fake.params_of(method::TURN_START);
+        let leftover = fake.remove();
+
+        assert_eq!(
+            initialize.expect("initialize")["capabilities"],
+            serde_json::json!({"experimentalApi": true})
+        );
+        assert_eq!(
+            roots.expect("skills/extraRoots/set"),
+            serde_json::json!({"extraRoots": ["C:/vol/engram/skills", "C:/rules/.agents/skills"]})
+        );
+        assert_eq!(
+            resumed.expect("thread/resume")["developerInstructions"],
+            MERGED
+        );
+        assert_eq!(
+            turn.expect("turn/start")["additionalContext"]["engram-instructions"]["value"],
+            format!("{INSTRUCTIONS_CHANGED_PREFACE}\n\n{MERGED}")
+        );
+        assert_eq!(*reports.lock().unwrap(), [true]);
+        assert!(
+            leftover.is_empty(),
+            "could not remove the fake app-server files: {leftover:?}"
+        );
     }
 
-    /// An empty brief only spends command line and teaches nothing — there is no reason to carry it.
+    /// A Noop spawn puts no developer instructions on the command line in either mode, control channel or not
+    /// (ADR-0370). The app-server handshake side is pinned by
+    /// `the_app_server_handshake_is_pinned_for_a_spawn_without_launch_kit`.
+    // ADR-0370
     #[test]
-    fn an_empty_priming_file_is_not_injected() {
-        let (ep, path) = bake_priming("   \n\t\n");
-        assert!(
-            priming_text(Some(&ep)).is_none(),
-            "an empty file was carried"
-        );
-        std::fs::remove_file(&path).expect("remove the temp brief");
-    }
-
-    /// ★The path still does not reach argv★ — what is carried is **the content**. If the path leaked, codex would take an unknown
-    /// word as the first prompt (the `[PROMPT]` positional argument).
-    #[test]
-    fn the_priming_path_never_reaches_the_command_line() {
-        let (ep, path) = bake_priming("teach the reply contract");
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let needle = path.to_string_lossy().into_owned();
-        assert!(
-            !s.args.iter().any(|a| a.contains(&needle)),
-            "the brief path was carried in argv: {:?}",
-            s.args
-        );
-        std::fs::remove_file(&path).expect("remove the temp brief");
+    fn a_noop_spawn_has_no_developer_instructions_on_the_command_line() {
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            for control in [Some(endpoint()), None] {
+                let s = spec_with_control(&command, control);
+                assert!(
+                    developer_instructions_value(&codex_argv(&s)).is_none(),
+                    "{command:?}: {:?}",
+                    s.args
+                );
+            }
+        }
     }
 
     #[test]
@@ -3276,6 +4251,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             cwd.clone(),
             env.clone(),
             None,
+            &LaunchArtifacts::default(),
         );
         assert_eq!(s.cwd, cwd);
         assert_eq!(s.env, env);
@@ -3400,6 +4376,7 @@ mod terminal_capture_wiring {
                 None,
                 None,
                 None,
+                &LaunchArtifacts::default(),
             )
             .expect("start the terminal link");
 
@@ -3443,6 +4420,7 @@ mod terminal_capture_wiring {
             std::env::temp_dir(),
             vec![],
             None,
+            &LaunchArtifacts::default(),
         );
         let argv = codex_argv(&resumed);
         assert_eq!(
@@ -3492,6 +4470,7 @@ mod terminal_capture_wiring {
                 Some(thread_id),
                 None,
                 None,
+                &LaunchArtifacts::default(),
             )
             .expect("start the terminal link");
 

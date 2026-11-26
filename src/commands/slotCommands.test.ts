@@ -93,10 +93,6 @@ describe('core content (slotContentCommands) routing', () => {
     run('slot.fill.agentList', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
   })
-  it('slot.fill.presetPalette → setSlotContent(…,{type:preset_palette})', () => {
-    run('slot.fill.presetPalette', CTX)
-    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
-  })
   it('slot.fill.usage → setSlotContent(…,{type:usage, both vendors on})', () => {
     run('slot.fill.usage', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
@@ -139,7 +135,6 @@ describe('core content (slotContentCommands) routing', () => {
     // ADR-0067: "Create" is left out — spawning belongs to the tree.
     expect(items[1].children?.map(c => c.id)).toEqual([
       'slot.fill.agentList',
-      'slot.fill.presetPalette',
       'slot.fill.usage',
     ])
     expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
@@ -148,9 +143,9 @@ describe('core content (slotContentCommands) routing', () => {
 
   it('§5 unchanged: the folded slot.fill.* are still directly runnable through the registry', () => {
     run('slot.fill.agentList', CTX)
-    run('slot.fill.presetPalette', CTX)
+    run('slot.fill.usage', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
-    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
+    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
   })
   it('agent content menu = Monitor agent (order 5) → Kill (order 10), in that order (ADR-0067)', () => {
     const items = buildSlotMenu('agent')
@@ -182,7 +177,7 @@ describe('language switch — slot menu and list() titles', () => {
     expect(ids(after)).toEqual(ids(before))
     const container = after.find(i => i.id === 'container:slot.newContent')!
     expect(container.title).toBe('New content')
-    expect(container.children!.map(c => c.title)).toEqual(['Open agent tree', 'Open preset palette', 'Open usage limits'])
+    expect(container.children!.map(c => c.title)).toEqual(['Open agent tree', 'Open usage limits'])
     expect(after.find(i => i.id === 'slot.split.topBottom')!.title).toBe('Split horizontally')
     expect(before.find(i => i.id === 'container:slot.newContent')!.title).toBe('새 콘텐츠')
   })

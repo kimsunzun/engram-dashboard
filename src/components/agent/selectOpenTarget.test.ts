@@ -27,9 +27,12 @@ describe('selectOpenTarget (pure)', () => {
     expect(selectOpenTarget(layout, 'tree', [])).toBe('empty')
   })
 
-  it('focused slot content=preset_palette (control) + no empty slot → null (no clobbering)', () => {
-    const layout = split(slot('palette', { type: 'preset_palette' }), slot('busy', { type: 'agent', agent_id: 'y' }))
-    expect(selectOpenTarget(layout, 'palette', [])).toBeNull()
+  it('focused slot content=usage (control) + no empty slot → null (no clobbering)', () => {
+    const layout = split(
+      slot('usage', { type: 'usage', show_claude: true, show_codex: true }),
+      slot('busy', { type: 'agent', agent_id: 'y' }),
+    )
+    expect(selectOpenTarget(layout, 'usage', [])).toBeNull()
   })
 
   it('focus=null + an empty slot exists → the first empty slot (a→b order)', () => {

@@ -23,7 +23,7 @@ on:
     # ★It is an exclusion list (denylist)★ — the first line `'**'` puts everything in (the same as the default behavior with no path filter) and the `!` lines
     # take things out, so any unknown path falls to "runs". With an inclusion list, missing one item makes the gate on that path
     # **quietly disappear**; with an exclusion list, missing one only **runs it once more**. The paths that reach CI are scattered and cannot be
-    # seen from their names alone (things like `prompts/` · `rust-toolchain.toml` · `vitest.config.ts`).
+    # seen from their names alone (things like `prompts/` · `builtin/` · `rust-toolchain.toml` · `vitest.config.ts`).
     # It is `paths` rather than `paths-ignore` because of the reviving line — the docs recommend `paths-ignore` when only excluding, and `paths` with `!` when mixing
     # inclusion and exclusion, and the two cannot sit together on one event (GitHub docs "Workflow
     # syntax" — the `paths`/`paths-ignore` section).
@@ -31,9 +31,11 @@ on:
     # a `!` line after it takes it back out.
     # ★Before adding an exclusion, first check whether CI · build scripts · code · tests read anything under that path — if a file is read,
     # revive that file at the end★. A push that changes only excluded paths is seen by no gate.
-    # ★Do not widen this to `**/*.md`★ — `prompts/engram-help.md` is read by the daemon at run time and served as the help screen,
-    # and daemon tests read that file (`crates/engram-dashboard-daemon/src/control/help.rs`); the two files in `prompts/`
-    # ship in the release (`scripts/build-release.ps1:50` manifest). Neither can be told apart from docs by extension.
+    # ★Do not widen this to `**/*.md`★ — the daemon reads `prompts/engram-help.md` at run time as the help screen and
+    # a daemon test reads it (`crates/engram-dashboard-daemon/src/control/help.rs`); tests read the priming
+    # `builtin/instructions/priming.md` (daemon `control/priming.rs` · asset-library `builtin.rs`); and both ship in the
+    # release (`scripts/build-release.ps1` manifest — `$ExpectedPrompts` · `$ExpectedBuiltins`). Neither is told apart
+    # from a doc by its extension.
     # Path filters are not evaluated on tag pushes (same section) — the `v*` release trigger above runs regardless of this list.
     # `workflow_dispatch` has no path filter.
     # Accepted exception (same section): if the diff exceeds 3,000 files and no file matching the filter is among the first 3,000, it does not run.
@@ -300,6 +302,14 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-agent
 
+      # ADR-0311 decision 6 (gate 1 of 4): the asset-library crate stands up on its own — its dependency rule (exactly agent ·
+      #   platform · command · base, no test feature) is its reason to be a separate crate. Invariants and gates = that
+      #   crate's lib.rs header.
+      # No `-- --test-threads=4` — no test of this crate spawns a child process (TRD S25 step-7 §8-2).
+      - name: 'asset-library gate 1: cargo test -p engram-dashboard-asset-library'
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-asset-library
+
       # The control-plane CLI (`engram-dashboard-cli` — a bin-only package that produces engram.exe). This step guards two things:
       #   ① does it stand when built separately with `-p`, with no feature union with the daemon — it is a separate package so it does not drag in the daemon graph (ADR-0273).
       #   ② if the `engram_cli` target holding the shipped file name guard (`the_built_binary_file_name_matches_the_shared_constant` · ADR-0094)
@@ -554,16 +564,36 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
+      # ADR-0311 decision 6 (gate 4 of 4) · ADR-0003: what this step checks is exactly — no line under
+      #   `crates/engram-dashboard-asset-library/src/` that starts (after spaces) with `use tauri`. It does not see a fully
+      #   qualified `tauri::…` path, a `use` group or a `tauri` dependency; a direct `tauri*` dependency is caught by gate 2
+      #   (dependency cap). The directory is checked first: a missing path also gives rg 0 matches, which would read as PASS.
+      - name: 'asset-library gate 4: no `use tauri` line in the asset-library crate src'
+        shell: bash
+        run: |
+          set +e
+          d=crates/engram-dashboard-asset-library/src
+          if [ ! -d "$d" ]; then echo "FAIL — gate target directory is missing: $d (renamed or moved?)"; exit 1; fi
+          hits=$(rg "^\s*use tauri" "$d/")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
       # ADR-0134: if a new crate name (`command`) is not in the alternation, messaging using the tool crate goes uncaught.
       #   ADR-0175's `base` · ADR-0266's `platform` · ADR-0177's `transport` are put in the alternation for the same reason.
       #   ★Every time a new workspace crate appears, add its name here, and remove deleted crates★ (the hand-written
       #   alternation is this regex's biggest hole, and the ceiling gate below covers that hole).
+      #   `asset_library` = ADR-0311 decision 6 (asset-library gate 3 of 4).
       #   But a bin-only member with no lib target (`engram-dashboard-cli`) is not added — it is not a crate that can be called (ADR-0285). The day such a member gets a lib, add its name here.
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|transport)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|asset_library|base|daemon|protocol|command|platform|transport)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -1238,6 +1268,53 @@ jobs:
           fi
           echo "PASS"
 
+      # ADR-0311 decision 6 (gate 2 of 4): the asset-library package's direct workspace dependencies are exactly agent ·
+      #   asset-library (itself) · base · command · platform, and the same tree holds no direct `tauri*` package (ADR-0003 —
+      #   the headless daemon links this crate). Same shape and flags as `cli gate 1` (reducing the flags lets a rename · an
+      #   inactive target · an optional dependency slip through).
+      # ★Do not turn the verdict into a line count — it is a name-set match★: a daemon edge in place of command would still
+      #   count five. The first column (package name) is sorted and compared with the heredoc below.
+      # The hole of identifying members by the `engram-dashboard` name prefix is the same as in the other ceiling gates.
+      - name: 'asset-library gate 2: direct workspace deps — exactly agent · asset-library · base · command · platform, no tauri'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-asset-library --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          lines=$(printf '%s\n' "$tree" | rg "^engram-dashboard")
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          got=$(printf '%s\n' "$lines" | awk 'NF { print $1 }' | sort -u)
+          want=$(sort -u <<'ASSET_LIBRARY_DEPS'
+          engram-dashboard-agent
+          engram-dashboard-asset-library
+          engram-dashboard-base
+          engram-dashboard-command
+          engram-dashboard-platform
+          ASSET_LIBRARY_DEPS
+          )
+          echo "found direct workspace dep(s):"
+          printf '%s\n' "$got"
+          if [ "$got" != "$want" ]; then
+            echo "FAIL — expected exactly these names(first column):"
+            printf '%s\n' "$want"
+            exit 1
+          fi
+          set +e
+          tauri=$(printf '%s\n' "$tree" | rg "^tauri")
+          trc=$?
+          set -e
+          case "$trc" in
+            1) echo "no direct tauri package" ;;
+            0) echo "FAIL — expected no direct tauri package, found:"; printf '%s\n' "$tauri"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $trc)"; exit 1 ;;
+          esac
+          echo "PASS"
+
       # ADR-0266 invariant 「production OS branching only inside the platform crate」 — PASS only if the list of `.rs` files outside platform that use OS cfg predicates
       #   is exactly the list below (pair: the same matcher hits 1 or more files inside platform). ★The list (heredoc) · the regex
       #   (`os_cfg_re`) · the file finder function (`os_cfg_files`) live only here★ — the local substitute (`.claude/skill-bindings/qa-verify.md` 「gates 잡」) runs this step as is. # hangul-ok
@@ -1266,7 +1343,10 @@ jobs:
           crates/engram-dashboard-agent/src/backend/claude/leftover.rs
           crates/engram-dashboard-agent/src/backend/claude/mod.rs
           crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
+          crates/engram-dashboard-agent/src/backend/codex/cmdline.rs
+          crates/engram-dashboard-agent/src/backend/codex/launch.rs
           crates/engram-dashboard-agent/src/backend/codex/mod.rs
+          crates/engram-dashboard-agent/src/backend/codex/settings.rs
           crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs
           crates/engram-dashboard-agent/src/backend/codex/transport.rs
           crates/engram-dashboard-agent/src/backend/mod.rs
@@ -1287,11 +1367,13 @@ jobs:
           crates/engram-dashboard-agent/tests/activation.rs
           crates/engram-dashboard-agent/tests/backend_contract.rs
           crates/engram-dashboard-agent/tests/canonical_name_wiring.rs
+          crates/engram-dashboard-agent/tests/codex_launch_live.rs
           crates/engram-dashboard-agent/tests/pump_panic_cli_cleanup.rs
           crates/engram-dashboard-agent/tests/reaper.rs
           crates/engram-dashboard-agent/tests/stdio_physical_pipe.rs
           crates/engram-dashboard-agent/tests/stdio_smoke.rs
           crates/engram-dashboard-agent/tests/submit_delivery_boundary.rs
+          crates/engram-dashboard-daemon/tests/launch_kits_live.rs
           crates/engram-dashboard-daemon/tests/ws_e2e.rs
           src-tauri/tests/stop_smoke.rs
           # test harness bins · examples
@@ -1321,7 +1403,7 @@ jobs:
       - name: 'platform gate 5: OS crates as direct normal/build deps — platform only'
         shell: bash
         run: |
-          os_dep_re='^(windows|windows-sys|winapi|libc|nix|rustix|objc2.*|objc|cocoa|core-foundation|core-graphics|security-framework|mach2)$'
+          os_dep_re='^(windows|windows-sys|winapi|libc|nix|rustix|objc2.*|objc|cocoa|core-foundation|core-graphics|security-framework|mach2|junction)$'
           os_dep_gate() {
             local tree hits own bad
             tree=$(cargo tree --locked --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all --all-features) || { echo "FAIL — cargo tree errored"; return 1; }
@@ -1374,10 +1456,14 @@ jobs:
           list=$(cat <<'STD_OS_FILES'
           # test branches only (inside `#[cfg(test)]` modules)
           crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
+          crates/engram-dashboard-agent/src/backend/codex/launch.rs
+          crates/engram-dashboard-agent/src/backend/codex/settings.rs
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
           crates/engram-dashboard-daemon/src/instance.rs
+          # integration tests (`tests/`)
+          crates/engram-dashboard-agent/tests/codex_launch_live.rs
           # examples
           crates/engram-dashboard-agent/examples/spike_breakaway.rs
           STD_OS_FILES
@@ -1501,22 +1587,22 @@ jobs:
           esac
 
       # TRD S21 trd-3 §2-4 (edge vocabulary gate ①, daemon half — 3-3 U6 · ADR-0129 · ADR-0310): the daemon's network row
-      #   (`crates/engram-dashboard-daemon/src/link/`) names neither the agent crate nor the messaging kernel — it reaches the
-      #   upper layers only through the `conn_port` contract. It takes over the deleted net gates 1 (no daemon · messaging
-      #   names) and 2b (no agent runtime) for the code that moved out of net. PASS = 0 matches.
+      #   (`crates/engram-dashboard-daemon/src/link/`) names neither the agent crate, the asset library nor the messaging
+      #   kernel — it reaches the upper layers only through the `conn_port` contract. It takes over the deleted net gates 1
+      #   (no daemon · messaging names) and 2b (no agent runtime) for the code that moved out of net. PASS = 0 matches.
       # ★Comments are in scope (intended)★ — vocabulary leaks first through comments and test helpers. A comment that must
       #   name the wall writes the name with a parenthesized letter (`engram_dashboard_(a)gent`).
       # ★Do not drop the module-root check★ — a root at `link.rs` (instead of `link/mod.rs`) would sit outside the scanned
       #   directory. A missing directory fails the same check.
       # ★Known limit★ — the wall is on crate names: a path through another daemon module (`crate::agent_conn::…`) is not
       #   caught, as in the shell half (`shell gate 4`).
-      - name: 'daemon gate 1: link vocabulary — no agent or messaging crate names in daemon link'
+      - name: 'daemon gate 1: link vocabulary — no agent, asset-library or messaging crate names in daemon link'
         shell: bash
         run: |
           set +e
           d=crates/engram-dashboard-daemon/src/link
           if [ ! -f "$d/mod.rs" ]; then echo "FAIL — module root is not $d/mod.rs (moved or renamed? a root outside the directory escapes the scan)"; exit 1; fi
-          hits=$(rg -n "engram_dashboard_(agent|messaging)" "$d/")
+          hits=$(rg -n "engram_dashboard_(agent|asset_library|messaging)" "$d/")
           rc=$?
           set -e
           case "$rc" in
@@ -1723,7 +1809,7 @@ jobs:
             *..*) echo "FAIL — the tag has '..' (moves up the path)"; exit 1 ;;
             *.)   echo "FAIL — the tag ends with '.' (Windows trims a trailing dot from file names)"; exit 1 ;;
           esac
-          # Headroom for the path length limit. It is a safety limit so that RUNNER_TEMP + the staging folder + prompts/agent-priming.md do not exceed
+          # Headroom for the path length limit. It is a safety limit so that RUNNER_TEMP + the staging folder + builtin/instructions/priming.md do not exceed
           # MAX_PATH, not a version format rule.
           if [ "${#TAG}" -gt 64 ]; then echo "FAIL — the tag is longer than 64 characters (${#TAG})"; exit 1; fi
           echo "PASS — tag name is usable as a path/file name"
@@ -1894,7 +1980,7 @@ jobs:
       # process exit code. $ErrorActionPreference does not catch native exit codes, so there is an explicit check too.
       #
       # Why -OutDir is given: the staging folder name becomes the zip's root folder name. Staging into a folder with the version in its name
-      # means that when users unzip it, the 3 exes + prompts/ land together in one folder
+      # means that when users unzip it, the 3 exes + prompts/ · builtin/ land together in one folder
       # (= ADR-0100 co-location does not break in the user's hands).
       - name: Package portable release (scripts/build-release.ps1)
         shell: pwsh

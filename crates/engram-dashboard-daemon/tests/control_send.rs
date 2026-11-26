@@ -11,8 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -113,8 +112,6 @@ async fn wire(
         url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: the relay tests need no CLI path (direct HTTP/MCP calls).
-        // ADR-0092: the existing relay tests are priming-independent — Noop is byte-identical to today's behavior.
-        Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
     ));
 
     let (flush_tx, flush_rx) =
@@ -130,9 +127,6 @@ async fn wire(
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-cli-prof-{tag}-{}", AgentId::new_v4())),
     ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-cli-preset-{tag}-{}", AgentId::new_v4())),
-    ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -141,7 +135,7 @@ async fn wire(
         Arc::new(|_, _| {}),
     ));
     let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
+        sink, profiles, tracker, control,
     ));
     slot.set(manager.clone());
     let idle_notifier = Arc::new(
@@ -198,9 +192,12 @@ async fn post_send(
     (status, text)
 }
 
-fn spawn_json_agent(
+/// Returns once the agent is listed **and its appearance flush has returned** — the first send after this does not
+///   race that appearance drain.
+async fn spawn_json_agent(
     manager: &Arc<AgentManager>,
     registry: &Arc<ControlRegistry>,
+    messaging: &Arc<MessagingService>,
     name: &str,
 ) -> Option<(AgentInfo, String)> {
     let mut profile = AgentProfile::new(
@@ -224,6 +221,18 @@ fn spawn_json_agent(
     }) {
         return None;
     }
+    // The spawn's appearance flush can take the first send's letter into its batch, and that send then answers `pending` (spec §6 ㉯).
+    // Async wait: on a current-thread runtime the flush lane is polled only while this test awaits.
+    let settled = tokio::time::timeout(Duration::from_secs(5), async {
+        while messaging.async_drains_done_for_test(info.id) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "[{name}] the appearance flush for the spawned agent did not return within 5s"
+    );
     // The registry has no API to look up an issued token, so the token provision issued for this (id, epoch) cannot be taken out — a sender token is issued separately and planted (relay is the same as long as the sender identity matches).
     let token = format!("sender-tok-{}", info.id);
     registry.issue(info.id, info.epoch, token.clone(), true);
@@ -424,9 +433,10 @@ async fn roster_excludes_a_terminal_session_still_in_the_map() {
 // ── relay happy path: sending to a json agent shows the wrapped line as a stdin input echo ────────────────
 #[tokio::test]
 async fn control_send_relays_wrapped_line_to_json_agent() {
-    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("relay").await;
+    let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("relay").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "bee") else {
+    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, &messaging, "bee").await
+    else {
         require_claude("control_send_relays_wrapped_line_to_json_agent");
     };
 
@@ -492,7 +502,9 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("revoked-delivers").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "target-b") else {
+    let Some((b_info, _b_tok)) =
+        spawn_json_agent(&manager, &registry, &messaging, "target-b").await
+    else {
         require_claude("control_send_revoked_sender_still_delivers_observation");
     };
 
@@ -1273,7 +1285,9 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("delivery-obs").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "obs-target") else {
+    let Some((b_info, _b_tok)) =
+        spawn_json_agent(&manager, &registry, &messaging, "obs-target").await
+    else {
         require_claude("control_send_delivery_observation_records_bytes_and_correlated_ids");
     };
 
@@ -1812,9 +1826,16 @@ async fn c1_park_then_spawn_auto_delivers() {
 
     // ── 1) launch a real agent first ────────────────────────────────────────────────────
     // Setup changed with ADR-0111 decision 1: absence became an entrance refusal (a failure row), so the old "send to an unlaunched name to park, spawn later" path is gone. This test guards the wiring "parked mail is delivered automatically at the flush trigger", so it uses the only remaining parking reason (busy = a turn in progress); the observed target (idle diff → flush worker → injection → observation) is unchanged.
-    // Uncovered axis (review C1): the roster appearance diff → flush wiring (MessagingFlushSink watching agent_list_updated and opening that name's queue) is covered by no integration-path test — only both ends are unit-covered (the daemon's `flush_sink_appears_*`, the kernel's `flush_on_appearance_*` call `flush_for` directly). A daemon-level test making the appearance diff by "parking to a live recipient → replacing that agent's epoch (reactivation)" is backlog.
+    // ★Uncovered axis, stated honestly (review C1)★: that switch left **delivery of parked mail on roster appearance**
+    //   uncovered on the integration path. The appearance wiring itself (`MessagingFlushSink` sees `agent_list_updated` →
+    //   Appear → flush lane → `flush_for(id)` returns) is exercised end to end by `spawn_json_agent`'s wait, but only on the
+    //   claude lane, which CI skips; with an empty queue that drain delivers nothing. The units cover the two ends (daemon
+    //   `flush_sink_appears_*` · kernel `flush_on_appearance_*` call `flush_for` directly). Getting it back needs a
+    //   daemon-level test that parks for a live recipient and then swaps its epoch (reactivation) to make an appearance
+    //   diff (backlog).
     let target_name = "late-recv";
-    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target_name) else {
+    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, &messaging, target_name).await
+    else {
         require_claude("c1_park_then_spawn_auto_delivers");
     };
 
@@ -2145,7 +2166,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     };
 
     let target = "c2-live-recv";
-    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target) else {
+    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, &messaging, target).await else {
         require_claude("c2_live_mid_turn_send_parks_and_delivers_after_turn_end");
     };
 
@@ -2714,9 +2735,10 @@ async fn mcp_send_message_tool_happy_and_error() {
     };
     use rmcp::ServiceExt;
 
-    let (manager, registry, _base, data_dir, handle, _messaging, _busy) = wire("mcp-tool").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("mcp-tool").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "recv") else {
+    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, &messaging, "recv").await
+    else {
         require_claude("mcp_send_message_tool_happy_and_error");
     };
 

@@ -20,8 +20,8 @@ pub mod window_ctl;
 
 pub use apply::{
     AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
-    MoveStep, NewWindow, SlotMove, SpareClaim, SubscriptionSync, WindowHost, WindowPlace,
-    WindowTabsPayload,
+    MoveStep, NewWindow, SlotMove, SpareClaim, SpawnRefusal, SpawnedAgent, SubscriptionSync,
+    WindowHost, WindowPlace, WindowTabsPayload,
 };
 pub use manager::{
     CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError, SplitRatioResult, ViewManager,

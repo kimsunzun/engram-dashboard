@@ -1,0 +1,8 @@
+kind: settings
+version: 1
+description: Turn off auto-update · allow the Engram message and control channel
+claude:
+  env:
+    DISABLE_AUTOUPDATER: "1"
+  allowedMcpServers:
+    - serverName: engram

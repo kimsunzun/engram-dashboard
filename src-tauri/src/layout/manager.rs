@@ -1119,7 +1119,7 @@ impl ViewManager {
         Ok(())
     }
 
-    // Replaces the content of slot slot_id in view with `content` (§5 path, ADR-0063 placement control surface). Like assign_agent but takes the whole union (Empty/Agent/AgentList/PresetPalette/Usage). ★Overwrite semantics★: an occupied slot is replaced unconditionally (a placement command intends an explicit replacement; no occupancy defense).
+    // Replaces the content of slot slot_id in view with `content` (§5 path, ADR-0063 placement control surface). Like assign_agent but takes the whole union (Empty/Agent/AgentList/Usage). ★Overwrite semantics★: an occupied slot is replaced unconditionally (a placement command intends an explicit replacement; no occupancy defense).
     pub fn set_slot_content(
         &mut self,
         view_id: Uuid,
@@ -2832,7 +2832,7 @@ mod tests {
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let ver = mgr.version;
         assert!(matches!(
-            mgr.set_slot_content(v, Uuid::new_v4(), SlotContent::PresetPalette)
+            mgr.set_slot_content(v, Uuid::new_v4(), SlotContent::AgentList)
                 .unwrap_err(),
             LayoutError::SlotNotFound(_)
         ));
@@ -3349,7 +3349,7 @@ mod tests {
     #[test]
     fn every_content_write_clears_the_unknown_entry() {
         type Write = fn(&mut ViewManager, ViewId, Uuid);
-        let writes: [(&str, Write); 6] = [
+        let writes: [(&str, Write); 5] = [
             ("assign_agent", |m, v, s| {
                 m.assign_agent(v, s, "a".into()).unwrap()
             }),
@@ -3368,10 +3368,6 @@ mod tests {
             }),
             ("set_slot_content(agent_list)", |m, v, s| {
                 m.set_slot_content(v, s, SlotContent::AgentList).unwrap()
-            }),
-            ("set_slot_content(preset_palette)", |m, v, s| {
-                m.set_slot_content(v, s, SlotContent::PresetPalette)
-                    .unwrap()
             }),
             ("set_slot_content(usage)", |m, v, s| {
                 m.set_slot_content(

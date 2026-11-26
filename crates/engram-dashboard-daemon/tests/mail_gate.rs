@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 
 use engram_dashboard_agent::backend::{accepts_mcp_config, uses_mail, writes_mcp_config_file};
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore, StoreError,
 };
@@ -18,13 +17,14 @@ use engram_dashboard_agent::types::{
     StatusSink,
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
-use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
+use engram_dashboard_daemon::control::commands::{
+    make_daemon_table, NoInputLeases, NoLibrary, NoUsageLimits,
+};
 use engram_dashboard_daemon::control::help::HelpSource;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_with_help, start_mcp_server_without_help, CommandTableSlot, ManagerSlot,
     McpServerHandle, MessagingSlot, RosterBroadcastSlot,
 };
-use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
@@ -51,16 +51,6 @@ impl ProfileStore for MemProfileStore {
     }
 }
 
-struct MemPresetStore;
-impl PresetStore for MemPresetStore {
-    fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-        Ok(())
-    }
-    fn load(&self) -> Vec<Preset> {
-        vec![]
-    }
-}
-
 struct Fixture {
     base: String,
     /// The credential an MCP-capable spawn receives (mail refused).
@@ -82,7 +72,7 @@ impl Drop for Fixture {
     }
 }
 
-/// The help body the fixture injects — all five sections, so the source accepts it (the header before the first section is discarded).
+/// The help body the fixture injects — all six sections, so the source accepts it (the header before the first section is discarded).
 ///
 /// ★The repository body file is not used★: expected values would change with every screen-text edit. With a known body, 「whichever credential, it gets this screen verbatim」 can be asserted directly.
 const KNOWN_HELP: &str = "# test header — discarded\n\
@@ -90,7 +80,8 @@ const KNOWN_HELP: &str = "# test header — discarded\n\
 ## mail\n{tool} mail screen\n\
 ## agent\n{tool} agent screen\n\
 ## window\n{tool} window screen\n\
-## settings\n{tool} settings screen\n";
+## settings\n{tool} settings screen\n\
+## library\n{tool} library screen\n";
 
 /// A folder with [`KNOWN_HELP`] in the release shape (`<folder>\prompts\engram-help.md`).
 fn known_help_dir(tag: &str) -> std::path::PathBuf {
@@ -157,6 +148,7 @@ impl Fixture {
                     name: name.to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("registration of the attached connection");
@@ -222,7 +214,6 @@ async fn fixture(tag: &str) -> Fixture {
     let manager = Arc::new(AgentManager::new_with_control(
         Arc::new(NoopSink),
         Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
-        Arc::new(PresetRegistry::new(Arc::new(MemPresetStore))),
         Arc::new(SessionTracker::new(
             TrackerConfig {
                 enabled: false,
@@ -239,6 +230,7 @@ async fn fixture(tag: &str) -> Fixture {
         broadcast_slot,
         Arc::new(NoInputLeases),
         Arc::new(NoUsageLimits),
+        Arc::new(NoLibrary),
     )));
 
     // ★The decision is planted by hand — this fixture alone is not enough★: if `provision` derived it wrongly, the planted value would stay the same and everything stay green. That axis is covered on the production path by `a_credential_minted_by_the_real_provision_path_is_refused_end_to_end`. Planting here isolates per-route gate behavior from the derivation.
@@ -510,7 +502,6 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
-        Arc::new(NoopPrimingProvider),
     );
 
     // Pass the claude backend's real capability as is — a literal here would make the decision a test copy again. Both axes are read from the backend dispatch (ADR-0133 — two inputs).
@@ -560,7 +551,9 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
 
 /// ★A backend outside the mail plane gets no mail authorization even if it receives the control channel★ — reverts the state where only sending had opened as a side effect of `supports_control_channel`.
 ///
-/// ★Measures two layers together★: ① the credential (does the HTTP mail route refuse it) ② what the endpoint carries (mail authorization · send grant · priming). One layer alone lets 「refuses but still teaches」 through — the shape of the send freeze ADR-0099 measured.
+/// ★Two layers are measured together★: ① the credential (do the HTTP mail routes refuse it) ② what the endpoint
+///   carries (the mail authorization and the send grants). Measuring one layer lets 「refuses, yet grants」 through —
+///   that mismatch is the shape of the send freeze ADR-0099 measured.
 #[tokio::test]
 async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
     let registry = Arc::new(ControlRegistry::new());
@@ -589,11 +582,11 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
-        Arc::new(NoopPrimingProvider),
     );
 
     // ★The axis is set up synthetically — today no backend declares `uses_mail=false`★ (codex was the last; ADR-0209's MCP wiring made it true). Reading a real backend would measure a spawn inside the mail plane while only its name says outside.
-    //   ★Do not delete this axis★: derivation · gate · priming show up together only in this combination, and the regression net must stand before the next backend comes in with it.
+    //   ★Do not delete this axis anyway★: the daemon's derivation and gate show together only in this combination, and
+    //   the net must already stand when the next backend arrives with it.
     // ADR-0209
     let needs = ControlChannelNeeds {
         accepts_mcp_config: false,
@@ -624,7 +617,7 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         );
     }
 
-    // ② endpoint — mail disallowed · 0 send grants · no priming (「if no authorization is given, the record says so too」).
+    // ② endpoint — no mail · zero send grants. 「No authorization, and the record says so」.
     assert!(
         !ep.mail_allowed,
         "no authorization was given but the record says allowed"
@@ -633,11 +626,6 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         ep.grants.is_empty(),
         "there is no send entrance but a grant was carried: {:?}",
         ep.grants
-    );
-    assert!(
-        ep.priming_file.is_none(),
-        "priming that teaches an unusable channel was carried: {:?}",
-        ep.priming_file
     );
     // ③ the control CLI entrance is received as is — this field closes mail only (ADR-0132 decision 5).
     assert!(ep.send_exe.is_some(), "the control CLI wiring must stay");
@@ -648,25 +636,24 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
 
 /// ★codex's mail goes out over MCP and the CLI mirror is closed★ — measures that ADR-0209's 「MCP is canonical, CLI is a mirror」 stands in the real declaration.
 ///
-/// ★Read the real backend declaration — a literal makes the decision a test copy★: the two fields touched (`accepts_mcp_config`·`uses_mail`) must move together for the three below to stand. Reverting one collapses one silently — `uses_mail` → 0 grants · no priming (tool held with nobody teaching it); `accepts_mcp_config` → the CLI mirror is authorized and opens.
-/// ★Priming is measured only up to the file choice★ — whether the file reaches the codex argv is out of scope (it does not; see the emission site in `backend/codex/`).
+/// ★Reading the real backend declaration is the point — a literal makes the decision a test copy★:
+///   the two fields this piece touched (`accepts_mcp_config` · `uses_mail`) must move **together** for both
+///   assertions below to stand. Revert one and one of them quietly falls — revert `uses_mail` and the grant is gone
+///   (the tool in hand with no grant); revert `accepts_mcp_config` and the CLI mirror is authorized open.
 // ADR-0209
 #[test]
 fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
     use engram_dashboard_agent::types::ToolGrant;
     use engram_dashboard_daemon::control::mcp_config::MCP_SERVER_NAME;
     use engram_dashboard_daemon::control::mcp_server::SEND_MESSAGE_TOOL;
-    use engram_dashboard_daemon::control::priming::FixedPrimingProvider;
 
     let data_dir =
         std::env::temp_dir().join(format!("engram-mail-gate-codex-{}", AgentId::new_v4()));
-    let priming = std::path::PathBuf::from("C:/engram/prompts/agent-priming.md");
     let channel = DaemonControlChannel::new(
         Arc::new(ControlRegistry::new()),
         "http://127.0.0.1:1/mcp".to_string(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
-        Arc::new(FixedPrimingProvider(priming.clone())),
     );
     let command = AgentCommand::Codex {
         extra_args: vec![],
@@ -700,15 +687,14 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
         }],
         "the send entrance grant must be only MCP send_message"
     );
-    assert_eq!(
-        ep.priming_file.as_deref(),
-        Some(priming.as_path()),
-        "inside the mail plane, a priming file must be chosen (proof that the `uses_mail` gate is alive)"
-    );
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
-/// ★Even without the `engram` executable, a spawn outside the mail plane is not cut off★ — the pair fail-closed guards (the daemon-given CLI mail authorization `mail_allowed` · [Cli] grant ↔ the executable to call) does not exist for it. ★One side of that pair is not priming★ — the CLI-version instructions were deleted and the non-MCP branch launches having learned nothing, yet the authorization still goes out, so the pair and the decision stay (ADR-0209 · `control/mod.rs`). Cutting this branch too would stop spawns of mail-unrelated backends entirely in that install.
+/// ★Even without the `engram` executable, a spawn outside the mail plane is not cut off★ — the pair fail-closed guards
+/// (the daemon-given CLI mail authorization `mail_allowed` · [Cli] grant ↔ the executable to call) does not exist for that spawn.
+/// ★Neither side of that pair is priming★ — a non-MCP spawn learns nothing yet still gets the
+/// authorization, so the pair and the verdict stand as they are (ADR-0209 · `control/mod.rs`). Cutting this branch too
+/// would abort, in that install, every spawn of a backend that has nothing to do with mail.
 #[test]
 fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
     let registry = Arc::new(ControlRegistry::new());
@@ -719,7 +705,6 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
         "http://127.0.0.1:1/mcp".to_string(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // ← a daemon that could not find the CLI executable
-        Arc::new(NoopPrimingProvider),
     );
 
     let no_mail = ControlChannelNeeds {

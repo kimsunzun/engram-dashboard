@@ -1,7 +1,8 @@
 # Cargo workspace root (S12 phase 1). Static linking.
-# 10 members: protocol (boundary contract) · base (bottom foundation layer — logging and general helpers, leaf crate, ADR-0175 · ADR-0269) ·
+# 11 members: protocol (boundary contract) · base (bottom foundation layer — logging and general helpers, leaf crate, ADR-0175 · ADR-0269) ·
 #   platform (OS layer — operational code that varies by OS, 0 workspace crate dependencies, ADR-0266 · ADR-0275) ·
-#   agent (agent core, 0 Tauri imports — the old core, ADR-0175) · command (command-bus tooling — 0 workspace
+#   agent (agent core, 0 Tauri imports — the old core, ADR-0175) · asset-library (the preset library — workspace
+#   dependencies exactly agent · platform · command · base, ADR-0311) · command (command-bus tooling — 0 workspace
 #   crate dependencies, 0 commands, ADR-0155) · messaging (messaging kernel — no workspace crate
 #   dependencies, ADR-0110) ·
 #   transport (reusable transport lib — 0 workspace crate dependencies, ADR-0177) ·
@@ -18,6 +19,9 @@ members = [
     #   depend on base either). The invariants and the isolation gate are defined in the header of that crate's lib.rs.
     "crates/engram-dashboard-platform",
     "crates/engram-dashboard-agent",
+    # ADR-0311: the preset library (thin crate — the daemon only wires it). Its invariants and gates are defined in the header
+    #   of that crate's lib.rs.
+    "crates/engram-dashboard-asset-library",
     # ADR-0155: command-bus tooling lib (envelope · errors · declaration macros · table · routing). Declarations live next to their producers and this crate
     #   holds only the tooling — if even one command appears here, the central catalog comes back in through another door.
     "crates/engram-dashboard-command",

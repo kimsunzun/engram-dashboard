@@ -1,0 +1,45 @@
+[package]
+name = "engram-dashboard-asset-library"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard asset library — the preset library (instructions · skills · settings · presets) under one virtual root of named mounts: reference paths, reading and checking assets, resolving what an agent loads, launch materials. The daemon only wires it. Invariants and gates = the lib.rs header (ADR-0311)."
+
+# ADR-0311 decision 2: among workspace crates exactly agent · platform · command · base. The CI dependency-cap gate compares
+#   that name set (`.github/workflows/ci.yml`), so add a later dependency here only with that decision changed.
+# ★No test feature★ (ADR-0311 decision 4) — fakes are `#[cfg(test)]` inside this crate.
+# ★No network client and no process runner★ — settings are not schema-checked, so nothing is fetched or probed (ADR-0359).
+[dependencies]
+# The backend settings-check port and its registry (`backends.rs` — `AgentBackends`).
+engram-dashboard-agent = { path = "../engram-dashboard-agent" }
+# Path keys and folder-path normalization (`path.rs`).
+engram-dashboard-platform = { path = "../engram-dashboard-platform" }
+# Used only by tests: the library commands answer agent's port types, and bus codes stay in agent (ADR-0386) — kept so the
+#   dependency-cap gate's name set holds (TRD S25 step-7 §3-1 · B1).
+engram-dashboard-command = { path = "../engram-dashboard-command" }
+# The store's atomic write and copy and the temp-name rule (`store.rs` — `write_atomic` · `copy_atomic` · `is_temp_name`).
+engram-dashboard-base = { path = "../engram-dashboard-base" }
+# The library scan (`store.rs`): `follow_root_links` / `follow_links` / `filter_entry` give the link policy directly, and
+#   it opens a folder inside the `next()` call that yields it, which the per-folder listing sequence relies on (TRD S25
+#   step-7 premise 47).
+walkdir = "2.5"
+# The instruction excerpt (`excerpt.rs`) — an event walk; HTML output is not used, so default features are off.
+pulldown-cmark = { version = "0.13.6", default-features = false }
+tracing = "0.1"
+# The library reference spelling `LibPath` wraps `RelativePathBuf` (ADR-0315).
+relative-path = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# YAML read and the whole-file preset writer (`format` — ADR-0336 · ADR-0358). Pinned until the P3 goldens have run on a
+#   newer 2.x (TRD S25 step-7 B10).
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize", "serialize"] }
+thiserror = "1.0"
+# The launch stamp and the instructions hash (`launch.rs`) — SHA-256 per ADR-0336 — and a preset's `rev` (`catalog.rs` —
+#   ADR-0378); already in the lock (0 new packages).
+sha2 = "0.10"
+# Folder canonicalize (`folder.rs`) — the agent manager's canonicalizer, so a launch check judges the same working
+#   folder the spawn gets (TRD S25 step-7 premise 10).
+dunce = "1.0"
+
+[dev-dependencies]
+# Real-folder store tests (`store.rs`).
+tempfile = "3"

@@ -1,7 +1,7 @@
 # ADR-0383: Internal text is English-only; screen text stays switchable
 
-- 상태: 확정 (2026-11-18, basis: user rule 2026-11-18 + S38 PRD/TRD review PASS)
-- 관련: ADR-0372 · ADR-0373 · ADR-0342 · `docs/process/S38-english-internal-text/trd.md`
+- 상태: 확정 (2026-11-18, basis: user rule 2026-11-18 + S38 PRD/TRD review PASS) · 부분 폐기 by ADR-0386 (the priming leaves the user-held list)
+- 관련: ADR-0372 · ADR-0373 · ADR-0342 · `docs/process/S38-english-internal-text/trd.md` · Amended by ADR-0386 (the priming leaves the user-held list)
 
 ## 맥락
 After S35 the app screen text is English-source with Korean selectable (ADR-0372, ADR-0373), but logs, panic/assert messages, internal errors, LLM-facing strings in code, test names and messages, and most crate comments were still Korean (S33 left string literals out by design and did not finish crate comments). The user set the rule 「내가 닿는거라면 모를까 닿지 않는건 영어」 (2026-11-18): what the user reads on the app screen stays switchable, everything else is English. Held by the user: `prompts/engram-help.md`, `prompts/agent-priming.md`, `CLAUDE.md`, `.claude/**`.

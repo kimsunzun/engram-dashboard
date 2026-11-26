@@ -137,7 +137,7 @@ interface ViewState {
   closeSlot: (viewId: string, slotId: string) => Promise<void>
   assignAgent: (viewId: string, slotId: string, agentId: string) => Promise<void>
   /**
-   * Replaces a slot's content with any of the SlotContent union (ADR-0063): tree (agent_list), palette (preset_palette) or clear (empty). Invokes backend set_slot_content; the update comes only through layout:updated (no optimistic update, ADR-0035).
+   * Replaces a slot's content with any of the SlotContent union (ADR-0063): tree (agent_list), usage (usage) or clear (empty). Invokes backend set_slot_content; the update comes only through layout:updated (no optimistic update, ADR-0035).
    * §5: the LLM also calls it through `layout.setSlotContent`.
    */
   setSlotContent: (viewId: string, slotId: string, content: SlotContent) => Promise<void>

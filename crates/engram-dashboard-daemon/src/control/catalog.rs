@@ -7,6 +7,8 @@
 //! `help` is not opened (hard constraint): merge and list carry it byte for byte — no parsing, validation or branching (ADR-0156).
 //!
 //! The list's `callable` and the outcome of [`handle_call`] must come from the same fact (the only machine-branchable field); that fact is in [`handle_list`].
+//! The one exception is the shell-only names the list omits (its `omitted` — ADR-0419): [`handle_call`] still runs them into the
+//! entrance, which answers `UNSUPPORTED` `shell-only`, not `UNKNOWN_COMMAND`.
 //!
 //! Someone else's names go to the bus (ADR-0160): a name not in the daemon's own table with an owner attached becomes [`CallOutcome::Relay`]
 //! for the caller to deliver — this file is blocking, the round trip is async.
@@ -74,7 +76,13 @@ pub fn merge(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Vec<Comman
 ///
 /// Arguments are values, not slots, so this rides the same [`merge`] as WS; the read time is the caller's. Half lists are emitted too (an empty
 /// table slot gives empty `mine`) — the same answer WS gives in that state; the assembled servers plug the table in before accepting connections.
-pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> ControlQueryResult {
+/// `omitted` = names this list leaves out after the merge, whichever source holds them (the daemon's shell-only names —
+/// ADR-0419); dropping them from `mine` before the merge instead would let a client row of the same name through.
+pub fn handle_list(
+    mine: Vec<CommandDecl>,
+    registered: Vec<RosterEntry>,
+    omitted: &[&str],
+) -> ControlQueryResult {
     // Only names are taken — `help` is not copied (not needed for this decision, and that blob is the largest thing in this list).
     let callable: BTreeSet<String> = mine
         .iter()
@@ -86,6 +94,7 @@ pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Cont
     //   panic is a daemon exit — hook · ADR-0292).
     let commands: Vec<serde_json::Value> = merge(mine, registered)
         .into_iter()
+        .filter(|entry| !omitted.contains(&entry.name.as_str()))
         .map(|entry| {
             let callable = callable.contains(&entry.name);
             let mut row = serde_json::Map::with_capacity(3);
@@ -227,6 +236,7 @@ fn caller_request_id(raw: &str) -> Result<RequestId, ControlQueryResult> {
                 "'{CALLER_REQUEST_ID_FIELD}' must be a UUID — hyphenated (8-4-4-4-12), 32 hex digits with no dashes, braced, or urn:uuid: form — so a retry can reuse it; got: {}",
                 preview(raw)
             ),
+            args: None,
         }
     })
 }
@@ -330,6 +340,7 @@ fn refused(e: CommandError) -> ControlQueryResult {
     ControlQueryResult::Error {
         code: e.code().as_str(),
         hint,
+        args: e.args().cloned(),
     }
 }
 
@@ -343,9 +354,11 @@ const MESSAGE_PREVIEW_CHARS: usize = 2048;
 
 /// The only recovery path this entrance knows — only the discovery list knows callable names and their fields.
 ///
-/// No made-up CLI verbs: the daemon owns the route, not CLI spelling, and no CLI verb renders this list yet.
-/// Do not revert to `engram help`: that screen is static (`control/help.rs`), gives two family names and no field, so names outside `agent.*`
-/// cannot appear — it would send exactly the cases this guidance exists for (unknown name · wrong field) somewhere that cannot answer.
+/// No CLI spelling: the daemon owns the route, not the CLI's spelling — `engram commands` renders this list, and the CLI adds its own
+/// line naming it after an `UNKNOWN_COMMAND` (ADR-0419).
+/// Do not revert to `engram help`: those screens are hand-written text (`control/help.rs`) — they cover only the names written into
+/// them (no client-registered name) and are not the schema, while this list holds every callable name with its fields. Pointing there
+/// would send exactly the cases this guidance exists for (unknown name · wrong field) somewhere that cannot fully answer.
 /// ADR-0132 decision 4 (discovery only through help) is not the basis here: it chose a static family screen instead of listing commands, the opposite of this runtime list.
 /// The path string must not diverge from the route constant (the test below checks).
 // ADR-0156 (what carries the fields is the opaque `help` blob, and the surface that hands that blob down is this list)
@@ -364,6 +377,7 @@ fn unknown_name(name: &str) -> ControlQueryResult {
             "unknown command '{}' — neither this daemon nor any connected client declares that name; {CATALOG_RECOVERY}.",
             preview(name)
         ),
+        args: None,
     }
 }
 
@@ -379,13 +393,14 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
             "the request body is not a valid command call: {reason} — it must be a JSON object like {{\"name\":\"agent.list\",\"args\":{{}}}}; got: {}",
             preview(raw)
         ),
+        args: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::conn_port::ConnId;
-    use engram_dashboard_command::{Effect, OwnerToken, RequestId};
+    use engram_dashboard_command::{DeadlineClass, Effect, OwnerToken, RequestId};
 
     use super::*;
     use crate::command_delivery::NoLocalCommands;
@@ -397,8 +412,8 @@ mod tests {
     struct Holds(&'static str);
 
     impl LocalCommands for Holds {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == self.0).then_some(Effect::Read)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == self.0).then_some((Effect::Read, DeadlineClass::Ordinary))
         }
 
         fn run(
@@ -425,6 +440,7 @@ mod tests {
             name: name.to_string(),
             help: help.to_string(),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         }
     }
 
@@ -474,11 +490,36 @@ mod tests {
     #[test]
     fn the_listing_carries_the_help_bytes_untouched() {
         let opaque = "not json at all — arbitrary bytes {[(";
-        let result = handle_list(vec![decl("agent.list", opaque)], vec![]);
+        let result = handle_list(vec![decl("agent.list", opaque)], vec![], &[]);
 
         let json = result.to_json();
         assert_eq!(json["commands"][0]["name"], "agent.list");
         assert_eq!(json["commands"][0]["help"], opaque);
+    }
+
+    /// An omitted name leaves the list whichever source holds it — the daemon's own row and a client row registered under
+    /// the same name (the daemon table plugged in late, so registration did not refuse it); the other rows stay (ADR-0419).
+    #[test]
+    fn an_omitted_name_leaves_the_list_from_both_sources() {
+        let json = handle_list(
+            vec![
+                decl("library.emptyTrash", "mine"),
+                decl("agent.list", "mine"),
+            ],
+            vec![
+                entry("library.emptyTrash", "stolen"),
+                entry("tab.create", "theirs"),
+            ],
+            &["library.emptyTrash"],
+        )
+        .to_json();
+        let names: Vec<&str> = json["commands"]
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|row| row["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, ["agent.list", "tab.create"], "{json}");
     }
 
     /// [`handle_call`] recognizes every name the list taught and does not know names outside it.
@@ -491,6 +532,7 @@ mod tests {
         let json = handle_list(
             vec![decl("agent.list", "mine")],
             vec![entry("tab.create", "theirs")],
+            &[],
         )
         .to_json();
         let rows = json["commands"].as_array().expect("array");
@@ -566,7 +608,7 @@ mod tests {
                 ..CallRequest::default()
             };
             match handle_call(&table, &registered, req) {
-                CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+                CallOutcome::Answered(ControlQueryResult::Error { code, hint, .. }) => {
                     assert_eq!(code, "INVALID_ARGUMENT", "{hint}");
                     assert!(
                         hint.contains(CALLER_REQUEST_ID_FIELD),
@@ -610,8 +652,8 @@ mod tests {
     fn a_table_that_claims_a_name_but_answers_nothing_is_not_relayed() {
         struct ClaimsButAnswersNothing;
         impl LocalCommands for ClaimsButAnswersNothing {
-            fn claim(&self, _name: &str) -> Option<Effect> {
-                Some(Effect::Write)
+            fn claim(&self, _name: &str) -> Option<(Effect, DeadlineClass)> {
+                Some((Effect::Write, DeadlineClass::Ordinary))
             }
             fn run(
                 &self,
@@ -636,7 +678,7 @@ mod tests {
             &Registered("tab.create"),
             call_of("tab.create"),
         ) {
-            CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+            CallOutcome::Answered(ControlQueryResult::Error { code, hint, .. }) => {
                 assert_eq!(code, "INTERNAL", "{hint}");
                 assert!(hint.contains("tab.create"), "must say which name: {hint}");
             }
@@ -742,7 +784,7 @@ mod tests {
         }
 
         match handle_call(&table, &registered, call_of("nope.nope")) {
-            CallOutcome::Answered(ControlQueryResult::Error { code, hint }) => {
+            CallOutcome::Answered(ControlQueryResult::Error { code, hint, .. }) => {
                 assert_eq!(code, "UNKNOWN_COMMAND");
                 assert!(hint.contains("nope.nope"), "{hint}");
                 assert!(hint.contains(CATALOG_RECOVERY), "{hint}");
@@ -767,7 +809,7 @@ mod tests {
             CommandError::invalid_argument("no such window 'ghost'"),
         ));
         match failed {
-            ControlQueryResult::Error { code, hint } => {
+            ControlQueryResult::Error { code, hint, .. } => {
                 assert_eq!(code, "INVALID_ARGUMENT");
                 assert!(hint.contains("ghost"), "{hint}");
                 assert!(
@@ -776,6 +818,89 @@ mod tests {
                 );
             }
             other => panic!("must be a bounce: {other:?}"),
+        }
+    }
+
+    /// The code's arguments reach the caller's body — from this daemon's own table and from an owner whose
+    /// reply crossed the wire (decoded, not handed over in memory).
+    #[test]
+    fn a_refusal_carries_the_codes_args_from_the_table_and_across_a_relay() {
+        let args = serde_json::json!({"reasons": [{"code": "missing", "item": "a/b"}]});
+        let error = CommandError::of(ErrorCode::Conflict, "launch blocked")
+            .with_args(args.as_object().expect("object").clone());
+        let want = serde_json::json!({
+            "status": "error",
+            "code": "CONFLICT",
+            "hint": "launch blocked",
+            "args": args,
+        });
+
+        match handle_call(
+            &Refuses("agent.spawn", error.clone()),
+            &Registered("tab.create"),
+            call_of("agent.spawn"),
+        ) {
+            CallOutcome::Answered(result) => assert_eq!(result.into_json(), want),
+            other => panic!("the table's own name is answered here: {other:?}"),
+        }
+
+        let id = RequestId::new();
+        let wire = serde_json::to_string(&CommandReply::err(id, error)).expect("serialize");
+        let decoded: CommandReply = serde_json::from_str(&wire).expect("decode");
+        assert_eq!(relayed(decoded).into_json(), want);
+    }
+
+    /// No `args` key in the body when there is nothing to carry: an empty map written by the table, or the
+    /// arguments of an owner code this daemon downgrades to `INTERNAL` (they stay with the relay copy).
+    #[test]
+    fn a_refusal_body_has_no_args_for_empty_or_foreign_arguments() {
+        let empty = CommandError::not_found("no agent").with_args(serde_json::Map::new());
+        match handle_call(
+            &Refuses("agent.spawn", empty),
+            &Registered("tab.create"),
+            call_of("agent.spawn"),
+        ) {
+            CallOutcome::Answered(result) => assert_eq!(
+                result.into_json(),
+                serde_json::json!({"status": "error", "code": "NOT_FOUND", "hint": "no agent"})
+            ),
+            other => panic!("the table's own name is answered here: {other:?}"),
+        }
+
+        let id = RequestId::new();
+        let foreign: CommandReply = serde_json::from_str(&format!(
+            r#"{{"request_id":"{id}","outcome":{{"Err":{{"code":"FROM_THE_FUTURE","message":"x","retry":"never","args":{{"k":1}}}}}}}}"#
+        ))
+        .expect("decode");
+        let body = relayed(foreign).into_json();
+        assert_eq!(body["code"], "INTERNAL", "{body}");
+        assert!(body.get("args").is_none(), "{body}");
+    }
+
+    /// A table that owns one name and refuses every call to it with the given error.
+    struct Refuses(&'static str, CommandError);
+
+    impl LocalCommands for Refuses {
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == self.0).then_some((Effect::Write, DeadlineClass::Ordinary))
+        }
+
+        fn run(
+            &self,
+            name: &str,
+            _args: &mut serde_json::Value,
+            _entrance: &'static str,
+            _caller: Option<ConnId>,
+        ) -> Option<Result<serde_json::Value, CommandError>> {
+            (name == self.0).then(|| Err(self.1.clone()))
+        }
+
+        fn decls(&self) -> Vec<CommandDecl> {
+            vec![decl(self.0, "{}")]
+        }
+
+        fn agent_roster(&self) -> Vec<engram_dashboard_agent::commands::AgentRosterRow> {
+            Vec::new()
         }
     }
 
@@ -791,6 +916,7 @@ mod tests {
                 ControlQueryResult::Error {
                     code,
                     hint: unfixable,
+                    ..
                 },
             ) => {
                 assert!(fixable.contains(CATALOG_RECOVERY), "{fixable}");
@@ -827,7 +953,7 @@ mod tests {
         ];
         for branch in branches {
             match branch {
-                ControlQueryResult::Error { code, hint } => {
+                ControlQueryResult::Error { code, hint, .. } => {
                     assert!(hint.contains("truncated"), "says it cut ({code}): {hint}");
                     assert!(
                         hint.len() < 4096,

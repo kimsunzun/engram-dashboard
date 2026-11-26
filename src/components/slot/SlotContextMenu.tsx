@@ -1,5 +1,5 @@
 // ★Role★: human click, palette, keybinding and LLM all pass through the same command and id (§5 single control surface, ADR-0055); the menu never calls the store directly (ADR-0064 invariant).
-// ★One menu component★ (ADR-0064 §5): content (PresetPalette/AgentList) no longer owns its own pane menu.
+// ★One menu component★ (ADR-0064 §5): content (AgentList, etc.) no longer owns its own pane menu.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, SyntheticEvent } from 'react'

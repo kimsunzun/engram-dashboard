@@ -100,7 +100,7 @@ pub fn run() {
         },
     ));
     builder = builder.plugin(tauri_plugin_opener::init());
-    // Native folder picker (adding a preset path) — the frontend PresetPalette "Add" calls it via `open({directory:true})`; permission is `dialog:allow-open` in default.json.
+    // Native folder picker — the frontend's agent creation (the tree slot menu's create-agent item, etc.) calls it via `open({directory:true})`; permission is `dialog:allow-open` in default.json · popup.json.
     // ★Not a plugin only for folder picking★: the command refusal box (`daemon_client/refusal.rs`) uses it through the Rust API, and `dialog()` panics without this registration — do not remove it even if folder picking goes.
     builder = builder.plugin(tauri_plugin_dialog::init());
 

@@ -36,7 +36,7 @@ failed_reason: string | null,
 /**
  * The kind of this item's last activation failure (ADR-0172). `null` = no failure record.
  *
- * ★Lives only in daemon memory★ — the agent-side original is `#[serde(skip)]`, so it is not in `agents.json`, and it disappears
+ * ★Lives only in daemon memory★ — the agent-side original is `#[serde(skip)]`, so it is not in the profile file, and it disappears
  *   when the daemon restarts (it survives an app window restart).
  * `#[serde(default)]`, so old wire without this field → None (PROTOCOL_VERSION kept — the same additive shape as display_name·
  * parent_id). An unknown **value** is absorbed into `Other` (the `Deserialize` impl of `AgentFailureKind` — that doc is

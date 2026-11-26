@@ -1,6 +1,13 @@
 //! roundtrip-smoke — A→B→A round trip (reply round-trip) measurement driver (verification-only bin).
 //!
-//! Spawns 2 real primed claudes (A=alice · B=bob, stream-json/Fresh) and, on top of the A→B receiving that priming-smoke proved, looks at two things: ① does B call the sending half (MCP `eg_send` or the `engram mail send` CLI) on its own ② does A naturally accept that reply. Mechanical axis = registry `DeliveryObservation` (from=B, to=A) + the entrance B chose; qualitative axis = A's turn text. The orchestrator interprets the stdout markers below.
+//! ## What it measures
+//! Spawns two real primed claudes (A = alice · B = bob, stream-json, Fresh) through the launch materials
+//! (`LibraryService` over `--builtin-dir`) and, on top of the A→B receipt that priming-smoke proved (ADR-0092
+//! decision 4 baseline — that bin is gone, its measurement carries on in this A→B half, ADR-0370), looks at two new
+//! pieces only: ① does B call the **sending half** (MCP `eg_send` or the `engram mail send` CLI) **on its own**
+//! ② does A accept that reply naturally. Two observation axes — mechanical = the registry `DeliveryObservation`
+//! (from = B, to = A) plus the entrance B chose, qualitative = A's turn text. The orchestrator gives the final reading
+//! from the stdout markers below.
 //!
 //! ## Not misattributing negative results
 //! `B_SENT=false` is a valid experimental negative only when setup fully succeeded and both A and B are alive. Missing infrastructure · wrong argument combinations · process death end with different labels (SETUP-SKIP / SETUP-FAIL); mixing them pollutes the data.
@@ -11,7 +18,10 @@
 //! - A wrong duration notation is bounced by `validate_contract` only at seed send time, after both agents are spawned — classified SETUP-FAIL, but the spawn cost is spent.
 //!
 //! ## Flags (test-only knobs — not production switches)
-//! - `--priming <path|C0>` — priming file (absolute as is, relative from the repo root). Unspecified · `C0` = production A `prompts/agent-priming.md`. The old C1~C3 aliases were removed (ADR-0099): such a value is read as a file path and fails as missing.
+//! - `--builtin-dir <dir>` — the built-in folder the launch reads (absolute as is, relative under the repo root).
+//!   Unset = the repo `builtin\`. A priming variant is a separately copied folder with its own
+//!   `instructions\priming.md` (ADR-0370); a no-priming run = a copy with an empty priming file. The library reads
+//!   the folder once, when the service is built, so a variant is fixed for the run.
 //! - `--model <name>` — default sonnet.
 //! - `--disallow-mcp` — removes only the MCP `eg_send` grant. ★It cannot create CLI routing (measured: 6/6 still sent through MCP)★ — the spawn stays MCP-capable, so the daemon refuses that credential's CLI mail (ADR-0133). ★No mode measures the CLI entrance★ — canonical mail path is MCP, the CLI is a mirror (ADR-0209 decision 3). Keeping or discarding the knob awaits a user decision.
 //! - `--seed-request` (+ `--seed-reply-by <dur>`, e.g. `5m`) — sends the seed A→B as a reply contract.
@@ -19,13 +29,24 @@
 //! - Misuse of `--b-task` · `--seed-reply-by` (missing value · next token starts with `--` · blank) and `--seed-reply-by` without `--seed-request` bounce with exit 1 before spawn. Other knobs are lenient (unspecified = today's behavior).
 //!
 //! ## Exit labels (stdout and stderr — no silent skip)
-//! - `SKIPPED` exit 0 — claude missing/auth failure.
+//! - `SKIPPED` exit 0 — `claude --version` could not start or exited unsuccessfully (the claude CLI is absent) — asked
+//!   once before any spawn (after the config gates), and again when an agent does not start.
 //! - `SETUP-SKIP` exit 1 — infrastructure the case requires is missing (a CLI path but the control plane CLI is not built).
-//! - `SETUP-FAIL` exit 1 — argument error (before spawn) · priming file missing/unreadable · A/B output subscribe failure · B task turn failure · A·B process death · seed ACK bounced.
+//! - `SETUP-FAIL` exit 1 — an argument error (before any spawn) · a launch that would not carry the built-in priming:
+//!   a blocked launch check, any `builtin-unavailable` notice (a missing or unreadable priming file, or a partial
+//!   `--builtin-dir` that would launch unprimed or without its settings — ADR-0361 stand-ins), or a plan without the
+//!   priming · `claude --version` not exiting within `CLAUDE_PROBE_DEADLINE` (the CLI is there but misbehaves) · an
+//!   agent that did not start while the claude CLI is there (a launch-kit prepare, store or folder failure)
+//!   · an A/B output subscription failure · a failed B task turn · A or B process death · a refused seed ACK. An empty
+//!   but present priming file is not a setup failure.
 //! - Otherwise exit 0 — a valid negative is exit 0 too.
 //!
 //! ## stdout markers (the orchestrator parses them)
-//! The `ROUNDTRIP CASE= B_SENT= ENTRANCE=` banner · `[model]` · `[priming]` (the real in-effect path that passed the existence check) · `SEED_KIND=` · `B_TASK=` are printed always, even when unspecified, so a silently ignored typo stands out. With `--seed-request`:
+//! The `ROUNDTRIP CASE= B_SENT= ENTRANCE=` banner (`CASE` = the `--builtin-dir` value as given, `repo-builtin` when
+//! unset) · `[model]` · `[priming]` (the effective priming file under `--builtin-dir`, which the run read) ·
+//! `SEED_KIND=` · `B_TASK=` are printed **always, even when unset** — the signal that makes a silently ignored typo
+//! visible (so "unset = byte-identical to today" is a claim about the spawn, priming and send logic, not about the
+//! whole stdout). With `--seed-request` these follow:
 //! - `REPLY_MATCHES_SEED` — whether a delivered (is_delivered) B→A record has `in_reply_to == seed msg_id` (strict).
 //! - `REPLY_IN_REPLY_TO` — the matching record's value first, else the first delivered record's `in_reply_to`; tells "wrong/hallucinated id" (matches=false, value present) from "no in-reply-to" (none).
 //! - `REPLY_POLL=matched|timeout|skipped-no-budget` · `REPLY_POLL_BUDGET_MS=<ms>` — reply-polling budget state. 0 = no budget (skipped) or under 1ms left (truncated); the label, not the number, is the source of truth for the skip decision.
@@ -40,16 +61,22 @@
 //! ## Core invariants
 //! - `required-features = ["test-harness"]` — production/release builds do not compile this bin.
 //! - B's reply goes only through the real entrance — the harness never calls `handle_send` on B's behalf; that is what it verifies.
-//! - No experiment uses the CLI entrance (ADR-0128 · CLI mirror priming abolished) — the daemon refuses an MCP-capable spawn's CLI mail by credential (ADR-0133), so `--priming` combinations with CLI-instructing priming are refused before spawn. The decision reads the resolved priming file body, not the selector or basename.
+//! - **No experiment uses the CLI entrance** (ADR-0128 single channel · CLI-mirror priming withdrawn 2026-09-19) —
+//!   the daemon refuses CLI mail from an MCP-capable spawn by its credential (ADR-0133), so a `--builtin-dir` whose
+//!   priming teaches the CLI is refused before any spawn. That judgment reads the **effective priming file's text**,
+//!   not the folder name.
 // ADR-0092
+// ADR-0370
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_agent::launch::{
+    notice_text, LaunchKitSource, LaunchPorts, StdLaunchFs, BUILTIN_UNAVAILABLE,
+};
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -59,19 +86,27 @@ use engram_dashboard_agent::types::{
     OutputSink, SinkError, SinkId, StatusSink, CLI_EXE_NAME,
 };
 
+use engram_dashboard_asset_library::builtin::file_of;
+use engram_dashboard_asset_library::path::BuiltinId;
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_with_help, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
 };
-use engram_dashboard_daemon::control::priming::{
-    mentions_mail_cli_surface, FilePrimingProvider, PrimingProvider,
-};
+use engram_dashboard_daemon::control::priming::mentions_mail_cli_surface;
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
 use engram_dashboard_daemon::messaging_host::messaging_for_manager;
+use engram_dashboard_daemon::{build_library_service, LibraryHost, LibraryStart};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
+use engram_dashboard_platform::shell::console_command;
+use engram_dashboard_platform::spawn::{prepare_tree_root, TreeRoot};
 
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `claude --version` may take before the probe cuts it and calls the CLI misbehaving — a cold node start of
+/// the CLI takes a few seconds.
+const CLAUDE_PROBE_DEADLINE: Duration = Duration::from_secs(10);
+/// How long a cut probe child may take to end before it is left behind with a warning.
+const PROBE_REAP_DEADLINE: Duration = Duration::from_secs(2);
 const TURN_WAIT_CAP: Duration = Duration::from_secs(180);
 /// B reply wait cap — exceeding it is not an error but a negative result (B did not send).
 const REPLY_WAIT_CAP: Duration = Duration::from_secs(180);
@@ -84,7 +119,10 @@ const NAME_B: &str = "bob";
 const TASK_PROMPT_B: &str =
     "You are currently working on the auth module (login/session). When you're ready to start, reply in one line.";
 
-/// ★Seed A→B (ADR-0092 — a natural teammate question, not a mechanical "use tool X")★: A asks B about progress, so answering A is the natural reaction. How to send is taught by the priming variant (C0/default = production A `prompts/agent-priming.md`, which teaches only eg_send — ADR-0126).
+/// ★Seed A→B (ADR-0092 — a natural teammate question, not a mechanical "use tool X")★: an ordinary collaboration
+///   question in which A asks B for status, so that handing the answer back to A is the natural reaction. How to send
+///   (tool / CLI) is taught by the **priming variant**, not the body (default = the repo
+///   `builtin\instructions\priming.md`, which teaches only eg_send since ADR-0126 decision 1).
 const SEED_A_TO_B: &str =
     "Can you share the status of the auth module? If you're stuck anywhere on the login path, tell me what you need too.";
 
@@ -135,21 +173,273 @@ fn seed_reply_by_without_request_is_invalid(
     !seed_request && seed_reply_by.is_some()
 }
 
-/// No existence check — the caller decides by attempting the read.
+/// Does no existence check — the caller judges by trying to read it.
 fn resolve_b_task_file_path(value: &str, repo_root: &std::path::Path) -> Option<PathBuf> {
     let rel = value.strip_prefix('@')?;
-    let p = PathBuf::from(rel);
-    Some(if p.is_absolute() {
+    Some(under_root(rel, repo_root))
+}
+
+/// `value` as is when absolute, else joined under `repo_root`.
+fn under_root(value: &str, repo_root: &Path) -> PathBuf {
+    let p = PathBuf::from(value);
+    if p.is_absolute() {
         p
     } else {
         repo_root.join(p)
-    })
+    }
+}
+
+/// The built-in folder of this run: `--builtin-dir` resolved by [`under_root`], unset = the repo `builtin\`.
+fn resolve_builtin_dir(selector: Option<&str>, repo_root: &Path) -> PathBuf {
+    under_root(selector.unwrap_or("builtin"), repo_root)
+}
+
+/// What the run's library service starts with: `library.json` read from `<data_dir>\state` (none there — the root stays
+/// unset; the run reads the built-ins only and runs no first start), the default place `<data_dir>\default_library`,
+/// the data folder `<data_dir>`, a run-only identity and a root generation base drawn as production draws it.
+fn library_start(data_dir: &Path) -> LibraryStart {
+    LibraryStart {
+        config: engram_dashboard_asset_library::config::load(&data_dir.join("state")),
+        default_root: data_dir.join("default_library"),
+        daemon_id: uuid::Uuid::new_v4().to_string(),
+        root_generation_base: engram_dashboard_daemon::root_generation_base(),
+    }
+}
+
+/// The priming file under `builtin_dir` — the file the library reads it from.
+fn priming_file(builtin_dir: &Path) -> PathBuf {
+    file_of(BuiltinId::Priming)
+        .split('/')
+        .fold(builtin_dir.to_path_buf(), |dir, part| dir.join(part))
+}
+
+/// Whether the launch materials of `profiles` carry the built-in priming, checked before anything is spawned — `Err`
+/// = why the run cannot pass as a primed one (a SETUP-FAIL reason).
+///
+/// `Err` when `kits` blocks any of `profiles`; when a plan carries a `builtin-unavailable` notice (a built-in the
+/// library stood in for — ADR-0361: a missing or unreadable priming file, a missing default preset or settings); or
+/// when a plan is not real or does not include the priming (a default preset that does not list `engram/priming`
+/// tells nothing). An empty priming file passes.
+fn check_builtin(kits: &dyn LaunchKitSource, profiles: &[&AgentProfile]) -> Result<(), String> {
+    for profile in profiles {
+        let plan = kits
+            .check(profile)
+            .map_err(|blocked| format!("the launch check of {} failed: {blocked}", profile.name))?;
+        let told: Vec<String> = plan
+            .notices
+            .iter()
+            .filter(|notice| notice.code == BUILTIN_UNAVAILABLE)
+            .map(notice_text)
+            .collect();
+        if !told.is_empty() {
+            return Err(format!(
+                "the launch of {} reports {BUILTIN_UNAVAILABLE}: {} — it would not run as a primed one",
+                profile.name,
+                told.join(" / ")
+            ));
+        }
+        if !plan.real || !plan.include_priming {
+            return Err(format!(
+                "the launch of {} would not carry the built-in priming (real={}, include_priming={}) — it would not run as a primed one",
+                profile.name, plan.real, plan.include_priming
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What `claude --version` says about the claude CLI, bounded by [`CLAUDE_PROBE_DEADLINE`].
+fn claude_probe() -> ProbeVerdict {
+    probe_verdict(probe(
+        "claude",
+        vec!["--version".to_string()],
+        CLAUDE_PROBE_DEADLINE,
+    ))
+}
+
+/// What a probe of the claude CLI means for the run.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeVerdict {
+    Runs,
+    /// The CLI could not start or exited unsuccessfully — the environment's (SKIPPED). Carries why.
+    NoClaude(String),
+    /// The CLI exists but misbehaves (no exit within the deadline), or the probe itself failed — SETUP-FAIL. Carries
+    /// why.
+    Broken(String),
+}
+
+/// How one probe ended.
+#[derive(Debug)]
+enum ProbeEnd {
+    Exited {
+        success: bool,
+    },
+    NotStarted(String),
+    /// The child could not be tied to or woken as a tree root; it was ended.
+    TreeFailed(String),
+    /// Waiting on the child failed; the tree was ended.
+    WaitFailed(String),
+    /// No exit within `deadline`; the tree was ended. `reaped` = the child ended within [`PROBE_REAP_DEADLINE`] after.
+    TimedOut {
+        deadline: Duration,
+        reaped: bool,
+    },
+}
+
+fn probe_verdict(end: ProbeEnd) -> ProbeVerdict {
+    match end {
+        ProbeEnd::Exited { success: true } => ProbeVerdict::Runs,
+        ProbeEnd::Exited { success: false } => {
+            ProbeVerdict::NoClaude("`claude --version` exited unsuccessfully".to_string())
+        }
+        ProbeEnd::NotStarted(e) => {
+            ProbeVerdict::NoClaude(format!("`claude --version` could not start: {e}"))
+        }
+        ProbeEnd::TreeFailed(e) => ProbeVerdict::Broken(format!(
+            "the `claude --version` probe could not run as a tree root: {e}"
+        )),
+        ProbeEnd::WaitFailed(e) => {
+            ProbeVerdict::Broken(format!("waiting on `claude --version` failed: {e}"))
+        }
+        ProbeEnd::TimedOut { deadline, .. } => ProbeVerdict::Broken(format!(
+            "`claude --version` timed out after {deadline:?} and was ended — the CLI is there but does not answer"
+        )),
+    }
+}
+
+/// Runs `program args` through the console wrapping a launch uses, as the root of a process tree (ADR-0275 — the
+/// usage probes do the same), and waits up to `deadline` for it to exit. On a timeout the whole tree is cut — never by
+/// walking parent pids (`kill_tree`'s `/T`), which reaches unrelated trees through stale parent pids (ADR-0291).
+// ADR-0275
+// ADR-0291
+fn probe(program: &str, args: Vec<String>, deadline: Duration) -> ProbeEnd {
+    let (program, args) = console_command(program, args);
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    prepare_tree_root(&mut command);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => return ProbeEnd::NotStarted(e.to_string()),
+    };
+    let tree = match TreeRoot::attach(&child) {
+        Ok(tree) => tree,
+        Err(e) => {
+            // The child is left suspended outside any tree (Windows) — it is cut alone.
+            if let Err(kill) = child.kill() {
+                eprintln!("[roundtrip] probe: could not kill the untied child: {kill}");
+            }
+            reap_probe(&mut child);
+            return ProbeEnd::TreeFailed(e.to_string());
+        }
+    };
+    if let Err(e) = tree.start(&child) {
+        end_tree(&tree, &mut child);
+        return ProbeEnd::TreeFailed(format!("could not wake it: {e}"));
+    }
+    let waited = wait_bounded(deadline, || {
+        child.try_wait().map(|status| status.map(|s| s.success()))
+    });
+    match waited {
+        Ok(Some(success)) => ProbeEnd::Exited { success },
+        Ok(None) => ProbeEnd::TimedOut {
+            deadline,
+            reaped: end_tree(&tree, &mut child),
+        },
+        Err(e) => {
+            end_tree(&tree, &mut child);
+            ProbeEnd::WaitFailed(e.to_string())
+        }
+    }
+}
+
+/// Cuts the probe's tree and reaps the child — `true` = it ended within [`PROBE_REAP_DEADLINE`].
+fn end_tree(tree: &TreeRoot, child: &mut std::process::Child) -> bool {
+    if let Err(e) = tree.kill(child) {
+        eprintln!("[roundtrip] probe: the tree kill failed (the child itself was cut): {e}");
+    }
+    reap_probe(child)
+}
+
+/// Reaps a cut probe child within [`PROBE_REAP_DEADLINE`] — a kill's `Ok` does not mean it ended (ADR-0291 decision
+/// 13); one that does not end is left behind with a warning.
+fn reap_probe(child: &mut std::process::Child) -> bool {
+    let reaped = wait_bounded(PROBE_REAP_DEADLINE, || {
+        child.try_wait().map(|status| status.map(|_| true))
+    });
+    match reaped {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            eprintln!(
+                "[roundtrip] probe: pid {} did not end within {PROBE_REAP_DEADLINE:?} after the kill — left behind",
+                child.id()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!(
+                "[roundtrip] probe: could not reap pid {}: {e} — left behind",
+                child.id()
+            );
+            false
+        }
+    }
+}
+
+/// Polls `poll` (`Some(success)` = the child exited) until it answers or `deadline` passes — `Ok(None)` = timed out.
+fn wait_bounded(
+    deadline: Duration,
+    mut poll: impl FnMut() -> std::io::Result<Option<bool>>,
+) -> std::io::Result<Option<bool>> {
+    let until = Instant::now() + deadline;
+    loop {
+        if let Some(success) = poll()? {
+            return Ok(Some(success));
+        }
+        if Instant::now() >= until {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// How a run that could not start an agent ends.
+#[derive(Debug, PartialEq, Eq)]
+enum SpawnFailure {
+    /// The claude CLI does not run — the environment's (SKIPPED).
+    NoClaude,
+    /// Anything else — a launch-kit check or prepare, the profile store, the working folder, a misbehaving CLI
+    /// (SETUP-FAIL).
+    Setup,
+}
+
+/// `verdict` = [`claude_probe`] asked at the failure. Only a CLI that does not run at all is the environment's.
+fn classify_spawn_failure(verdict: &ProbeVerdict) -> SpawnFailure {
+    match verdict {
+        ProbeVerdict::NoClaude(_) => SpawnFailure::NoClaude,
+        ProbeVerdict::Runs | ProbeVerdict::Broken(_) => SpawnFailure::Setup,
+    }
+}
+
+fn spawn_failure_exit(why: &str) -> i32 {
+    let verdict = claude_probe();
+    let why = match &verdict {
+        ProbeVerdict::Runs => why.to_string(),
+        ProbeVerdict::NoClaude(probe) | ProbeVerdict::Broken(probe) => format!("{why} — {probe}"),
+    };
+    match classify_spawn_failure(&verdict) {
+        SpawnFailure::NoClaude => skip_no_claude(&why),
+        SpawnFailure::Setup => setup_fail(&why),
+    }
 }
 
 /// `*_error` fields only record the fact of misuse; `run()` decides whether and when to bounce (fail fast with SETUP-FAIL before spawning a real claude).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Args {
-    priming: Option<String>,
+    builtin_dir: Option<String>,
     model: String,
     disallow_mcp: bool,
     seed_request: bool,
@@ -233,34 +523,8 @@ async fn run() -> i32 {
     }
 
     let repo_root = repo_root_from_manifest();
-    let priming_selector = args.priming.clone();
-    let resolved_priming = match resolve_priming_path(priming_selector.as_deref(), &repo_root) {
-        Some(p) => p,
-        None => {
-            return setup_fail(&format!(
-                "cannot resolve the priming selector ({priming_selector:?}) to an absolute path — experiment impossible"
-            ));
-        }
-    };
-    // `FilePrimingProvider` silently drops a nonexistent override and spawns UNPRIMED — so check it here, or the case label becomes false.
-    if !resolved_priming.is_file() {
-        return setup_fail(&format!(
-            "priming file missing: {} (case={:?}) — a nonexistent override leads to an UNPRIMED spawn and makes the case label false",
-            resolved_priming.display(),
-            priming_selector
-        ));
-    }
-    // ★Read the priming file only once and reuse it for the CLI-requirement guard below — do not revert★: touching it twice opened a TOCTOU window, and `read_to_string(...).unwrap_or(false)` swallowed every read failure as "not a CLI requirement", producing false normal negatives.
-    let priming_content = match std::fs::read_to_string(&resolved_priming) {
-        Ok(c) => c,
-        Err(e) => {
-            return setup_fail(&format!(
-                "priming file read failed: {} (case={:?}): {e} — priming is required for the experiment, so it cannot proceed if unreadable",
-                resolved_priming.display(),
-                priming_selector
-            ));
-        }
-    };
+    let builtin_dir = resolve_builtin_dir(args.builtin_dir.as_deref(), &repo_root);
+    let case_label = args.builtin_dir.as_deref().unwrap_or("repo-builtin");
     // Nothing has been spawned yet, so a failure return has nothing to clean up.
     let (task_prompt_b, b_task_kind): (String, String) = match &args.b_task {
         None => (TASK_PROMPT_B.to_string(), "default".to_string()),
@@ -283,13 +547,77 @@ async fn run() -> i32 {
             }
         },
     };
-    // Set the three envs below before the provider · manager wiring so A and B get the same priming variant and grant set.
-    std::env::set_var("ENGRAM_PRIMING_FILE", &resolved_priming);
+    let data_dir = std::env::temp_dir().join(format!("engram-roundtrip-{}", AgentId::new_v4()));
+    let ws_a = std::env::temp_dir().join(format!("engram-roundtrip-ws-a-{}", AgentId::new_v4()));
+    let ws_b = std::env::temp_dir().join(format!("engram-roundtrip-ws-b-{}", AgentId::new_v4()));
+    let _ = std::fs::create_dir_all(&ws_a);
+    let _ = std::fs::create_dir_all(&ws_b);
+    let profile_dir =
+        std::env::temp_dir().join(format!("engram-roundtrip-prof-{}", AgentId::new_v4()));
+    let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir];
+    let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
+        profile_dir.clone(),
+    ))));
+    let library = Arc::new(build_library_service(
+        profiles.clone(),
+        Some(builtin_dir.clone()),
+        data_dir.join("launch"),
+        LibraryHost::process(),
+        library_start(&data_dir),
+    ));
+    let profile_a = agent_profile(NAME_A, &args.model, &ws_a);
+    let profile_b = agent_profile(NAME_B, &args.model, &ws_b);
+    // Until the MCP server starts, a failure has only these folders to remove.
+    if let Err(reason) = check_builtin(library.as_ref(), &[&profile_a, &profile_b]) {
+        remove_dirs(&dirs);
+        return setup_fail(&format!("{reason} (case={case_label})"));
+    }
+    let priming_path = priming_file(&builtin_dir);
+    // The text the launches merge in — read once, by the service, when it was built.
+    let priming_text = library.builtin_priming_text().to_owned();
     eprintln!(
-        "[roundtrip] priming = {} (case={:?})",
-        resolved_priming.display(),
-        priming_selector
+        "[roundtrip] priming = {} (case={case_label})",
+        priming_path.display()
     );
+
+    let send_exe = sibling_send_exe();
+    match &send_exe {
+        Some(p) => eprintln!("[roundtrip] {CLI_EXE_NAME} = {}", p.display()),
+        None => {
+            eprintln!(
+                "[roundtrip] no {CLI_EXE_NAME} sibling binary — CLI entrance disabled (MCP only)."
+            )
+        }
+    }
+    // ★One broad signal (block when in doubt)★: every spawn is MCP-capable, so priming that touches the CLI surface is refused without exception. ★The paired 「requirement direction」 gate (`teaches_mail_cli`) does not exist★ — no mode requires CLI send teaching (ADR-0209 decision 3). To revive it, set up that mode first, or every run becomes a false SETUP-FAIL.
+    let mentions_cli_surface = mentions_mail_cli_surface(&priming_text);
+    if mentions_cli_surface {
+        remove_dirs(&dirs);
+        return setup_fail(&format!(
+            "CLI-teaching priming on an MCP-capable spawn (case={case_label}): the daemon refuses CLI mail requests from an MCP-capable spawn by credential (ADR-0133), so the command B learned does not work — a channel taught but unusable = a send freeze (ADR-0099 measured ~6/7 not sent) would be misattributed as a normal negative. There is no mode that measures the CLI entrance — the canonical mail path is MCP and the CLI is a mirror (ADR-0209 decision 3). ※The decision in this prohibition direction looks **broadly** (`mentions_mail_cli_surface`) — it is caught if **even one** of a mail CLI call form (`engram mail …`/`$ENGRAM_CLI_EXE mail …`) · the env variable name itself · a CLI-only flag (`--to`·`--body`·`--body-stdin`·`--request`·`--reply-by`·`--reply-to`) appears. Every arm compares at **word boundaries** after the same normalization (lowercase · whitespace/newline collapse · markdown emphasis/escape symbol removal · HTML comment removal · zero-width character removal), so disarray at the level of case · whitespace/newlines · markdown emphasis · HTML comments · zero-width characters is folded, and plain words like `engram mailbox`·`--token` are not caught. **Shell grammar in general (variable rebinding · aliases) and sentence negation are not decided** — the `teaches_mail_cli` comment is the source of truth for that limit. A negative sentence (\"do not use that command\") is still caught in this prohibition direction by the **bare mention** of the variable (an intended fail-closed: refusing is safer than misattributing — though it is not a 'taught' decision). To turn it into an MCP-only file, remove the mention itself",
+        ));
+    }
+    // ★This skip guards only the consistency of the harness's SETUP labels★, not "a CLI grant exists" — this mode's send grant is 0 whether or not the binary exists. Keeping or discarding the knob awaits a user decision.
+    if args.disallow_mcp && send_exe.is_none() {
+        remove_dirs(&dirs);
+        return setup_skip(
+            "--disallow-mcp: SETUP-SKIP because the control plane CLI sibling binary is missing. ※Note (ADR-0133) — this mode leaves the spawn MCP-capable, so if the binary is built the command runs but **the daemon refuses that request** (the CLI mail entrance of an MCP-capable credential is closed). Moreover, in the auto permission mode the grant is a NO-OP, so the agent sends through MCP anyway (measured 6/6). That is, building is only a procedure to get past this skip and does not create CLI routing — there is no mode that does that. To get past the skip: `cargo build -p engram-dashboard-cli`",
+        );
+    }
+    // After the config gates (a config error keeps its label without claude), before any spawn: under the Windows `cmd.exe`
+    //   wrapper a missing claude does not fail the spawn itself.
+    match claude_probe() {
+        ProbeVerdict::Runs => {}
+        ProbeVerdict::NoClaude(why) => {
+            remove_dirs(&dirs);
+            return skip_no_claude(&why);
+        }
+        ProbeVerdict::Broken(why) => {
+            remove_dirs(&dirs);
+            return setup_fail(&why);
+        }
+    }
+    // Set before the control channel exists, so both agents (A · B) are provisioned with the same grant set.
     if args.disallow_mcp {
         std::env::set_var("ENGRAM_DISALLOW_MCP_SEND", "1");
         eprintln!("[roundtrip] --disallow-mcp → MCP send grant removed (CLI-only measurement, ENGRAM_DISALLOW_MCP_SEND=1)");
@@ -329,68 +657,18 @@ async fn run() -> i32 {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[roundtrip] MCP server startup failed: {e}");
+            remove_dirs(&dirs);
             return 1;
         }
     };
     let url = handle.url.clone();
-    let data_dir = std::env::temp_dir().join(format!("engram-roundtrip-{}", AgentId::new_v4()));
-    let ws_a = std::env::temp_dir().join(format!("engram-roundtrip-ws-a-{}", AgentId::new_v4()));
-    let ws_b = std::env::temp_dir().join(format!("engram-roundtrip-ws-b-{}", AgentId::new_v4()));
-    let _ = std::fs::create_dir_all(&ws_a);
-    let _ = std::fs::create_dir_all(&ws_b);
-
-    let send_exe = sibling_send_exe();
-    match &send_exe {
-        Some(p) => eprintln!("[roundtrip] {CLI_EXE_NAME} = {}", p.display()),
-        None => {
-            eprintln!(
-                "[roundtrip] no {CLI_EXE_NAME} sibling binary — CLI entrance disabled (MCP only)."
-            )
-        }
-    }
-    // ★One broad signal (block when in doubt)★: every spawn is MCP-capable, so priming that touches the CLI surface is refused without exception. ★The paired 「requirement direction」 gate (`teaches_mail_cli`) does not exist★ — no mode requires CLI send teaching (ADR-0209 decision 3). To revive it, set up that mode first, or every run becomes a false SETUP-FAIL.
-    let mentions_cli_surface = mentions_mail_cli_surface(&priming_content);
-    if mentions_cli_surface {
-        handle.shutdown().await;
-        let dirs = [&data_dir, &ws_a, &ws_b];
-        for d in dirs {
-            let _ = std::fs::remove_dir_all(d);
-        }
-        return setup_fail(&format!(
-            "CLI-teaching priming on an MCP-capable spawn (case={:?}): the daemon refuses CLI mail requests from an MCP-capable spawn by credential (ADR-0133), so the command B learned does not work — a channel taught but unusable = a send freeze (ADR-0099 measured ~6/7 not sent) would be misattributed as a normal negative. There is no mode that measures the CLI entrance — the canonical mail path is MCP and the CLI is a mirror (ADR-0209 decision 3). ※The decision in this prohibition direction looks **broadly** (`mentions_mail_cli_surface`) — it is caught if **even one** of a mail CLI call form (`engram mail …`/`$ENGRAM_CLI_EXE mail …`) · the env variable name itself · a CLI-only flag (`--to`·`--body`·`--body-stdin`·`--request`·`--reply-by`·`--reply-to`) appears. Every arm compares at **word boundaries** after the same normalization (lowercase · whitespace/newline collapse · markdown emphasis/escape symbol removal · HTML comment removal · zero-width character removal), so disarray at the level of case · whitespace/newlines · markdown emphasis · HTML comments · zero-width characters is folded, and plain words like `engram mailbox`·`--token` are not caught. **Shell grammar in general (variable rebinding · aliases) and sentence negation are not decided** — the `teaches_mail_cli` comment is the source of truth for that limit. A negative sentence (\"do not use that command\") is still caught in this prohibition direction by the **bare mention** of the variable (an intended fail-closed: refusing is safer than misattributing — though it is not a 'taught' decision). To turn it into an MCP-only file, remove the mention itself",
-            priming_selector
-        ));
-    }
-    // ★This skip guards only the consistency of the harness's SETUP labels★, not "a CLI grant exists" — this mode's send grant is 0 whether or not the binary exists. Keeping or discarding the knob awaits a user decision.
-    if args.disallow_mcp && send_exe.is_none() {
-        handle.shutdown().await;
-        let dirs = [&data_dir, &ws_a, &ws_b];
-        for d in dirs {
-            let _ = std::fs::remove_dir_all(d);
-        }
-        return setup_skip(
-            "--disallow-mcp: SETUP-SKIP because the control plane CLI sibling binary is missing. ※Note (ADR-0133) — this mode leaves the spawn MCP-capable, so if the binary is built the command runs but **the daemon refuses that request** (the CLI mail entrance of an MCP-capable credential is closed). Moreover, in the auto permission mode the grant is a NO-OP, so the agent sends through MCP anyway (measured 6/6). That is, building is only a procedure to get past this skip and does not create CLI routing — there is no mode that does that. To get past the skip: `cargo build -p engram-dashboard-cli`",
-        );
-    }
-    let priming_provider: Arc<dyn PrimingProvider> = Arc::new(FilePrimingProvider::new(repo_root));
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
         registry.clone(),
         url,
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         send_exe,
-        priming_provider,
     ));
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);
-    let profile_dir =
-        std::env::temp_dir().join(format!("engram-roundtrip-prof-{}", AgentId::new_v4()));
-    let preset_dir =
-        std::env::temp_dir().join(format!("engram-roundtrip-preset-{}", AgentId::new_v4()));
-    let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
-        profile_dir.clone(),
-    ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        preset_dir.clone(),
-    ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -398,16 +676,26 @@ async fn run() -> i32 {
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
-    ));
+    let manager = Arc::new(
+        AgentManager::new_with_control(sink, profiles, tracker, control).with_launch_ports(
+            LaunchPorts {
+                kits: library.clone(),
+                fs: Arc::new(StdLaunchFs),
+            },
+        ),
+    );
     slot.set(manager.clone());
+    // ADR-0380: the production order — the manager goes into the library as its profile-edit port before the table
+    //   that reaches the library is built; weak, as the manager already holds the library as its launch-kit source.
+    let profile_edit: std::sync::Weak<AgentManager> = Arc::downgrade(&manager);
+    library.plug_profile_edit(profile_edit);
     command_slot.set(Arc::new(
         engram_dashboard_daemon::control::commands::make_daemon_table(
             manager.clone(),
             broadcast_slot.clone(),
             Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
             Arc::new(engram_dashboard_daemon::control::commands::NoUsageLimits),
+            library,
         ),
     ));
     // MessagingService assembly (3-way send branch · flush), wrapping the manager as a DeliveryPort. No flush sink is wired (NoopStatus), so parking scenarios take only the direct path; the seed goes to a live recipient (delivered).
@@ -415,22 +703,20 @@ async fn run() -> i32 {
     messaging_slot.set(messaging.clone());
 
     // ── A·B spawn (both real primed claude, stream-json, Fresh) ─────────────────────────
-    let agent_a = match spawn_named(&manager, NAME_A, &args.model, &ws_a) {
-        Some(a) => a,
-        None => {
-            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
+    let agent_a = match spawn_named(&manager, &profile_a) {
+        Ok(a) => a,
+        Err(why) => {
             cleanup(&manager, &[], &dirs).await;
             handle.shutdown().await;
-            return skip_no_claude("A spawn/appearance failed");
+            return spawn_failure_exit(&why);
         }
     };
-    let agent_b = match spawn_named(&manager, NAME_B, &args.model, &ws_b) {
-        Some(b) => b,
-        None => {
-            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
+    let agent_b = match spawn_named(&manager, &profile_b) {
+        Ok(b) => b,
+        Err(why) => {
             cleanup(&manager, &[agent_a.id], &dirs).await;
             handle.shutdown().await;
-            return skip_no_claude("B spawn/appearance failed");
+            return spawn_failure_exit(&why);
         }
     };
     eprintln!(
@@ -452,7 +738,6 @@ async fn run() -> i32 {
             if let Some(id) = sink_b {
                 let _ = manager.unsubscribe(agent_b.id, id);
             }
-            let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
             cleanup(&manager, &[agent_a.id, agent_b.id], &dirs).await;
             handle.shutdown().await;
             return setup_fail($reason);
@@ -590,10 +875,9 @@ async fn run() -> i32 {
     }
 
     // ── 5) structured stdout markers (for the orchestrator's decision) ────────────────────────────────
-    let case_label = priming_selector.as_deref().unwrap_or("C0");
     println!("\n===== ROUNDTRIP CASE={case_label} B_SENT={b_sent} ENTRANCE={entrance_label} =====");
     println!("[model] {}", args.model);
-    println!("[priming] {}", resolved_priming.display());
+    println!("[priming] {}", priming_path.display());
     println!("[seed A->B body] {SEED_A_TO_B}");
     let seed_kind = if args.seed_request {
         "request"
@@ -658,16 +942,16 @@ async fn run() -> i32 {
     if let Some(id) = sink_b {
         let _ = manager.unsubscribe(agent_b.id, id);
     }
-    let dirs = [&data_dir, &ws_a, &ws_b, &profile_dir, &preset_dir];
     cleanup(&manager, &[agent_a.id, agent_b.id], &dirs).await;
     handle.shutdown().await;
     0
 }
 
 /// Takes an `iter` to drop the std::env dependency (pure, so unit tests reach it).
-/// A next token that is another flag (starts with `--`) is not swallowed as a value (FIX round-2 #7) — otherwise `--priming --model opus` would eat `--model` as the priming value.
+/// A value that is another flag (starts with `--`) is not taken (FIX round-2 #7) — taking it would eat `--model` in
+///   `--builtin-dir --model opus` as the folder and leave the model silently at its default.
 fn parse_args(iter: impl Iterator<Item = String>) -> Args {
-    let mut priming = None;
+    let mut builtin_dir = None;
     let mut model = "sonnet".to_string();
     let mut disallow_mcp = false;
     let mut seed_request = false;
@@ -678,9 +962,9 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
     let mut it = iter.peekable();
     while let Some(tok) = it.next() {
         match tok.as_str() {
-            "--priming" => {
+            "--builtin-dir" => {
                 if let Some(v) = take_flag_value(&mut it) {
-                    priming = Some(v);
+                    builtin_dir = Some(v);
                 }
             }
             "--model" => {
@@ -741,7 +1025,7 @@ fn parse_args(iter: impl Iterator<Item = String>) -> Args {
         }
     }
     Args {
-        priming,
+        builtin_dir,
         model,
         disallow_mcp,
         seed_request,
@@ -758,24 +1042,6 @@ fn take_flag_value<I: Iterator<Item = String>>(it: &mut std::iter::Peekable<I>) 
         Some(_) => it.next(),
         None => None,
     }
-}
-
-/// Always an absolute path — no existence check (`FilePrimingProvider` does the final existence · CLI-safety check).
-fn resolve_priming_path(selector: Option<&str>, repo_root: &std::path::Path) -> Option<PathBuf> {
-    let rel: &str = match selector {
-        None | Some("C0") | Some("c0") => "prompts/agent-priming.md",
-        Some(path) => {
-            let p = PathBuf::from(path);
-            let joined = if p.is_absolute() {
-                p
-            } else {
-                repo_root.join(p)
-            };
-            return joined.is_absolute().then_some(joined);
-        }
-    };
-    let joined = repo_root.join(rel);
-    joined.is_absolute().then_some(joined)
 }
 
 fn entrance_str(e: Entrance) -> &'static str {
@@ -833,13 +1099,10 @@ fn is_agent_alive(manager: &Arc<AgentManager>, id: AgentId) -> bool {
         .unwrap_or(false)
 }
 
-fn spawn_named(
-    manager: &Arc<AgentManager>,
-    name: &str,
-    model: &str,
-    workspace: &std::path::Path,
-) -> Option<AgentInfo> {
-    // The two agents share the same workspace cwd, so cwd-derived names collide (alice/bob) and misroute. Plant the names in display_name to tell them apart deterministically (ADR-0101 WYSIWYA).
+fn agent_profile(name: &str, model: &str, workspace: &Path) -> AgentProfile {
+    // Name the agents alice and bob explicitly via display_name: a cwd-derived name would be the workspace
+    // folder's basename (`engram-roundtrip-ws-a-<uuid>`), not the name the agents address each other by
+    // (ADR-0101 WYSIWYA).
     let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Claude {
@@ -851,18 +1114,32 @@ fn spawn_named(
         false,
     );
     profile.display_name = Some(name.to_string());
+    profile
+}
+
+/// The started agent, or why it did not start (kept for the SKIPPED / SETUP-FAIL line).
+fn spawn_named(manager: &Arc<AgentManager>, profile: &AgentProfile) -> Result<AgentInfo, String> {
     let info = manager
-        .spawn_agent(&profile, SpawnMode::Fresh)
-        .ok()?
-        .into_started()?;
+        .spawn_agent(profile, SpawnMode::Fresh)
+        .map_err(|e| format!("the spawn of {} failed: {e}", profile.name))?
+        .into_started()
+        .ok_or_else(|| {
+            format!(
+                "the spawn of {} did nothing (already running or starting)",
+                profile.name
+            )
+        })?;
     let deadline = Instant::now() + SPAWN_APPEAR_TIMEOUT;
     while Instant::now() < deadline {
         if manager.list_agents().iter().any(|a| a.id == info.id) {
-            return Some(info);
+            return Ok(info);
         }
         std::thread::sleep(Duration::from_millis(30));
     }
-    None
+    Err(format!(
+        "{} did not appear in the agent list within {SPAWN_APPEAR_TIMEOUT:?}",
+        profile.name
+    ))
 }
 
 /// Polling: the relay depends on B's real claude judgment with nondeterministic delay and there is no cv signal source, so short sleep polling is enough.
@@ -933,6 +1210,10 @@ async fn cleanup(manager: &Arc<AgentManager>, agent_ids: &[AgentId], dirs: &[&Pa
             std::thread::sleep(Duration::from_millis(30));
         }
     }
+    remove_dirs(dirs);
+}
+
+fn remove_dirs(dirs: &[&PathBuf]) {
     for d in dirs {
         let _ = std::fs::remove_dir_all(d);
     }
@@ -1020,6 +1301,10 @@ impl OutputSink for TurnObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engram_dashboard_agent::launch::{
+        LaunchBlocked, LaunchKit, LaunchPlan, NoopLaunchKits, PrepareError,
+    };
+    use engram_dashboard_asset_library::LibraryService;
     use engram_dashboard_daemon::control::priming::teaches_mail_cli;
 
     fn s(v: &[&str]) -> impl Iterator<Item = String> {
@@ -1029,10 +1314,41 @@ mod tests {
             .into_iter()
     }
 
+    /// ★The run plugs the manager into its library as the profile-edit port before it builds the command table★ — the
+    /// production order (ADR-0380): plugged after, an agent-preset command or a relink would answer
+    /// `profile-edit-unavailable`; left out, every one would. No runtime test of this bin orders the two (a run needs a
+    /// real claude), only this one.
+    #[test]
+    fn the_run_plugs_the_profile_edit_port_before_it_builds_the_command_table() {
+        let source = include_str!("roundtrip_smoke.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("production part");
+        let run = &production[production.find("async fn run()").expect("`run`")..];
+        let built = run
+            .find("AgentManager::new_with_control(")
+            .expect("`run` builds the manager");
+        let plugged = run
+            .find(".plug_profile_edit(")
+            .expect("`run` plugs the profile-edit port");
+        let table = run
+            .find("make_daemon_table(")
+            .expect("`run` builds the command table");
+        assert!(
+            built < plugged,
+            "the port is plugged before the manager exists"
+        );
+        assert!(
+            plugged < table,
+            "the command table is built before the port is plugged"
+        );
+    }
+
     #[test]
     fn parse_args_defaults() {
         let a = parse_args(s(&[]));
-        assert_eq!(a.priming, None);
+        assert_eq!(a.builtin_dir, None);
         assert_eq!(a.model, "sonnet");
         assert!(!a.disallow_mcp, "default allows MCP (today's behavior)");
         assert!(
@@ -1059,19 +1375,19 @@ mod tests {
             a.model, "opus",
             "--model after --disallow-mcp parses normally"
         );
-        assert_eq!(a.priming, None);
+        assert_eq!(a.builtin_dir, None);
     }
 
     #[test]
     fn parse_args_disallow_mcp_absent_is_false() {
-        let a = parse_args(s(&["--priming", "some/priming.md", "--model", "haiku"]));
+        let a = parse_args(s(&["--builtin-dir", "some/builtin", "--model", "haiku"]));
         assert!(!a.disallow_mcp);
     }
 
     #[test]
-    fn parse_args_priming_and_model() {
-        let a = parse_args(s(&["--priming", "some/priming.md", "--model", "opus"]));
-        assert_eq!(a.priming.as_deref(), Some("some/priming.md"));
+    fn parse_args_builtin_dir_and_model() {
+        let a = parse_args(s(&["--builtin-dir", "some/builtin", "--model", "opus"]));
+        assert_eq!(a.builtin_dir.as_deref(), Some("some/builtin"));
         assert_eq!(a.model, "opus");
     }
 
@@ -1081,34 +1397,34 @@ mod tests {
             "--model",
             "haiku",
             "junk",
-            "--priming",
-            "other/priming.md",
+            "--builtin-dir",
+            "other/builtin",
         ]));
-        assert_eq!(a.priming.as_deref(), Some("other/priming.md"));
+        assert_eq!(a.builtin_dir.as_deref(), Some("other/builtin"));
         assert_eq!(a.model, "haiku");
     }
 
     #[test]
     fn parse_args_flag_without_value_is_ignored() {
-        let a = parse_args(s(&["--priming"]));
-        assert_eq!(a.priming, None);
+        let a = parse_args(s(&["--builtin-dir"]));
+        assert_eq!(a.builtin_dir, None);
         assert_eq!(a.model, "sonnet");
     }
 
     #[test]
     fn parse_args_flag_does_not_consume_next_flag_as_value() {
-        let a = parse_args(s(&["--priming", "--model", "opus"]));
+        let a = parse_args(s(&["--builtin-dir", "--model", "opus"]));
         assert_eq!(
-            a.priming, None,
-            "if the next token is a flag, it is not swallowed as the priming value"
+            a.builtin_dir, None,
+            "a following flag is not taken as the --builtin-dir value"
         );
         assert_eq!(a.model, "opus", "--model must parse normally");
     }
 
     #[test]
     fn parse_args_trailing_flag_flags_both_ignored_cleanly() {
-        let a = parse_args(s(&["--model", "--priming"]));
-        assert_eq!(a.priming, None);
+        let a = parse_args(s(&["--model", "--builtin-dir"]));
+        assert_eq!(a.builtin_dir, None);
         assert_eq!(
             a.model, "sonnet",
             "a flag after --model means no value → the default stays"
@@ -1116,40 +1432,326 @@ mod tests {
     }
 
     #[test]
-    fn resolve_case_c0_maps_to_current_priming() {
+    fn resolve_builtin_dir_unset_is_the_repo_builtin() {
         let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
-        let got = resolve_priming_path(None, &root).expect("C0 path");
-        assert!(got.is_absolute());
-        assert!(
-            got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md"),
-            "C0 is the current priming: {got:?}"
-        );
-        let got2 = resolve_priming_path(Some("C0"), &root).expect("C0 path");
-        assert_eq!(got, got2);
+        assert_eq!(resolve_builtin_dir(None, &root), root.join("builtin"));
     }
-
-    // ADR-0099: the explicit path override tests below cover the removed C1~C3 aliases' behavior.
 
     #[test]
     fn resolve_explicit_absolute_path_passthrough() {
         let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
         let abs = if cfg!(windows) {
-            "C:\\custom\\my-priming.md"
+            "C:\\custom\\my-builtin"
         } else {
-            "/custom/my-priming.md"
+            "/custom/my-builtin"
         };
-        let got = resolve_priming_path(Some(abs), &root).expect("absolute override");
-        assert_eq!(got, PathBuf::from(abs), "an absolute path passes as is");
+        let got = resolve_builtin_dir(Some(abs), &root);
+        assert_eq!(got, PathBuf::from(abs), "an absolute folder passes as is");
     }
 
     #[test]
     fn resolve_explicit_relative_path_joined_under_root() {
         let root = PathBuf::from(if cfg!(windows) { "C:\\repo" } else { "/repo" });
-        let got = resolve_priming_path(Some("sub/custom.md"), &root).expect("relative override");
+        let got = resolve_builtin_dir(Some("sub/custom"), &root);
         assert!(got.is_absolute());
         assert!(
-            got.ends_with("sub/custom.md") || got.ends_with("sub\\custom.md"),
-            "a relative path is joined from the repo root: {got:?}"
+            got.ends_with("sub/custom") || got.ends_with("sub\\custom"),
+            "a relative folder is joined under the repo root: {got:?}"
+        );
+    }
+
+    // ── check_builtin (the pre-spawn setup gate) ───────────────────────────────────────────────
+
+    /// A temporary folder outside the repository, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch() -> Scratch {
+        let root =
+            std::env::temp_dir().join(format!("engram-roundtrip-test-{}", AgentId::new_v4()));
+        for folder in ["ws", "home"] {
+            std::fs::create_dir_all(root.join(folder)).expect("create the scratch folder");
+        }
+        Scratch(root)
+    }
+
+    fn repo_builtin() -> PathBuf {
+        repo_root_from_manifest().join("builtin")
+    }
+
+    /// A built-in folder under `root` holding the repo built-ins named in `copied` and the priming text `priming`
+    /// (`None` = no priming file).
+    fn builtin_copy(root: &Path, copied: &[&str], priming: Option<&str>) -> PathBuf {
+        let dir = root.join("builtin");
+        for rel in copied {
+            let to = dir.join(rel);
+            std::fs::create_dir_all(to.parent().unwrap()).expect("create the parent folder");
+            std::fs::copy(repo_builtin().join(rel), &to).expect("copy the built-in");
+        }
+        if let Some(text) = priming {
+            std::fs::create_dir_all(dir.join("instructions")).expect("create instructions");
+            std::fs::write(priming_file(&dir), text).expect("write the priming");
+        }
+        dir
+    }
+
+    /// The run's library service over `builtin_dir` — hermetic: the scratch home and an empty environment, so the
+    /// user's own skill roots are not read.
+    fn library_over(root: &Path, builtin_dir: &Path) -> LibraryService {
+        let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
+            root.join("profiles"),
+        ))));
+        build_library_service(
+            profiles,
+            Some(builtin_dir.to_path_buf()),
+            root.join("launch"),
+            LibraryHost {
+                home: Some(root.join("home")),
+                env: Arc::new(|_| None),
+            },
+            library_start(root),
+        )
+    }
+
+    /// `check_builtin` over `kits` for the run's two agents, as `run` calls it.
+    fn check_with(root: &Path, kits: &dyn LaunchKitSource) -> Result<(), String> {
+        let alice = agent_profile(NAME_A, "sonnet", &root.join("ws"));
+        let bob = agent_profile(NAME_B, "sonnet", &root.join("ws"));
+        check_builtin(kits, &[&alice, &bob])
+    }
+
+    #[test]
+    fn check_builtin_over_the_repo_builtin_passes_with_the_shipped_priming() {
+        let root = scratch();
+        let library = library_over(&root.0, &repo_builtin());
+        check_with(&root.0, &library).expect("the repo builtin passes");
+        let shipped = std::fs::read_to_string(priming_file(&repo_builtin()))
+            .expect("read the shipped priming");
+        assert_eq!(library.builtin_priming_text(), shipped);
+    }
+
+    #[test]
+    fn check_builtin_without_the_priming_file_is_a_setup_failure() {
+        let root = scratch();
+        let dir = builtin_copy(
+            &root.0,
+            &["presets/default.yaml", "settings/default.yaml"],
+            None,
+        );
+        let err = check_with(&root.0, &library_over(&root.0, &dir))
+            .err()
+            .expect("a missing priming fails");
+        assert!(err.contains(BUILTIN_UNAVAILABLE), "{err}");
+        assert!(err.contains("engram/priming"), "{err}");
+    }
+
+    #[test]
+    fn check_builtin_with_the_priming_but_no_default_preset_is_a_setup_failure() {
+        let root = scratch();
+        let dir = builtin_copy(
+            &root.0,
+            &["settings/default.yaml"],
+            Some("Teammates mail you."),
+        );
+        let err = check_with(&root.0, &library_over(&root.0, &dir))
+            .err()
+            .expect("a stood-in default preset fails");
+        assert!(err.contains(BUILTIN_UNAVAILABLE), "{err}");
+        assert!(err.contains("engram/default"), "{err}");
+    }
+
+    #[test]
+    fn check_builtin_with_a_default_preset_that_does_not_list_the_priming_is_a_setup_failure() {
+        let root = scratch();
+        let dir = builtin_copy(
+            &root.0,
+            &["settings/default.yaml"],
+            Some("Teammates mail you."),
+        );
+        std::fs::create_dir_all(dir.join("presets")).expect("create presets");
+        std::fs::write(
+            dir.join("presets").join("default.yaml"),
+            "kind: preset\nversion: 1\nsettings:\n  - engram/settings/default\n",
+        )
+        .expect("write the preset");
+        let err = check_with(&root.0, &library_over(&root.0, &dir))
+            .err()
+            .expect("a launch without the priming fails");
+        assert!(err.contains("include_priming=false"), "{err}");
+    }
+
+    #[test]
+    fn check_builtin_with_an_empty_priming_file_is_not_a_setup_failure() {
+        let root = scratch();
+        let dir = builtin_copy(
+            &root.0,
+            &["presets/default.yaml", "settings/default.yaml"],
+            Some(""),
+        );
+        let library = library_over(&root.0, &dir);
+        check_with(&root.0, &library).expect("an empty priming passes");
+        assert_eq!(library.builtin_priming_text(), "");
+    }
+
+    /// A launch-kit source whose every check is refused.
+    struct Refusing;
+
+    impl LaunchKitSource for Refusing {
+        fn check(&self, _profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+            Err(LaunchBlocked {
+                reasons: Vec::new(),
+            })
+        }
+        fn prepare(
+            &self,
+            _plan: LaunchPlan,
+            _id: AgentId,
+            _epoch: u32,
+        ) -> Result<LaunchKit, PrepareError> {
+            unreachable!("check_builtin only checks")
+        }
+        fn release(&self, _id: AgentId, _epoch: u32) {}
+    }
+
+    #[test]
+    fn check_builtin_with_a_refused_launch_check_is_a_setup_failure() {
+        let root = scratch();
+        let err = check_with(&root.0, &Refusing)
+            .err()
+            .expect("a refused check fails");
+        assert!(err.contains("launch check of alice failed"), "{err}");
+    }
+
+    #[test]
+    fn check_builtin_over_noop_kits_is_a_setup_failure() {
+        let root = scratch();
+        let err = check_with(&root.0, &NoopLaunchKits)
+            .err()
+            .expect("a Noop plan fails");
+        assert!(err.contains("real=false"), "{err}");
+    }
+
+    #[test]
+    fn a_spawn_failure_is_skipped_only_when_the_claude_cli_does_not_run() {
+        assert_eq!(
+            classify_spawn_failure(&ProbeVerdict::NoClaude("absent".into())),
+            SpawnFailure::NoClaude
+        );
+        assert_eq!(
+            classify_spawn_failure(&ProbeVerdict::Runs),
+            SpawnFailure::Setup,
+            "with a working CLI a spawn or prepare failure is the harness's"
+        );
+        assert_eq!(
+            classify_spawn_failure(&ProbeVerdict::Broken("timed out".into())),
+            SpawnFailure::Setup,
+            "a CLI that is there but misbehaves is not an absent one"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_never_exits_times_out() {
+        let mut polls = 0;
+        let waited = wait_bounded(Duration::from_millis(120), || {
+            polls += 1;
+            Ok(None)
+        });
+        assert_eq!(waited.unwrap(), None);
+        assert!(polls > 1, "it polls until the deadline, not once");
+    }
+
+    #[test]
+    fn a_probe_that_exits_answers_with_its_status() {
+        let mut polls = 0;
+        let waited = wait_bounded(Duration::from_secs(60), || {
+            polls += 1;
+            Ok((polls == 3).then_some(false))
+        });
+        assert_eq!(waited.unwrap(), Some(false));
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn a_failed_poll_ends_the_wait_with_its_error() {
+        let waited = wait_bounded(Duration::from_secs(60), || {
+            Err(std::io::Error::other("gone"))
+        });
+        assert_eq!(waited.unwrap_err().to_string(), "gone");
+    }
+
+    #[test]
+    fn only_an_absent_or_failing_cli_is_skipped_and_a_timeout_is_a_setup_failure() {
+        assert_eq!(
+            probe_verdict(ProbeEnd::Exited { success: true }),
+            ProbeVerdict::Runs
+        );
+        assert!(matches!(
+            probe_verdict(ProbeEnd::Exited { success: false }),
+            ProbeVerdict::NoClaude(_)
+        ));
+        assert!(matches!(
+            probe_verdict(ProbeEnd::NotStarted("not found".into())),
+            ProbeVerdict::NoClaude(_)
+        ));
+        assert!(matches!(
+            probe_verdict(ProbeEnd::TreeFailed("no job".into())),
+            ProbeVerdict::Broken(_)
+        ));
+        assert!(matches!(
+            probe_verdict(ProbeEnd::WaitFailed("gone".into())),
+            ProbeVerdict::Broken(_)
+        ));
+        let ProbeVerdict::Broken(why) = probe_verdict(ProbeEnd::TimedOut {
+            deadline: Duration::from_secs(10),
+            reaped: true,
+        }) else {
+            panic!("a timeout is a misbehaving CLI, not an absent one");
+        };
+        assert!(why.contains("timed out after 10s"), "{why}");
+    }
+
+    /// A real long-lived child (through the same console wrapping — on Windows `ping` is a grandchild under `cmd.exe`)
+    /// is cut as a tree on the timeout and reaped within the reap window.
+    #[test]
+    fn a_probe_that_outlives_its_deadline_is_cut_and_reaped() {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            ("ping", &["-n", "60", "127.0.0.1"])
+        } else {
+            ("sleep", &["60"])
+        };
+        let deadline = Duration::from_millis(500);
+        let started = Instant::now();
+        let end = probe(
+            program,
+            args.iter().map(|a| a.to_string()).collect(),
+            deadline,
+        );
+        let took = started.elapsed();
+        assert!(
+            matches!(end, ProbeEnd::TimedOut { reaped: true, .. }),
+            "{end:?}"
+        );
+        assert!(
+            took < deadline + PROBE_REAP_DEADLINE + Duration::from_secs(1),
+            "the probe returned only after {took:?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_of_a_missing_program_does_not_run() {
+        let end = probe(
+            "engram-roundtrip-no-such-program",
+            Vec::new(),
+            Duration::from_secs(10),
+        );
+        assert!(
+            matches!(probe_verdict(end), ProbeVerdict::NoClaude(_)),
+            "a missing program is an absent CLI"
         );
     }
 
@@ -1252,7 +1854,7 @@ mod tests {
 
     #[test]
     fn parse_args_seed_request_absent_is_false() {
-        let a = parse_args(s(&["--priming", "C0", "--model", "haiku"]));
+        let a = parse_args(s(&["--builtin-dir", "some/builtin", "--model", "haiku"]));
         assert!(!a.seed_request);
     }
 

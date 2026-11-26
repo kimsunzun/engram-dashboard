@@ -50,9 +50,10 @@ use engram_dashboard_lib::layout::window_ctl::{
     Activation, Applied, OsWindowState, WindowAction, WindowControl,
 };
 use engram_dashboard_lib::layout::{
-    tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim, SplitDir,
-    SplitRatioApplied, SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
-    WindowBounds, WindowHost, WindowPlace, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SpareClaim,
+    SpawnRefusal, SpawnedAgent, SplitDir, SplitRatioApplied, SplitRatioOutcome, SubscriptionSync,
+    UiMetrics, ViewManager, ViewSnapshot, WindowBounds, WindowHost, WindowPlace, WindowTabsPayload,
+    MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::settings::{
     SettingItem, SettingsEvents, SettingsService, SettingsSnapshot, THEME_DEFAULT,
@@ -281,7 +282,7 @@ impl WindowControl for Control {
 type SpawnRequest = (
     String,
     Option<engram_dashboard_protocol::AgentBackendKind>,
-    oneshot::Sender<Result<String, String>>,
+    oneshot::Sender<Result<SpawnedAgent, SpawnRefusal>>,
 );
 
 /// Finishes only when another task supplies the answer, like a daemon round trip — otherwise "does the application hold the caller task" could not be measured.
@@ -294,8 +295,9 @@ impl AgentSpawner for DaemonSpawner {
         &'a self,
         cwd: String,
         backend: Option<engram_dashboard_protocol::AgentBackendKind>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>,
+    > {
         Box::pin(async move {
             let (answer, wait) = oneshot::channel();
             self.requests
@@ -768,9 +770,9 @@ fn the_table_holds_exactly_the_declared_commands() {
 #[test]
 fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     // Rises with any declaration change (answer shape, vocabulary, error declarations), not only when the name count grows.
-    // ADR-0219 · ADR-0227 · ADR-0276 · ADR-0225 · ADR-0291 · ADR-0308
-    // TRD S21 usage-limit-slot §1-7 · TRD S21-storage §5-4 · §5-6 · §5-7 · §6-5 · §6-7 · TRD S26-window-chrome §3-2 · §4-5 · §5-3 · §6-1 · §6-6 · TRD S28 §4 · §7
-    assert_eq!(CATALOG_VERSION, 21);
+    // ADR-0219 · ADR-0227 · ADR-0276 · ADR-0225 · ADR-0291 · ADR-0308 · ADR-0314
+    // TRD S21 usage-limit-slot §1-7 · TRD S21-storage §5-4 · §5-6 · §5-7 · §6-5 · §6-7 · TRD S26-window-chrome §3-2 · §4-5 · §5-3 · §6-1 · §6-6 · TRD S28 §4 · §7 · TRD S25-preset-library §5-2 1
+    assert_eq!(CATALOG_VERSION, 22);
     assert_eq!(COMMAND_SPECS.len(), 36);
     for since in [
         TabMoveArgs::SPEC.since,
@@ -1829,6 +1831,27 @@ async fn slot_content_refuses_a_contradictory_pair() {
         .await,
     );
     assert_eq!(extra.code(), ErrorCode::InvalidArgument);
+}
+
+/// A retired kind is refused — the slot stays as it is.
+// ADR-0314
+#[tokio::test]
+async fn slot_content_refuses_the_retired_preset_palette() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let slot = world.empty_slot(view);
+    let refused = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "layout.setSlotContent",
+            json!({ "view_id": view.to_string(), "slot_id": slot.to_string(), "content": "PresetPalette" }),
+        )
+        .await,
+    );
+    assert_eq!(refused.code(), ErrorCode::InvalidArgument);
+    assert_eq!(world.content(view, slot), Some(SlotContent::Empty));
 }
 
 #[tokio::test]
@@ -4011,7 +4034,7 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
     .expect("the spawn request comes");
     assert_eq!(cwd, "C:/work/engram");
     answer
-        .send(Ok("agent-1".to_string()))
+        .send(Ok(started("agent-1")))
         .expect("puts in the spawn answer");
 
     world.mail.settle(1).await;
@@ -4024,14 +4047,14 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
 async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
     for (answered, code, message) in [
         (
-            "CONFLICT: the agent was not created or started: agents.json could not be read just now",
+            "CONFLICT: the agent was not created or started: agent-profiles.json could not be read just now",
             ErrorCode::Conflict,
-            "the agent was not created or started: agents.json could not be read just now",
+            "the agent was not created or started: agent-profiles.json could not be read just now",
         ),
         (
-            "INTERNAL: the agent was not created or started: writing agents.json failed: disk full",
+            "INTERNAL: the agent was not created or started: writing agent-profiles.json failed: disk full",
             ErrorCode::Internal,
-            "the agent was not created or started: writing agents.json failed: disk full",
+            "the agent was not created or started: writing agent-profiles.json failed: disk full",
         ),
         (
             "the backend field is empty",
@@ -4060,7 +4083,7 @@ async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
                 .expect("the spawn request comes")
                 .expect("the spawn request comes");
         answer
-            .send(Err(answered.to_string()))
+            .send(Err(answered.to_string().into()))
             .expect("puts in the spawn answer");
 
         world.mail.settle(1).await;
@@ -4074,7 +4097,255 @@ async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
     }
 }
 
-/// This door skips the common registration part of `agent.new`, so the same spelling rules are measured here: backend words by the wire enum (`AgentBackendKind`), cwd by `normalize_spelling`.
+/// A started agent with no notices — the reply the spawn fakes give unless a test needs more.
+fn started(agent: &str) -> SpawnedAgent {
+    SpawnedAgent {
+        id: agent.to_string(),
+        notices: Vec::new(),
+    }
+}
+
+/// Puts one `agent.spawnInto` (a new tab in main) through the real-runtime table and answers its spawn with `answer`.
+async fn spawn_answered(answer: Result<SpawnedAgent, SpawnRefusal>) -> (World, CommandReply) {
+    spawn_answered_with(
+        json!({ "window": MAIN_WINDOW_LABEL, "cwd": "C:/work/engram", "backend": "claude" }),
+        answer,
+    )
+    .await
+}
+
+/// [`spawn_answered`] with the call's arguments given.
+async fn spawn_answered_with(
+    args: serde_json::Value,
+    answer: Result<SpawnedAgent, SpawnRefusal>,
+) -> (World, CommandReply) {
+    let (mut world, ports) = World::build();
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+    let request_id = RequestId::new();
+    receiver.on_command(
+        envelope("agent.spawnInto", args, request_id),
+        world.mail.sink(request_id),
+    );
+    let (_cwd, _backend, reply) =
+        tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
+            .await
+            .expect("the spawn request comes")
+            .expect("the spawn request comes");
+    reply.send(answer).expect("puts in the spawn answer");
+    world.mail.settle(1).await;
+    let reply = world.mail.only();
+    (world, reply)
+}
+
+/// The success answer carries the spawn's launch notices as declared rows — `[]` when the daemon sent none, and a row
+/// that does not decode is dropped rather than failing the answer (TRD S25 step 20 §4-3). A row is the bus
+/// `agent.spawn` row exactly: `"line": null` when the notice names no line, and nulls inside `args` kept.
+// ADR-0348
+#[tokio::test]
+async fn spawn_into_answers_with_the_launch_notices_of_the_spawn() {
+    let (_world, reply) = spawn_answered(Ok(started("agent-1"))).await;
+    let ok = reply.outcome.expect("placement succeeds");
+    assert_eq!(
+        ok["notices"],
+        json!([]),
+        "none sent = an empty list, not absent"
+    );
+
+    let row = json!({ "code": "skipped-field", "args": { "field": "model", "value": null }, "line": 4, "text": "model is not passed" });
+    let no_line = json!({ "code": "c2", "args": {}, "text": "t2" });
+    let (_world, reply) = spawn_answered(Ok(SpawnedAgent {
+        id: "agent-1".to_string(),
+        notices: vec![row.clone(), json!({ "code": 7 }), no_line],
+    }))
+    .await;
+    let ok = reply.outcome.expect("placement succeeds");
+    assert_eq!(
+        ok["notices"],
+        json!([row, { "code": "c2", "args": {}, "line": null, "text": "t2" }])
+    );
+    assert!(
+        ok["layout"]
+            .as_array()
+            .expect("layout rows")
+            .iter()
+            .all(|row| row
+                .as_object()
+                .expect("a row")
+                .values()
+                .all(|v| !v.is_null())),
+        "layout rows still drop their null id fields: {ok}"
+    );
+}
+
+/// A daemon refusal answers with its structured part as `args` (TRD S25 step 20 §4-3 · ADR-0348):
+/// - a block before the add: `CONFLICT` with the reasons and no `agent_id` (nothing was created);
+/// - created but not started: the `INTERNAL:` prefix becomes the code and `args.agent_id` names the asleep agent — plus
+///   the reasons when a block after the add stopped it;
+/// - an `INTERNAL:` with no created agent (a store write failure before the add) carries no `args`.
+///
+/// A created-asleep text gains a clause that the agent was not placed. The `--at` form answers the same way
+/// (`SpawnAtError::Failed` → the same mapping).
+#[tokio::test]
+async fn spawn_into_answers_a_daemon_refusal_with_its_reasons_and_created_agent() {
+    let reasons = json!({ "reasons": [{
+        "kind": "missing", "item": "C:/gone", "via": [],
+        "code": "not-found", "args": { "path": "C:/gone" }, "line": 3,
+    }] });
+    // The WS text of a block before the add: `LaunchBlocked`'s `Display`, no code prefix (daemon
+    //   `connection_core::activation_error` → `profile_error_text`).
+    let blocked_text = "launch blocked: not found C:/gone (not-found)";
+    let asleep = uuid::Uuid::new_v4();
+    let not_placed = format!(
+        " — it was not placed in a slot either: once it runs, place it with layout.setSlotContent <slot> --content Agent --assign {asleep}"
+    );
+    let refusal = |message: &str, blocked: bool, created: bool| SpawnRefusal {
+        message: message.to_string(),
+        launch_blocked: blocked.then(|| reasons.as_object().cloned().expect("an object")),
+        created_agent_id: created.then_some(asleep),
+        live_agent_id: None,
+        notices: Vec::new(),
+    };
+    let mut reasons_and_id = reasons.clone();
+    reasons_and_id["agent_id"] = json!(asleep.to_string());
+    let new_tab =
+        json!({ "window": MAIN_WINDOW_LABEL, "cwd": "C:/work/engram", "backend": "claude" });
+    let at = json!({ "window": MAIN_WINDOW_LABEL, "at": "top-left", "cwd": "C:/work/engram", "backend": "claude" });
+    for (call, answered, code, message, args) in [
+        (
+            &new_tab,
+            refusal(blocked_text, true, false),
+            ErrorCode::Conflict,
+            blocked_text.to_string(),
+            Some(reasons.clone()),
+        ),
+        (
+            &new_tab,
+            refusal(&format!("INTERNAL: agent 'a' ({asleep}) was created but did not start: boom"), false, true),
+            ErrorCode::Internal,
+            format!("agent 'a' ({asleep}) was created but did not start: boom{not_placed}"),
+            Some(json!({ "agent_id": asleep.to_string() })),
+        ),
+        (
+            &new_tab,
+            refusal(&format!("INTERNAL: agent 'a' ({asleep}) was created but did not start: blocked"), true, true),
+            ErrorCode::Internal,
+            format!("agent 'a' ({asleep}) was created but did not start: blocked{not_placed}"),
+            Some(reasons_and_id.clone()),
+        ),
+        (
+            &new_tab,
+            refusal("INTERNAL: the agent was not created or started: writing agent-profiles.json failed", false, false),
+            ErrorCode::Internal,
+            "the agent was not created or started: writing agent-profiles.json failed".to_string(),
+            None,
+        ),
+        (
+            &at,
+            refusal(&format!("INTERNAL: agent 'a' ({asleep}) was created but did not start: blocked"), true, true),
+            ErrorCode::Internal,
+            format!("agent 'a' ({asleep}) was created but did not start: blocked{not_placed}"),
+            Some(reasons_and_id.clone()),
+        ),
+        (
+            &at,
+            refusal(blocked_text, true, false),
+            ErrorCode::Conflict,
+            blocked_text.to_string(),
+            Some(reasons.clone()),
+        ),
+    ] {
+        let said = format!("{} · {call}", answered.message);
+        let (world, reply) = spawn_answered_with(call.clone(), Err(answered)).await;
+        let err = reply.outcome.expect_err("the spawn failed");
+        assert_eq!(err.code(), code, "{said}");
+        assert_eq!(err.message(), message, "{said}");
+        assert_eq!(
+            err.args().cloned().map(serde_json::Value::Object),
+            args,
+            "{said}"
+        );
+        assert_eq!(world.main_tabs().tabs.len(), 1, "{said}: nothing placed");
+    }
+}
+
+/// A placement that fails after a spawn names the live agent (text and `args.agent_id`) and carries the spawn's notices
+/// as `args.notices` — the daemon may have recorded them as shown, so this is their only way to the caller (M11). They
+/// are the success answer's declared rows (`"line": null`, a row that does not decode dropped), and the text names
+/// real verbs.
+// ADR-0348
+#[tokio::test]
+async fn a_placement_failure_after_the_spawn_carries_its_notices() {
+    let (mut world, ports) = World::build();
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+    let tabs = world.main_tabs();
+    let view = tabs.active;
+    let slot = apply::get_view(&world.state, view)
+        .map(|snapshot| tree::first_empty_slot_id(&snapshot.layout).expect("an empty slot"))
+        .expect("tab");
+    let request_id = RequestId::new();
+    receiver.on_command(
+        envelope(
+            "agent.spawnInto",
+            json!({ "cwd": "C:/work", "backend": "claude", "view_id": view.to_string(), "slot_id": slot.to_string() }),
+            request_id,
+        ),
+        world.mail.sink(request_id),
+    );
+    let (_cwd, _backend, reply) =
+        tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
+            .await
+            .expect("the spawn request comes")
+            .expect("the spawn request comes");
+    // The slot fills while the spawn is in flight — the placement lock finds it occupied.
+    apply::assign_agent(
+        &world.state,
+        &Subs,
+        &*world.events,
+        view,
+        slot,
+        ALPHA.to_string(),
+    )
+    .expect("fill");
+    let notices = vec![
+        json!({ "code": "skipped-field", "args": {}, "text": "t" }),
+        json!({ "code": 7 }),
+    ];
+    reply
+        .send(Ok(SpawnedAgent {
+            id: "agent-1".to_string(),
+            notices,
+        }))
+        .expect("puts in the spawn answer");
+    world.mail.settle(1).await;
+
+    let err = world.mail.only().outcome.expect_err("placement fails");
+    assert_eq!(err.code(), ErrorCode::Conflict, "{}", err.message());
+    assert!(err.message().contains("agent-1"), "{}", err.message());
+    assert!(
+        err.message().contains("layout.setSlotContent") && !err.message().contains("list_agents"),
+        "{}",
+        err.message()
+    );
+    assert_eq!(
+        err.args().cloned().map(serde_json::Value::Object),
+        Some(json!({
+            "agent_id": "agent-1",
+            "notices": [{ "code": "skipped-field", "args": {}, "line": null, "text": "t" }],
+        }))
+    );
+}
+
+/// The shell settles the spelling before it sends (the daemon's creation body settles it again — `new_profile`), so it
+/// is measured here at the shell's side: the backend word by the wire enum's deserialization (`AgentBackendKind`), the
+/// cwd by base `normalize_spelling`.
 #[tokio::test]
 async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
     for (word, want) in [
@@ -4122,7 +4393,7 @@ async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
         );
         assert_eq!(backend, Some(want), "{word}: read as a different backend");
         answer
-            .send(Ok("agent-1".to_string()))
+            .send(Ok(started("agent-1")))
             .expect("puts in the spawn answer");
 
         world.mail.settle(1).await;
@@ -4893,6 +5164,79 @@ fn the_webview_deadline_fits_inside_the_daemon_seat() {
         !VIEW_HOP_MARGIN.is_zero(),
         "if the margin term is 0 the inequality becomes prose — a claim that the two daemon↔shell hops are free"
     );
+}
+
+// ── launch-wait chain pins (ADR-0369 · ADR-0360 decision 6) ─────────────────────────────────
+
+/// Pin 1: the shell's restated launch base and margin equal the daemon's re-exports of agent's values — a budget
+/// change in agent turns this red until the shell's restatement follows.
+#[test]
+fn the_shell_restates_the_daemons_launch_base_and_margin() {
+    use engram_dashboard_daemon::command_delivery as daemon;
+    use engram_dashboard_lib::daemon_client::{LAUNCH_MARGIN_SECS, LAUNCH_REPLY_BOUND_SECS};
+
+    assert_eq!(
+        Duration::from_secs(LAUNCH_REPLY_BOUND_SECS),
+        daemon::LAUNCH_REPLY_BOUND
+    );
+    assert_eq!(
+        Duration::from_secs(LAUNCH_MARGIN_SECS),
+        daemon::LAUNCH_MARGIN
+    );
+}
+
+/// Pin 2: every nested pair of the chain holds outer ≥ inner + margin — over the shell's derived wait and over the
+/// daemon's re-exports — and the shell's launch wait is the daemon's direct caller wait.
+#[test]
+fn every_launch_wait_fits_around_the_one_inside_it() {
+    use engram_dashboard_daemon::command_delivery as daemon;
+    use engram_dashboard_lib::daemon_client::{
+        LAUNCH_CALLER_WAIT, LAUNCH_MARGIN_SECS, LAUNCH_REPLY_BOUND_SECS,
+    };
+
+    let base = Duration::from_secs(LAUNCH_REPLY_BOUND_SECS);
+    let margin = Duration::from_secs(LAUNCH_MARGIN_SECS);
+    assert!(!margin.is_zero(), "a zero margin makes the order prose");
+    assert_eq!(LAUNCH_CALLER_WAIT, daemon::LAUNCH_CALLER_WAIT);
+    for (inner, outer, what) in [
+        (
+            base,
+            LAUNCH_CALLER_WAIT,
+            "shell launch wait around the launch",
+        ),
+        (
+            LAUNCH_CALLER_WAIT,
+            daemon::LAUNCH_RELAY_SEAT,
+            "relay seat around the shell's wait",
+        ),
+        (
+            daemon::LAUNCH_RELAY_SEAT,
+            daemon::LAUNCH_RELAY_CALLER_WAIT,
+            "CLI wait around the relay seat",
+        ),
+        (
+            daemon::LAUNCH_REPLY_BOUND,
+            daemon::LAUNCH_CALLER_WAIT,
+            "daemon: caller wait around the launch",
+        ),
+    ] {
+        assert!(
+            outer >= inner + margin,
+            "{what}: {outer:?} < {inner:?} + {margin:?}"
+        );
+    }
+}
+
+/// Pin 3: the shell's `agent.spawnInto` declaration carries the launch class, so the daemon seats its relay — and the
+/// CLI waits for it — by the launch budget.
+#[test]
+fn agent_spawn_into_is_declared_with_the_launch_deadline() {
+    use engram_dashboard_command::DeadlineClass;
+    let spec = COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.name == "agent.spawnInto")
+        .expect("declared");
+    assert_eq!(spec.deadline, DeadlineClass::Launch);
 }
 
 /// A number already running is not sent — covering it silently would run the side effect twice and attach the old outcome to the new attempt. The inequality above prevents this, but there must be two nets.
@@ -6655,11 +6999,11 @@ async fn slot_verbs_by_agent_or_spatial_word_change_that_slot_and_answer_its_tab
         &receiver,
         &queue,
         "layout.setSlotContent",
-        json!({ "slot_id": below.to_string(), "content": "PresetPalette" }),
+        json!({ "slot_id": below.to_string(), "content": "AgentList" }),
     )
     .await;
-    assert_eq!(world.content(a, below), Some(SlotContent::PresetPalette));
-    assert_eq!(rows(&answer, "layout")[2]["content"], "PresetPalette");
+    assert_eq!(world.content(a, below), Some(SlotContent::AgentList));
+    assert_eq!(rows(&answer, "layout")[2]["content"], "AgentList");
 
     let answer = ok_of(
         &receiver,
@@ -7214,7 +7558,9 @@ async fn spawn_reply(
                 .await
                 .expect("the spawn request comes")
                 .expect("the spawn request comes");
-        answer.send(Ok(agent)).expect("puts in the spawn answer");
+        answer
+            .send(Ok(started(&agent)))
+            .expect("puts in the spawn answer");
     }
     world.mail.settle(1).await;
     world.mail.only()

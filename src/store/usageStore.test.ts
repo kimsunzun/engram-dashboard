@@ -304,7 +304,6 @@ describe('eventBus — broadcast hookup first, pull later', () => {
       onStatusChanged: off,
       onRestoreResult: off,
       onProfileListUpdated: off,
-      onPresetListUpdated: off,
       onConnectionStateChange: (cb: (s: ConnectionState) => void) => {
         cb('connected')
         return () => {}
@@ -394,7 +393,6 @@ describe('eventBus — broadcast hookup first, pull later', () => {
       ...rec.client,
       getAgents: vi.fn(async () => []),
       listProfiles: vi.fn(async () => []),
-      listPresets: vi.fn(async () => []),
       onConnectionStateChange: (cb: (s: ConnectionState) => void) => {
         stateCb = cb
         cb('connected')

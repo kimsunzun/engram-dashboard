@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use engram_dashboard_command::{CommandEnvelope, CommandTable, OwnerToken};
 use engram_dashboard_protocol::{
-    AgentBackendKind, AgentEvent, AgentId, AgentInfo, AgentProfile, AgentStatus, Preset,
-    RestoreReport, UsageLimitSnapshot, UsageVendorState,
+    AgentBackendKind, AgentEvent, AgentId, AgentInfo, AgentProfile, AgentStatus, RestoreReport,
+    UsageLimitSnapshot, UsageVendorState,
 };
 
 use super::events::DaemonEvents;
@@ -20,7 +20,8 @@ use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
 use crate::layout::window_ctl::{Activation, Applied, OsWindowState, WindowAction, WindowControl};
 use crate::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, SlotContent, SpareClaim,
-    ViewManager, ViewSnapshot, WindowHost, WindowPlace, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    SpawnRefusal, SpawnedAgent, ViewManager, ViewSnapshot, WindowHost, WindowPlace,
+    WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
@@ -121,10 +122,6 @@ impl DaemonEvents for RecordingEvents {
 
     fn profile_list_updated(&self, profiles: &[AgentProfile]) {
         self.record(format!("profile_list:{}", profiles.len()));
-    }
-
-    fn preset_list_updated(&self, presets: &[Preset]) {
-        self.record(format!("preset_list:{}", presets.len()));
     }
 
     fn usage_limits_updated(
@@ -300,8 +297,9 @@ impl AgentSpawner for NoSpawner {
         &'a self,
         _cwd: String,
         _backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
-        Box::pin(async { Err("this test does not spawn".to_string()) })
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>>
+    {
+        Box::pin(async { Err("this test does not spawn".to_string().into()) })
     }
 }
 

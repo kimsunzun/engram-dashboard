@@ -22,7 +22,6 @@ use engram_dashboard_agent::types::{
 
 use mcp_config::MCP_SERVER_NAME;
 use mcp_server::SEND_MESSAGE_TOOL;
-use priming::PrimingProvider;
 use registry::ControlRegistry;
 
 pub struct DaemonControlChannel {
@@ -30,7 +29,6 @@ pub struct DaemonControlChannel {
     mcp_url: String,
     mcp_dir: mcp_config::McpDir,
     send_exe: Option<PathBuf>,
-    priming: Arc<dyn PrimingProvider>,
 }
 
 impl DaemonControlChannel {
@@ -39,14 +37,12 @@ impl DaemonControlChannel {
         mcp_url: String,
         mcp_dir: mcp_config::McpDir,
         send_exe: Option<PathBuf>,
-        priming: Arc<dyn PrimingProvider>,
     ) -> Self {
         Self {
             registry,
             mcp_url,
             mcp_dir,
             send_exe,
-            priming,
         }
     }
 
@@ -79,8 +75,11 @@ impl DaemonControlChannel {
         }
         // exe is not derived from send_exe: the grant string must equal the bare command name character for character (`CLI_EXE_NAME`, the source of truth);
         //   send_exe decides only whether the CLI entrance exists (an absolute path would not match a bare-name call — ADR-0098).
-        // No priming teaches this branch's grant: a non-MCP spawn gets no mail teaching (provision's `wants_priming`). It still emits the grant because `mail_allowed`
-        //   authorizes CLI mail for that spawn — diverging, the permission list would block requests the daemon accepts.
+        // ★No priming teaches this branch's grant★: the CLI mirror priming is gone, and a non-MCP spawn gets no priming
+        //   at all — only a backend with a settings check gets real launch materials, and Noop kits carry none
+        //   (ADR-0370). The grant is still emitted because `mail_allowed` **authorizes** CLI mail for that
+        //   spawn — if authorization and grant diverge, the permission list blocks a request the daemon would accept.
+        //   The "taught name == grant name" alignment does not hold here.
         // Known unmet (intentional, awaiting a user decision): since ADR-0133 priming A teaches MCP-capable spawns the bare `engram`, but this branch emits no CLI
         //   grant, so "taught name == grant name" is broken only here. Harmless while spawns run under `--permission-mode bypassPermissions` (the grant is a NO-OP,
         //   ADR-0097); reopening the grant axis is a user decision. Do not delete this sentence and read the alignment as holding — if the base flag is withdrawn this branch breaks first.
@@ -96,10 +95,14 @@ impl DaemonControlChannel {
 
     /// A harness knob (`ENGRAM_FORCE_CLI_ONLY_SEND`) that forces spawns to non-MCP to measure the entire false path.
     ///
-    /// Production builds do not compile it (`const fn false`): it flips the channel wiring, the priming variant and even `mail_allowed`, so a release binary
-    /// letting one env variable change the authorization would let an agent edit its own env to move the daemon's decision. `test-harness` is a
-    /// self-dev-dependency, so it is not unified into the production dep graph — the condition that breaks that (`--all-targets`, which would bake the knob into
-    /// a release binary) is in the Cargo.toml `[dev-dependencies]` comment.
+    /// ★Release builds do not compile this knob at all (`const fn false`)★: it flips not only the channel's physical
+    ///   wiring but **the mail authorization (`mail_allowed`)** too — so if a release binary let one environment
+    ///   variable change the authorization, an agent could move the daemon's decision by editing its own env, and
+    ///   that is the enforcement itself. It does not touch priming (the launch materials carry it — ADR-0370).
+    ///   `test-harness` is turned on only through the self-dev-dependency, so it is not unified into the release dep
+    ///   graph — **the canonical note for that non-unification and the condition that breaks it (`--all-targets`) is
+    ///   the self-dev-dependency comment in Cargo.toml `[dev-dependencies]`** (a release built with `--all-targets`
+    ///   bakes this knob into the binary).
     /// Only the unit tests below turn it on; the non-MCP branch itself is alive (codex · gemini have that shape) and this is the only means to step on it with claude.
     // ADR-0133
     #[cfg(feature = "test-harness")]
@@ -136,8 +139,7 @@ impl ControlChannel for DaemonControlChannel {
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         let token = Self::gen_token()
             .ok_or_else(|| ProvisionError("CSPRNG token generation failed".to_string()))?;
-        // A spawn with this knob on gets no priming: `wants_priming` cuts the non-MCP branch first, so even the `ENGRAM_PRIMING_FILE` override carries no MCP teaching
-        //   (the old "teaching=MCP · physics=CLI" combination cannot form). In production `force_cli_only()` is const false, so the expression is `accepts_mcp_config`.
+        // In production `force_cli_only()` is const false, so the expression below is `accepts_mcp_config`.
         let force_cli_only = Self::force_cli_only();
         let accepts_mcp_config = needs.accepts_mcp_config && !force_cli_only;
         // The knob turns this field off too ("the entire false path"): leaving the file would leave an MCP credential on disk for a spawn the harness believes is non-MCP.
@@ -162,38 +164,18 @@ impl ControlChannel for DaemonControlChannel {
         //   Do not move the `mail_allowed` line above to this field — that derivation stays with `accepts_mcp_config` (ADR-0133 decision 2); what split is whether to write a secret to disk.
         // ADR-0099
         // ADR-0209
-        let (config_path, settings_file) = if writes_mcp_config_file {
+        // ADR-0370: the control channel writes no settings fragment and hands out no priming file — the launch
+        //   materials carry both.
+        let config_path = if writes_mcp_config_file {
             let path = mcp_config::write_config(&self.mcp_dir, id, epoch, &self.mcp_url, &token)
                 .map_err(|e| {
                     tracing::warn!(agent = %id, epoch, "mcp-config write failed — fail-closed (spawn aborted): {e}");
                     ProvisionError(format!("mcp-config write failed: {e}"))
                 })?;
-            // A write failure of this fragment is not fatal (unlike mcp-config; load-bearing): without mcp-config the MCP channel physically disappears, but this fragment only
-            //   overrides a user-global block, so things work if the global setting allows. Blocking the spawn would be a regression; it warns and proceeds without the fragment.
-            let settings = match mcp_config::write_settings(&self.mcp_dir, id, epoch) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    tracing::warn!(
-                        agent = %id, epoch,
-                        "session settings fragment write failed — spawning without the fragment (if the global allowedMcpServers blocks it, the engram tools may not be visible): {e}"
-                    );
-                    None
-                }
-            };
-            (Some(path), settings)
+            Some(path)
         } else {
-            (None, None)
+            None
         };
-        // Priming goes only to spawns that really use MCP mail: the one remaining priming file teaches `eg_send` (ADR-0126 decision 1), and carrying it to a spawn
-        //   without that tool records "taught" while the agent calls a nonexistent tool (the send freeze ADR-0099 measured). Hence both axes must be true together.
-        //   The CLI mirror variant is gone — do not fill that place with A (user decision 2026-09-19): a non-MCP spawn gets no priming; the mail CLI is a mirror, the
-        //   canonical path is attaching MCP to that backend (ADR-0209 decision 3). Silence is not a lie; teaching a nonexistent tool is.
-        // ADR-0092
-        // ADR-0099
-        // ADR-0126
-        // ADR-0133
-        // ADR-0209
-        let wants_priming = needs.uses_mail && accepts_mcp_config;
         tracing::debug!(
             agent = %id,
             epoch,
@@ -201,7 +183,6 @@ impl ControlChannel for DaemonControlChannel {
             writes_mcp_config_file,
             uses_mail = needs.uses_mail,
             force_cli_only,
-            wants_priming,
             has_mcp_config = config_path.is_some(),
             "control channel provision fork (ADR-0099 channel switch)"
         );
@@ -235,7 +216,6 @@ impl ControlChannel for DaemonControlChannel {
         }
         // The enforcement is this one line — the endpoint's same field is only a record nobody reads (that field's doc).
         self.registry.issue(id, epoch, token.clone(), mail_allowed);
-        let priming_file = wants_priming.then(|| self.priming.priming_file()).flatten();
         let grants = Self::build_grants(self.send_exe.as_deref(), needs);
         Ok(Some(ControlEndpoint {
             agent_id: id,
@@ -245,9 +225,7 @@ impl ControlChannel for DaemonControlChannel {
             config_path,
             // Both branches get the same value — the control CLI is laid down for everyone (ADR-0132 decision 5 · ADR-0133).
             send_exe: self.send_exe.clone(),
-            priming_file,
             grants,
-            settings_file,
             mail_allowed,
         }))
     }
@@ -255,7 +233,6 @@ impl ControlChannel for DaemonControlChannel {
     fn revoke(&self, id: AgentId, epoch: u32) {
         self.registry.revoke(id, epoch);
         mcp_config::remove_config(&self.mcp_dir, id, epoch);
-        mcp_config::remove_settings(&self.mcp_dir, id, epoch);
     }
 }
 
@@ -436,25 +413,11 @@ mod tests {
         );
     }
 
-    // ── ADR-0099: provision branch — the channel wiring and whether priming is loaded move together with MCP-capability ──────
-    //   (not a variant axis — since commit `2ef6902` the non-MCP branch gets no priming at all, ADR-0209).
+    // ── ADR-0099: provision branch — the channel wiring moves with MCP-capability ──────────────────────
 
-    use crate::control::priming::PrimingProvider;
-    use std::sync::{Arc, Mutex};
-
-    /// Records whether the seam was called: with the variant axis gone, provision decides "whether to ask" (ADR-0209 · user decision 2026-09-19), and `ep.priming_file` alone cannot be told from "the provider gave None".
-    struct RecordingPriming {
-        seen: Arc<Mutex<bool>>,
-    }
-    impl PrimingProvider for RecordingPriming {
-        fn priming_file(&self) -> Option<PathBuf> {
-            *self.seen.lock().unwrap() = true;
-            Some(PathBuf::from("A-mcp-primary"))
-        }
-    }
+    use std::sync::Arc;
 
     fn provision_test_channel_with_send(
-        seen: Arc<Mutex<bool>>,
         send_exe: Option<PathBuf>,
     ) -> (DaemonControlChannel, PathBuf) {
         let data_dir =
@@ -464,18 +427,19 @@ mod tests {
             "http://127.0.0.1:1/mcp".to_string(),
             mcp_config::McpDir::new(data_dir.join("mcp-config")),
             send_exe,
-            Arc::new(RecordingPriming { seen }),
         );
         (channel, data_dir)
     }
 
+    /// The mcp-config is the only file a provision writes — no settings fragment beside it (ADR-0370) — and revoke
+    /// removes it.
+    // ADR-0370
     #[test]
-    fn provision_mcp_capable_writes_config_and_picks_mcp_primary_priming() {
+    fn provision_mcp_capable_writes_only_the_config_and_revoke_removes_it() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
+            provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, needs(true))
@@ -489,41 +453,23 @@ mod tests {
             cfg.is_file(),
             "MCP-capable → the mcp-config file physically exists"
         );
-        assert!(
-            *seen.lock().unwrap(),
-            "MCP-capable → must ask the priming seam"
-        );
-        assert_eq!(ep.priming_file, Some(PathBuf::from("A-mcp-primary")));
-        let settings = ep
-            .settings_file
-            .as_ref()
-            .expect("MCP-capable → settings_file Some");
-        assert!(
-            settings.is_file(),
-            "the settings fragment file physically exists"
-        );
-        let content = std::fs::read_to_string(settings).expect("read settings");
-        assert!(
-            content.contains("allowedMcpServers") && content.contains(MCP_SERVER_NAME),
-            "the fragment must allow the engram server: {content}"
-        );
+        let written: Vec<_> = std::fs::read_dir(data_dir.join("mcp-config"))
+            .expect("the mcp-config folder")
+            .map(|e| e.expect("entry").path())
+            .collect();
+        assert_eq!(written, [cfg.clone()], "a file beside the mcp-config");
         channel.revoke(id, 0);
-        assert!(
-            !settings.exists(),
-            "the settings fragment is deleted on revoke"
-        );
         assert!(!cfg.exists(), "mcp-config is deleted on revoke");
         channel.revoke(id, 0); // a double revoke is safe.
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]
-    fn provision_non_mcp_skips_config_and_injects_no_priming() {
+    fn provision_non_mcp_skips_config() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
+            provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, needs(false))
@@ -536,18 +482,6 @@ mod tests {
         assert!(
             !data_dir.join("mcp-config").exists(),
             "non-MCP → the mcp-config file must be physically absent"
-        );
-        assert_eq!(
-            ep.settings_file, None,
-            "non-MCP → settings_file is None too (consistency invariant: laid channel == allowed channel)"
-        );
-        assert!(
-            !*seen.lock().unwrap(),
-            "non-MCP → must not ask the priming seam at all (the remaining file teaches only the MCP tool)"
-        );
-        assert_eq!(
-            ep.priming_file, None,
-            "non-MCP → priming not injected (silence rather than teaching a tool that does not exist — ADR-0209 decision 3)"
         );
         assert_eq!(
             ep.grants,
@@ -564,8 +498,7 @@ mod tests {
     fn provision_non_mcp_with_no_send_exe_fails_closed() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
-        let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
+        let (channel, data_dir) = provision_test_channel_with_send(None);
         let id = AgentId::new_v4();
         let err = channel
             .provision(id, 0, needs(false))
@@ -587,11 +520,8 @@ mod tests {
     fn provision_mcp_capable_fails_closed_when_config_write_fails() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
-        let (channel, data_dir) = provision_test_channel_with_send(
-            seen.clone(),
-            Some(PathBuf::from("C:/app/engram.exe")),
-        );
+        let (channel, data_dir) =
+            provision_test_channel_with_send(Some(PathBuf::from("C:/app/engram.exe")));
         let id = AgentId::new_v4();
         let cfg_dir =
             mcp_config::config_path(&mcp_config::McpDir::new(data_dir.join("mcp-config")), id, 0)
@@ -609,10 +539,6 @@ mod tests {
             "the ProvisionError reason states the cause: {}",
             err.0
         );
-        assert!(
-            !*seen.lock().unwrap(),
-            "if fail-closed, it does not reach the priming seam (no half provision)"
-        );
         let _ = std::fs::remove_file(&cfg_dir);
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -621,8 +547,7 @@ mod tests {
     fn provision_mcp_capable_with_no_send_exe_is_allowed() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
-        let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
+        let (channel, data_dir) = provision_test_channel_with_send(None);
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, needs(true))
@@ -677,9 +602,8 @@ mod tests {
                 true,
             ),
         ] {
-            let seen = Arc::new(Mutex::new(false));
             let (channel, data_dir) =
-                provision_test_channel_with_send(seen, Some(PathBuf::from(CLI_EXE_NAME)));
+                provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
             let needs = ControlChannelNeeds {
                 accepts_mcp_config: accepts_mcp_config(&command),
                 writes_mcp_config_file: writes_mcp_config_file(&command),
@@ -707,18 +631,10 @@ mod tests {
                         .contains(&ep.token),
                     "{name}: what that file carries must be this spawn's token"
                 );
-                assert!(
-                    ep.settings_file.as_ref().is_some_and(|p| p.is_file()),
-                    "{name}: the session settings fragment too"
-                );
             } else {
                 assert_eq!(
                     ep.config_path, None,
                     "{name}: must not put the path of a file it does not read in the endpoint"
-                );
-                assert_eq!(
-                    ep.settings_file, None,
-                    "{name}: the same for the settings fragment"
                 );
                 // Measuring by the folder's absence: `config_path` alone cannot catch a regression that keeps the write and hides the path (the secret stays on disk).
                 assert!(
@@ -768,16 +684,15 @@ mod tests {
                     PathBuf::from("."),
                     vec![],
                     Some(ep),
+                    &engram_dashboard_agent::launch::LaunchArtifacts::default(),
                 )
                 .args
                 .iter()
                 .any(|a| a.contains("mcp_servers."))
         };
 
-        let (channel, data_dir) = provision_test_channel_with_send(
-            Arc::new(Mutex::new(false)),
-            Some(PathBuf::from(CLI_EXE_NAME)),
-        );
+        let (channel, data_dir) =
+            provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
 
         let on = channel
             .provision(AgentId::new_v4(), 0, needs)
@@ -816,6 +731,7 @@ mod tests {
         profile_env: Vec<(String, String)>,
     ) -> engram_dashboard_agent::types::CommandSpec {
         use engram_dashboard_agent::backend::{AgentBackend, ClaudeBackend};
+        use engram_dashboard_agent::launch::LaunchArtifacts;
         use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
         ClaudeBackend.build_spec(
             &AgentCommand::Claude {
@@ -828,6 +744,7 @@ mod tests {
             PathBuf::from("."),
             profile_env,
             Some(ep),
+            &LaunchArtifacts::default(),
         )
     }
 
@@ -836,20 +753,14 @@ mod tests {
     fn provision_mcp_capable_wires_the_cli_and_withholds_mail() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
         // Must be an absolute path — the parent directory is the PATH prepend target; a bare name has no parent and the PATH injection assertion fails.
         let send_exe = PathBuf::from("C:/app/engram.exe");
-        let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
+        let (channel, data_dir) = provision_test_channel_with_send(Some(send_exe.clone()));
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, needs(true))
             .expect("provision ok")
             .expect("endpoint");
-        assert!(
-            *seen.lock().unwrap(),
-            "this guard means something only for the MCP-capable branch (priming A)"
-        );
         assert_eq!(ep.send_exe.as_deref(), Some(send_exe.as_path()));
         assert!(
             !ep.mail_allowed,
@@ -887,19 +798,13 @@ mod tests {
     fn provision_non_mcp_wires_the_same_cli_and_allows_mail() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
         let send_exe = PathBuf::from("C:/app/engram.exe");
-        let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
+        let (channel, data_dir) = provision_test_channel_with_send(Some(send_exe.clone()));
         let id = AgentId::new_v4();
         let ep = channel
             .provision(id, 0, needs(false))
             .expect("provision ok")
             .expect("endpoint");
-        assert!(
-            !*seen.lock().unwrap(),
-            "this guard means something only for the non-MCP branch (no priming injected)"
-        );
         assert!(
             ep.mail_allowed,
             "a non-MCP spawn's mail entrance is the CLI"
@@ -978,10 +883,9 @@ mod tests {
 
         let _g = lock_env();
         let lines: Arc<StdMutex<Vec<String>>> = Arc::default();
-        let seen = Arc::new(Mutex::new(false));
         // send_exe=None + MCP-capable = a deployment that could not find the sibling exe. Non-MCP is fail-closed here and does not reach this
         //   (`provision_non_mcp_with_no_send_exe_fails_closed` above).
-        let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
+        let (channel, data_dir) = provision_test_channel_with_send(None);
         let id = AgentId::new_v4();
         let ep = subscriber::with_default(
             WarnCollector {
@@ -1021,9 +925,6 @@ mod tests {
                 "http://127.0.0.1:1/mcp".to_string(),
                 mcp_config::McpDir::new(data_dir.join("mcp-config")),
                 Some(PathBuf::from(CLI_EXE_NAME)),
-                Arc::new(RecordingPriming {
-                    seen: Arc::new(Mutex::new(false)),
-                }),
             );
             let id = AgentId::new_v4();
             let ep = channel
@@ -1057,10 +958,9 @@ mod tests {
             std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err(),
             "both envs must be unset on entering the test (leak detection — provision reads both)"
         );
-        let seen = Arc::new(Mutex::new(false));
         // Turn send_exe on — the seam makes the spawn CLI-only, so without a CLI entrance it hits the fail-closed edge.
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
+            provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "1");
         let id = AgentId::new_v4();
         let result = channel.provision(id, 0, needs(true));
@@ -1073,10 +973,6 @@ mod tests {
         assert!(
             !data_dir.join("mcp-config").exists(),
             "seam on → the mcp-config file is physically absent"
-        );
-        assert!(
-            !*seen.lock().unwrap(),
-            "seam on → the same branch as non-MCP, so it does not ask for priming"
         );
         assert_eq!(
             ep.grants,
@@ -1093,9 +989,8 @@ mod tests {
     fn provision_force_cli_only_empty_value_is_inert() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
+            provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "");
         let id = AgentId::new_v4();
         let result = channel.provision(id, 0, needs(true));
@@ -1104,10 +999,6 @@ mod tests {
         assert!(
             ep.config_path.is_some(),
             "empty value = seam not triggered → MCP-capable today's behavior (config Some)"
-        );
-        assert!(
-            *seen.lock().unwrap(),
-            "empty value → priming seam called (today's behavior)"
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -1120,9 +1011,8 @@ mod tests {
     fn the_forcing_knob_moves_the_mail_verdict_too_which_is_why_it_is_gated() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
-            provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
+            provision_test_channel_with_send(Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "1");
         let id = AgentId::new_v4();
         let result = channel.provision(id, 0, needs(true));

@@ -7,8 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -31,7 +30,6 @@ use engram_dashboard_daemon::control::mcp_config;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_without_help, CommandTableSlot, ManagerSlot, MessagingSlot,
 };
-use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
@@ -86,7 +84,6 @@ async fn make_manager_with_control(
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: the tests in this file do not use the CLI entry.
-        Arc::new(NoopPrimingProvider),
     ));
 
     let (manager, registry, data_dir, handle) =
@@ -139,10 +136,6 @@ fn make_manager_with_injected(
         std::env::temp_dir().join(format!("engram-mcp-mgr-prof-{tag}-{}", AgentId::new_v4())),
     ));
     let profiles = Arc::new(ProfileRegistry::new(profile_store));
-    let preset_store = Arc::new(FilePresetStore::new(
-        std::env::temp_dir().join(format!("engram-mcp-mgr-preset-{tag}-{}", AgentId::new_v4())),
-    ));
-    let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
             enabled: false,
@@ -150,7 +143,7 @@ fn make_manager_with_injected(
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = AgentManager::new_with_control(sink, profiles, presets, tracker, control);
+    let manager = AgentManager::new_with_control(sink, profiles, tracker, control);
 
     (manager, registry, data_dir, handle)
 }
@@ -267,7 +260,6 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None,
-        Arc::new(NoopPrimingProvider),
     );
     let id = AgentId::new_v4();
 

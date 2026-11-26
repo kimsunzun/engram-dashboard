@@ -79,6 +79,7 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend::{
     AgentBackend, ClaudeBackend, CodexBackend, InputEncoder, TransportShape, SUBMIT_PACING,
 };
+use engram_dashboard_agent::launch::LaunchArtifacts;
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use engram_dashboard_agent::transport::pty::PtyTransport;
@@ -700,8 +701,11 @@ const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// Budget for getting past the startup screen (loading · modal) until the composer takes keys; probes repeat within it. ★Not a hard cap★ —
 ///   checked only at the head of each round, and a started round (probe windows · waiting for quiet · post-CR trust-record wait) runs to
 ///   its end,
-/// so a run can overrun (~54 s observed).
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
+/// so a run can overrun (~54 s observed with the 45 s budget).
+/// 120 s, not 45 s: codex 0.167 starts its background app server before the composer, and with several real codex PTYs starting
+/// together the screen stayed on "loading" past 45 s on the baseline too (S25 P4 QA, 2026-11-12). A codex that exits on its own
+/// app-server timeout still fails here — a longer wait does not hide that.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 /// Window in which one probe waits for its echo, and then for the idle
 /// hint to reappear. Missing it is not a failure, just the next probe.
 const PROBE_WINDOW: Duration = Duration::from_secs(2);
@@ -832,6 +836,7 @@ fn production_spec(
         cwd.to_path_buf(),
         env.to_vec(),
         None,
+        &LaunchArtifacts::default(),
     )
 }
 

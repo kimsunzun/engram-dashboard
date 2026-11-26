@@ -27,7 +27,7 @@
 // ADR-0226
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use engram_dashboard_base::sync;
 
@@ -41,6 +41,10 @@ pub(crate) struct SessionIdLatch {
     commit: SessionIdSink,
     settled: AtomicBool,
     state: Mutex<LatchState>,
+    /// The argument of the first [`Self::first_turn_sink`] call — whether that echo delivered the instructions. Later
+    /// calls do not change it. `None` = the port has not been called.
+    // ADR-0337
+    first_turn_delivered: OnceLock<bool>,
 }
 
 #[derive(Default)]
@@ -64,6 +68,7 @@ impl SessionIdLatch {
             commit,
             settled: AtomicBool::new(false),
             state: Mutex::new(LatchState::default()),
+            first_turn_delivered: OnceLock::new(),
         })
     }
 
@@ -76,10 +81,21 @@ impl SessionIdLatch {
     ///
     /// The session does not count submissions there: counting a first input that can still be withdrawn with ✕ would persist an id with no
     ///   conversation. The path calls this at the echo of the peer's first user message.
+    /// The argument (whether the instructions were delivered — [`FirstTurnSink`]) does not change the commit; the first
+    ///   call's value is kept ([`Self::first_turn_delivered`]).
     // ADR-0226 · ADR-0231 · ADR-0233: the id is persisted when it becomes real (the conversation has a turn = the first echo).
     pub(crate) fn first_turn_sink(self: &Arc<Self>) -> FirstTurnSink {
         let latch = Arc::clone(self);
-        Arc::new(move || latch.note_submission())
+        Arc::new(move |delivered: bool| {
+            // `Err` = an earlier call already set it — the first value is the one kept.
+            let _ = latch.first_turn_delivered.set(delivered);
+            latch.note_submission();
+        })
+    }
+
+    /// The first first-turn report — `None` = not reported yet.
+    pub(crate) fn first_turn_delivered(&self) -> Option<bool> {
+        self.first_turn_delivered.get().copied()
     }
 
     pub(crate) fn offer(&self, raw: &str) {
@@ -185,22 +201,27 @@ mod tests {
     }
 
     /// The first-turn port (`first_turn_sink`) is the same submission input — the mode where the path carries the turn counts only with
-    ///   this (ADR-0226 amendment). Called many times, commit is once.
+    ///   this (ADR-0226 amendment). Called many times, commit is once — and the first call's delivery report is the one kept
+    ///   (ADR-0337), whatever later calls say. The commit does not depend on the report: an undelivered first echo commits too.
     #[test]
     fn the_first_turn_port_is_the_submission_input_and_commits_once() {
-        let (port, calls) = recording_port();
-        let latch = latch_with(port);
-        let first_turn = latch.first_turn_sink();
+        for first in [false, true] {
+            let (port, calls) = recording_port();
+            let latch = latch_with(port);
+            let first_turn = latch.first_turn_sink();
 
-        (latch.offer_sink())("sid-1");
-        assert!(
-            calls.lock().unwrap().is_empty(),
-            "not called before the first turn"
-        );
-        first_turn();
-        first_turn();
+            (latch.offer_sink())("sid-1");
+            assert!(
+                calls.lock().unwrap().is_empty(),
+                "not called before the first turn"
+            );
+            assert_eq!(latch.first_turn_delivered(), None);
+            first_turn(first);
+            first_turn(!first);
 
-        assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
+            assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"], "first={first}");
+            assert_eq!(latch.first_turn_delivered(), Some(first));
+        }
     }
 
     /// ② — if the submission comes first, the following offer commits on the spot.

@@ -121,7 +121,7 @@ const MAX_ROUTINE_KEYS: usize = 128;
 const MAX_EMITTED_USER_ITEMS: usize = 64;
 
 /// Server notification names we **knowingly do not translate** (73 of the 81 `ServerNotification` kinds in schema 0.154.0, excluding the 8
-///   this translator handles).
+///   this translator handles — plus names measured later, marked where they stand).
 ///
 /// ★Only purpose — telling grades apart★: a name here is "not carried over yet" = routine (debug); a name **not** here was newly made
 ///   upstream = drift (warn). Without the list the two mix in one pool and the signal is buried in routine noise.
@@ -178,6 +178,8 @@ const KNOWN_UNTRANSLATED_METHODS: &[&str] = &[
     "thread/name/updated",
     "thread/project/updated",
     "thread/queue/changed",
+    // ADR-0337: comes with the `experimentalApi` opt-in (measured 0.163.0 — M3), not in the 0.154.0 schema.
+    "thread/readState/changed",
     "thread/realtime/closed",
     "thread/realtime/error",
     "thread/realtime/item/completed",
@@ -3062,6 +3064,44 @@ mod tests {
         assert_eq!(
             d.untranslated_observations().get("method:turn/started"),
             Some(&1)
+        );
+    }
+
+    /// `thread/readState/changed` comes with the `experimentalApi` opt-in (measured 0.163.0 — M3). It is a known
+    /// untranslated name, so it is routine, not drift: once the routine share is full it is only counted as dropped,
+    /// where a drift name is still recorded.
+    // ADR-0337
+    #[test]
+    fn thread_read_state_changed_is_observed_as_routine_not_drift() {
+        let line = notification_line(
+            "thread/readState/changed",
+            serde_json::json!({"threadId": "t"}),
+        );
+        let mut d = CodexAppServerDecoder::new();
+        assert!(d.decode(line.as_bytes()).is_empty());
+        assert_eq!(
+            d.untranslated_observations()
+                .get("method:thread/readState/changed"),
+            Some(&1)
+        );
+
+        let mut full = CodexAppServerDecoder::new();
+        for i in 0..MAX_ROUTINE_KEYS {
+            full.observe(format!("method:routine/{i}"), Observed::Routine, "");
+        }
+        assert!(full.decode(line.as_bytes()).is_empty());
+        assert!(
+            full.untranslated_observations()
+                .get("method:thread/readState/changed")
+                .is_none(),
+            "recorded past the routine share — it was observed as drift"
+        );
+        let drift = notification_line("brand/new", serde_json::json!({}));
+        assert!(full.decode(drift.as_bytes()).is_empty());
+        assert_eq!(
+            full.untranslated_observations().get("method:brand/new"),
+            Some(&1),
+            "control: a drift name is still recorded"
         );
     }
 

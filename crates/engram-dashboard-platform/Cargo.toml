@@ -60,9 +60,24 @@ raw-window-handle = "0.6"
 # `Win32_Graphics_Dwm` = `window::top_level_at`'s cloaked window decision (`DWMWA_CLOAKED`).
 # `Win32_Graphics_Gdi` = `window::restore_placement`'s monitor work area (`MonitorFromRect` · `GetMonitorInfoW` —
 #   moves screen coordinates to workspace coordinates) and `window::top_level_at`'s window shape (`GetWindowRgn` · `PtInRegion`).
+# `Win32_Storage_FileSystem` = `fs`'s file identity (`GetFileInformationByHandleEx` `FileIdInfo` · the fallback's
+#   `GetFileInformationByHandle`) and junction walking (`FileAttributeTagInfo` — non-following reparse tag · the delete mark
+#   on the same handle via `SetFileInformationByHandle`) and `fs::share_root`'s drive type (`GetDriveTypeW`) and `fs::rename_no_replace`
+#   (`MoveFileExW` · `GetFullPathNameW`) and `fs::make_removable` (`FileStandardInfo` · `FileBasicInfo` on the checked handle). ADR-0325
+# `Win32_Globalization` = `fs::path_key`'s OS uppercase mapping (`LCMapStringEx` invariant `LCMAP_UPPERCASE`).
+#   ★Do not switch to `RtlUpcaseUnicodeChar`★ — it is documented for kernel mode only and its binding feature
+#   (`Wdk_System_SystemServices`) is twice this module (the measurement that both answer the same is in `src/fs/path_key.rs`).
+# `Win32_NetworkManagement_WNet` = `fs::share_root`'s remembered network connection of a drive letter with no volume
+#   (`WNetGetConnectionW`) — a mapped drive that is not connected (ADR-0387).
 # ★Not split into per-feature cargo features★ — turns on the union of the binding features used by this one dependency (ADR-0275
 #   decision 13). When moving a module over, add the features that module uses here.
 [target.'cfg(windows)'.dependencies]
+# `fs::link_dir`'s junction creation (ADR-0336). Walking does not use this crate (`fs::unlink_dir` — deletes through the checked handle).
+#   ★Do not turn on the default features★ — the default `unstable_admin`, when a folder open is denied, turns on the restore
+#   privilege (`SE_RESTORE_NAME`) in the process token and opens again. The privilege stays on for the whole process, so in a
+#   daemon whose token holds it (elevated), later opens asking write · delete access with `FILE_FLAG_BACKUP_SEMANTICS` skip
+#   the ACL check (MS `CreateFileW` docs). With it off, the same spot tries only the symbolic-link privilege (junction 2.1.0 `helpers.rs` source).
+junction = { version = "2.1.0", default-features = false }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
@@ -79,7 +94,16 @@ windows = { version = "0.58", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_Globalization",
+    "Win32_NetworkManagement_WNet",
 ] }
+
+# `fs::rename_no_replace` on Unix — `renameat2(RENAME_NOREPLACE)` through `syscall` (Linux, Android) and `renamex_np(RENAME_EXCL)`
+#   (Apple); std has no no-replace rename (ADR-0409). An OS crate inside gate ⑤'s list. The version `Cargo.lock` already holds
+#   (other packages pull it in), so no new package.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.186"
 
 # The `file_holders` · `fs` tests draw temp file names that do not collide — not in the production graph.
 [dev-dependencies]

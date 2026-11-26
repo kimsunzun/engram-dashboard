@@ -8,7 +8,7 @@ export type InterruptEscScope = 'slot' | 'input'
 export const ESC_SCOPE: InterruptEscScope = 'slot'
 
 /**
- * Marker of an overlay under which Esc does not interrupt the turn while open. The three closed by a document-global Esc (agent picker · tree row menu · preset row menu) and the right-click menu attach it to their root — that Esc closes the overlay.
+ * Marker of an overlay under which Esc does not interrupt the turn while open. The two closed by a document-global Esc (agent picker · tree row menu) and the right-click menu attach it to their root — that Esc closes the overlay.
  */
 export const OVERLAY_SELECTOR = '[data-engram-overlay]'
 

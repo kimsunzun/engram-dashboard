@@ -53,19 +53,18 @@ describe('slot menu contributions — visibility hideOn (ADR-0067)', () => {
     expect(allIds('agent')).toContain('slot.assignRunningAgent')
   })
 
-  it('source slots (agent_list/preset_palette) and the usage slot drop it through hideOn', () => {
+  it('source slots (agent_list) and the usage slot drop it through hideOn', () => {
     expect(allIds('agent_list')).not.toContain('slot.assignRunningAgent')
-    expect(allIds('preset_palette')).not.toContain('slot.assignRunningAgent')
     expect(allIds('usage')).not.toContain('slot.assignRunningAgent')
   })
 })
 
 describe('spawn cleanup — "Create" removal regression (ADR-0067)', () => {
-  it('the empty "New content" submenu has only tree · palette · usage (Create removed)', () => {
+  it('the empty "New content" submenu has only tree · usage (Create removed)', () => {
     const container = buildSlotMenu('empty').find(i => i.id === 'container:slot.newContent')
     expect(container).toBeDefined()
     const childIds = container!.children!.map(c => c.id)
-    expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.presetPalette', 'slot.fill.usage'])
+    expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.usage'])
     expect(childIds).not.toContain('slot.createAgentHere')
   })
 })

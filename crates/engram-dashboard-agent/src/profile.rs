@@ -4,15 +4,17 @@
 //!   neutral data about
 //! "what to run and which session to resume". Zero tauri imports.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::time::now_epoch_ms;
+use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
+use crate::profile_edit::{Attachments, PresetPathRename};
 use crate::types::AgentId;
 
 // ── Neutral run command ─────────────────────────────────────────────────────────────
@@ -50,7 +52,7 @@ pub enum AgentCommand {
     ///   `output_format`
     /// deserializes as `Terminal`.
     ///
-    /// ★Do not grow the fields carelessly★: this enum is `#[serde(tag = "kind")]`, so its shape sits in `agents.json` as is — a contract
+    /// ★Do not grow the fields carelessly★: this enum is `#[serde(tag = "kind")]`, so its shape sits in the profile file as is — a contract
     ///   baked onto disk, so the less
     /// frozen the cheaper. Sandbox / approval values are still at `--help` grade (TRD §2); typing them now would freeze them at that grade
     ///   (ADR-0194).
@@ -117,7 +119,15 @@ pub enum RestoreOutcome {
 
 // ── Persistent profiles ────────────────────────────────────────────────────────────────
 
-/// The persistent profile of one agent — the unit stored in `agents.json`.
+/// One preset attached to an agent — a library reference (a `/` path from the root, or a built-in `engram/…`).
+/// The 「Default」 preset is not in here — the [`AgentProfile::default_preset`] field carries it separately.
+// ADR-0315
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachedPreset {
+    pub path: String,
+}
+
+/// The persistent profile of one agent — the unit stored in the profile file (`persistence::PROFILES_FILE`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProfile {
     /// Immutable key. This id stays for life even as processes and sessions change (the frontend subscription key).
@@ -125,15 +135,17 @@ pub struct AgentProfile {
     pub name: String,
 
     /// User-set display name override (ADR-0061 enrichment — tree rename), **separate from `name`** (the CreateProfile name or an ad-hoc
-    ///   spawn's cwd string, not a clean
-    /// display name). `Some` → shown as is, `None` → derived from the cwd basename. `#[serde(default)]`: an old agents.json without it
-    ///   reads as `None`.
+    ///   spawn's cwd string, not a clean display name). `Some` → shown as is, `None` → derived from the cwd basename.
+    /// ★Filled with the name of the moment when empty at creation★ (the manager's two new-registration spots) — a name left derived from
+    ///   the working folder would let a working-folder change silently change the mail address · tree name. In production `None` comes
+    ///   only from clearing the name (`try_rename(id, None)`).
+    // ADR-0321
+    // TRD S25 §1-5 「display_name pinned」
     #[serde(default)]
     pub display_name: Option<String>,
 
     /// Parent profile id in the tree. `Some(pid)` → child of pid, `None` → root. **One level only**: a child cannot become a parent, and
-    ///   the parent must be a root
-    /// (validation: `ProfileRegistry::try_reparent`). `#[serde(default)]`: an old agents.json without it reads as `None`.
+    ///   the parent must be a root (validation: `ProfileRegistry::try_reparent`).
     // ADR-0072
     #[serde(default)]
     pub parent_id: Option<AgentId>,
@@ -147,6 +159,36 @@ pub struct AgentProfile {
 
     /// ※No credentials. On persist, `*_KEY`/`*_TOKEN` patterns are warned about (persistence).
     pub env: Vec<(String, String)>,
+
+    /// Whether the 「Default」 preset is attached — `true` at creation. An entry without the key reads as `true` too (the same value as just created).
+    #[serde(default = "default_preset_attached")]
+    pub default_preset: bool,
+
+    /// The attached presets — in attach order (the launch expands them in this order). Empty at creation.
+    #[serde(default)]
+    pub presets: Vec<AttachedPreset>,
+
+    /// The hash of the instructions the last launch carried to the peer — codex JSON resume checks it to tell whether the instructions
+    /// changed (carried on the first turn only when different). `None` = never carried.
+    /// ★Author = a launch★ — written as a roster change with the incarnation-marker guard when the first turn carrying those instructions
+    ///   reached the peer (not on the session-id compare-and-swap — a resume's compare-and-swap writes the same value, so it does not
+    ///   write). Written at spawn, a resume after an incarnation whose first turn never went out would skip the changed instructions. Clone does not copy it.
+    // ADR-0337
+    // TRD S25 §1-5 profile table · T6 · M16
+    #[serde(default)]
+    pub last_applied_instructions_hash: Option<String>,
+
+    /// The omission identity ([`crate::launch::notice_fingerprint`]) of the launch notices last delivered to a caller.
+    /// `None` = nothing recorded · `Some("")` = an empty set was delivered (X → none → X shows X again).
+    /// ★Author = the launch alone★ — written by `ProfileRegistry::record_notice_fingerprint` once a caller that delivers
+    ///   notices got a success reply from a launch that started a process; never on boot restore, a moot activation or
+    ///   any failure. `merge_preserving_live` keeps the live value. A duplicated agent starts without it (`None`) —
+    ///   `agent.duplicate` builds its copy from `AgentProfile::new` and does not carry it. The creation paths store the
+    ///   caller copy's value as is, so this holds only while every builder starts from `AgentProfile::new`.
+    // ADR-0341
+    // TRD S25 §1-5 「Notices once per agent」
+    #[serde(default)]
+    pub notice_fingerprint: Option<String>,
 
     /// The current backend session id. **Mutable** — written right before the incarnation's first user turn goes out (ADR-0226), and
     ///   updated by the session_tracker
@@ -167,12 +209,10 @@ pub struct AgentProfile {
     ///
     /// ★Skipping the read is part of the meaning★: an incarnation cannot outlive the daemon, and a revived marker would make an attached
     ///   client keep its old cursor so the new frames (numbered from 0) are dropped by dedup
-    ///   (empty slot). Old files without the value, or carrying an old counter, are read as is (value ignored).
-    /// ★The write is not skipped — the key is sent as `0`★: the previous release declared this field **required**, so a file without the
-    ///   key fails with `missing field`, that release moves it to `.corrupt-<ts>`
-    ///   and the next save overwrites it with an empty list (profiles, session ids, tree parents vanish; reachable by running this build
-    ///   once, then reverting). `0` = the old counter's "never respawned" state, harmless to an
-    ///   old binary.
+    ///   (empty slot). Files without the value, or carrying a non-zero one, are read as is (value ignored).
+    /// ★The write always carries the key as `0` — a harmless leftover placeholder★: the only file an old build that read this key as
+    ///   required reads is the old version's `agents.json`, which this build never writes (ADR-0314 decision 5) — no reader reads this key
+    ///   from the profile file. The value is a fixed `0`, so the live marker never reaches disk. Removing the key is a separate matter.
     /// Not in the frontend subscription deps — the reattach trigger is the authoritative roster (ADR-0164 decision 8).
     // ADR-0007, ADR-0163, ADR-0164
     #[serde(skip_deserializing, serialize_with = "serialize_zero_placeholder")]
@@ -218,6 +258,14 @@ pub struct AgentProfile {
 }
 
 impl AgentProfile {
+    /// The display-name override that names the agent — `None` when unset or blank (a blank one names nothing, as in
+    /// [`Self::canonical_name_when_live`]).
+    pub(crate) fn name_override(&self) -> Option<&str> {
+        self.display_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+    }
+
     /// The session id is created by ProfileRegistry at the first spawn (not made here).
     pub fn new(
         name: String,
@@ -235,6 +283,10 @@ impl AgentProfile {
             command,
             cwd,
             env,
+            default_preset: true,
+            presets: Vec::new(),
+            last_applied_instructions_hash: None,
+            notice_fingerprint: None,
             backend_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
@@ -255,9 +307,14 @@ impl AgentProfile {
     ///
     /// ★Same rule as a live session = `canonical_name_or_id_fallback` (+ the canonicalized cwd)★ — what `manager::resolve_canonical_name`
     ///   uses. `name::resolve_display_name` is **not** it (it takes an empty/whitespace
-    /// override as the name and does not degrade to the id on a placeholder basename). The cwd must have the live notation: spawn uses
-    ///   `dunce::canonicalize(profile.cwd)`, so the same normalization is done
-    /// here, degrading to the original on failure like spawn.
+    /// override as the name and does not degrade to the id on a placeholder basename).
+    /// The cwd must have the live session's spelling too: the spawn's session.cwd is the launch's working folder
+    ///   (`LaunchKitSource::working_folder` — the `dunce` canonical path, or the cwd as given when that has no answer), while the
+    ///   profile's `cwd` may be raw (`.` · `..` · a link · a Windows path in another case). So this applies the same canonicalize and
+    ///   degrades to the raw cwd when it fails. Known gap: with the library plugged, the working folder comes from a bounded canonicalize
+    ///   (the advisory allowance — ADR-0360); when the folder answers too slowly the spawn runs in the raw cwd, so the live name (from that
+    ///   raw spelling) and this name (from the canonical path) differ whenever their basenames differ (case, a link name, `.`). Not closed
+    ///   here — closing it needs the spawn's folder stored.
     /// ★fs access only when there is no override (not pure)★ — hence on the profile side, not in `name.rs`.
     /// ★The override shortcut is not an optimization — do not delete it★: with a non-blank `display_name` the name is independent of the
     ///   file system. Deleting it would ① degrade the name of a profile whose cwd
@@ -268,10 +325,8 @@ impl AgentProfile {
     pub fn canonical_name_when_live(&self) -> String {
         // **Literally the same** as the first branch of the live session rule (`canonical_name_or_id_fallback`) (if non-blank, no trim
         //   — the original as is is the name).
-        if let Some(n) = self.display_name.as_deref() {
-            if !n.trim().is_empty() {
-                return n.to_string();
-            }
+        if let Some(n) = self.name_override() {
+            return n.to_string();
         }
         // ★Syscalls that cannot change the answer are not made★: if the cwd is empty/whitespace-only, the basename is the placeholder, so
         //   the result is the first 8 characters of the id regardless of canonicalize success/failure (`canonical_name_or_id_fallback` degrade).
@@ -286,7 +341,7 @@ impl AgentProfile {
 
 // ── Persistence abstraction ──────────────────────────────────────────────────────────────
 
-/// The reason the store refused a save by decision. [`crate::preset::PresetStore`] uses the same type.
+/// The reason the store refused a save by decision.
 // ADR-0291 R2 · R8
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -308,7 +363,7 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// Failure of [`ProfileStore::save`] · [`crate::preset::PresetStore::save`].
+/// Failure of [`ProfileStore::save`].
 ///
 /// ★A refusal has two variants by origin★ — the caller's handling differs: a load refusal clears only on daemon restart; a re-decision
 ///   refusal is decided again by the
@@ -420,6 +475,9 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
 pub struct ProfileRegistry {
     profiles: Mutex<Profiles>,
     store: Arc<dyn ProfileStore>,
+    /// How many takes of the registry lock found it held — tests observe a waiter.
+    #[cfg(test)]
+    lock_blocked: std::sync::atomic::AtomicUsize,
 }
 
 type ProfileMap = HashMap<AgentId, AgentProfile>;
@@ -442,11 +500,27 @@ impl ProfileRegistry {
         Self {
             profiles: Mutex::new(Profiles { map, dirty: false }),
             store,
+            #[cfg(test)]
+            lock_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Profiles> {
+        #[cfg(test)]
+        if matches!(
+            self.profiles.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            self.lock_blocked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.profiles.lock().expect("profiles poisoned")
+    }
+
+    /// How many takes of the registry lock found it held so far.
+    #[cfg(test)]
+    pub(crate) fn lock_blocked(&self) -> usize {
+        self.lock_blocked.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// The common path of changes without a caller — the closure commit and save are one critical section, and it commits regardless of
@@ -573,11 +647,29 @@ impl ProfileRegistry {
         })
     }
 
+    /// [`ProfileRegistry::try_upsert`] only when `still` answers `true`, asked inside the registry lock just before the
+    /// insert — `Ok(false)` = nothing inserted (nothing saved for this request). `still` must take no lock but a leaf
+    /// (the library's turn mutex — ADR-0400 decision 18) and must not call back into the registry.
+    // ADR-0400 decision 18
+    pub fn try_upsert_if(
+        &self,
+        profile: AgentProfile,
+        still: impl FnOnce() -> bool,
+    ) -> Result<bool, StoreError> {
+        self.try_mutate_if(|m| {
+            if !still() {
+                return false;
+            }
+            m.insert(profile.id, profile);
+            true
+        })
+    }
+
     /// Spawn-only upsert — inserts the snapshot but **keeps the live entry's values for fields whose author is the runtime**. An id that
     ///   did not exist (ad-hoc spawn) takes the snapshot as is.
     ///
     /// ★The canonical preservation list is the body below.★ One rule: **who writes that field** — fields whose author is not the caller's
-    ///   copy: live wins; only fields spawn settles (cwd · command · env etc.) take the snapshot.
+    ///   copy: live wins; only the other fields (command · env etc.) take the snapshot.
     ///
     /// ★Why not the snapshot as is (lost updates)★: a reparent/rename committed by another connection in between would be overwritten by
     ///   the snapshot's old `parent_id`/`display_name` (tree metadata unrelated to startup).
@@ -652,6 +744,17 @@ fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: Ag
         //   right before used to overwrite it with the snapshot.
         profile.backend_session_id = live.backend_session_id;
         profile.old_session_ids = live.old_session_ids.clone();
+        // ★Attached presets · the 「Default」 field · the last applied instructions hash · the working folder also go to live★ — after
+        //   creation these fields are written by preset commands · launches · the working-folder change (`agent.setWorkspace`), not by
+        //   an old copy spawn took. If the copy won, presets attached and a working folder changed in between would silently revert and persist.
+        // ADR-0321
+        // TRD S25 §1-5 「merge_preserving_live preserved fields」
+        profile.default_preset = live.default_preset;
+        profile.presets = live.presets.clone();
+        profile.last_applied_instructions_hash = live.last_applied_instructions_hash.clone();
+        // ADR-0341: the launch writes it (`record_notice_fingerprint`) — a stale spawn copy would re-show notices.
+        profile.notice_fingerprint = live.notice_fingerprint.clone();
+        profile.cwd = live.cwd.clone();
     }
     m.insert(profile.id, profile);
 }
@@ -755,6 +858,101 @@ impl ProfileRegistry {
             }
             _ => false,
         }
+    }
+
+    /// Records the notice fingerprint a caller was just shown — a compare-and-set. `true` = the in-memory map changed.
+    ///
+    /// Written only when, under the roster lock, both hold:
+    /// - `incarnation` (the incarnation whose launch produced the notices) is still the profile's current one;
+    /// - the stored value still equals `baseline` (the value that launch compared against in `prelaunch`).
+    ///
+    /// Otherwise it is skipped (logged at debug): a late record of an earlier launch must not overwrite what a later
+    /// launch compared against. Skipping never marks a set that no caller was shown; in the common orders it only
+    /// makes a set show once more. One improbable interleaving (a dying earlier incarnation recording between a later
+    /// launch's compare and its epoch bump) can still leave the earlier set stored — accepted (S25 step 16 review).
+    /// The fingerprint already stored → no write. An internal roster write, like the post-launch `auto_restore` raise
+    /// (ADR-0291): a save failure keeps the change in memory, dirty (no `Err`) — the activation has already succeeded,
+    /// and its reply is about to leave.
+    // ADR-0341
+    // ADR-0291
+    // TRD S25 §1-5 「Notices once per agent」
+    pub(crate) fn record_notice_fingerprint(
+        &self,
+        id: AgentId,
+        incarnation: u32,
+        baseline: Option<&str>,
+        fingerprint: String,
+    ) -> bool {
+        let mut skipped = None;
+        let written = self.mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                skipped = Some("the profile is gone");
+                return false;
+            };
+            if p.epoch != incarnation {
+                skipped = Some("a later incarnation is current");
+                return false;
+            }
+            if p.notice_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+                return false;
+            }
+            if p.notice_fingerprint.as_deref() != baseline {
+                skipped = Some("the stored fingerprint moved since the launch compared it");
+                return false;
+            }
+            p.notice_fingerprint = Some(fingerprint);
+            true
+        });
+        if let Some(why) = skipped {
+            tracing::debug!(
+                agent = %id,
+                epoch = incarnation,
+                why,
+                "notice fingerprint not recorded — a later delivered launch may show this set again"
+            );
+        }
+        written
+    }
+
+    /// Records the instructions hash an incarnation's first turn delivered ([`AgentProfile::last_applied_instructions_hash`]).
+    /// `true` = the in-memory map changed.
+    ///
+    /// Written only while `incarnation` is still the profile's current one — a late report of an earlier incarnation
+    /// is skipped (logged at debug). The hash already stored → no write. An internal roster write, like
+    /// [`Self::record_notice_fingerprint`]: a save failure keeps the change in memory, dirty (no `Err`). Backend-neutral
+    /// — a backend that never reads the stored value is unaffected.
+    // ADR-0337
+    pub(crate) fn record_instructions_hash(
+        &self,
+        id: AgentId,
+        incarnation: u32,
+        hash: &str,
+    ) -> bool {
+        let mut skipped = None;
+        let written = self.mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                skipped = Some("the profile is gone");
+                return false;
+            };
+            if p.epoch != incarnation {
+                skipped = Some("a later incarnation is current");
+                return false;
+            }
+            if p.last_applied_instructions_hash.as_deref() == Some(hash) {
+                return false;
+            }
+            p.last_applied_instructions_hash = Some(hash.to_owned());
+            true
+        });
+        if let Some(why) = skipped {
+            tracing::debug!(
+                agent = %id,
+                epoch = incarnation,
+                why,
+                "instructions hash not recorded"
+            );
+        }
+        written
     }
 
     /// Called where the session id is observed — moves the old sid into the history, replaces it, persists on change. A same-value call is
@@ -901,6 +1099,251 @@ impl ProfileRegistry {
     }
 }
 
+/// Attachment (the 「Default」 field + attached presets) read · write.
+///
+/// ★The write and the comparison being `pub(crate)` is intentional★ — outside the crate (asset-library) changes go through the profile
+/// edit port ([`crate::profile_edit::ProfileEditPort`] — implemented by `AgentManager`). ★The compiler does not enforce it★ — the generic
+/// writes (`try_update_with` · `update_with` · `try_upsert`) are `pub`, so this path is a promise review keeps. Reads read the roster
+/// directly (M5).
+// ADR-0311
+// TRD S25 §1-5 「profile edit port」
+impl ProfileRegistry {
+    pub fn attachments_of(&self, id: AgentId) -> Option<Attachments> {
+        self.lock().map.get(&id).map(attachments_of_profile)
+    }
+
+    /// The whole roster — unordered.
+    pub fn attachments(&self) -> Vec<(AgentId, Attachments)> {
+        self.lock()
+            .map
+            .values()
+            .map(|p| (p.id, attachments_of_profile(p)))
+            .collect()
+    }
+
+    /// Whether the current launch inputs equal `seen` — compares the three fields together under one roster lock and does not save.
+    /// `None` = the profile is gone (deleted meanwhile).
+    // TRD S25 §1-5 (ga) 2 「compare-and-swap」
+    pub(crate) fn launch_inputs_unchanged(&self, id: AgentId, seen: &LaunchInputs) -> Option<bool> {
+        self.lock().map.get(&id).map(|p| seen.matches(p))
+    }
+
+    /// Replaces the attachments with `next` as a whole — an entry with a caller (commits only if the save succeeds).
+    ///
+    /// `Ok(false)` = not in the roster · `Ok(true)` = the attachments are now `next`. The same value is not saved (only pending dirty
+    /// changes ride — that save's failure is not this request's failure).
+    pub(crate) fn try_set_attachments(
+        &self,
+        id: AgentId,
+        next: Attachments,
+    ) -> Result<bool, StoreError> {
+        let mut present = false;
+        self.try_mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                return false;
+            };
+            present = true;
+            if same_attachments(p, &next) {
+                return false;
+            }
+            p.default_preset = next.default_preset;
+            p.presets = next.presets;
+            true
+        })?;
+        Ok(present)
+    }
+
+    /// Rewrites attached paths across the roster per `renames` — one lock · one save (an entry with a caller). Returns = agents whose
+    /// value actually changed (id order). Nothing changed = no save.
+    ///
+    /// The mapping applies all at once — each path is looked up once by its **original** value (no chaining). Matching compares the
+    /// whole path with platform `same_path` (no prefix match). Several `from` with the same key = the first line wins. 「Changed」 is
+    /// literal — a case-only fix `a.md → A.md` is a change too. A changed agent's list keeps only the first of paths equal by
+    /// `same_path` (an unchanged agent's list is left alone).
+    // ADR-0335
+    pub(crate) fn try_rewrite_preset_paths(
+        &self,
+        renames: &[PresetPathRename],
+    ) -> Result<Vec<AgentId>, StoreError> {
+        // ADR-0325: looked up by a key that answers like `same_path`.
+        let mut mapping: HashMap<PathKey, &str> = HashMap::with_capacity(renames.len());
+        for r in renames {
+            mapping
+                .entry(path_key(Path::new(&r.from)))
+                .or_insert(r.to.as_str());
+        }
+        let mut changed = Vec::new();
+        self.try_mutate_if(|m| {
+            for p in m.values_mut() {
+                let mut touched = false;
+                for preset in &mut p.presets {
+                    match mapping.get(&path_key(Path::new(&preset.path))) {
+                        Some(&to) if to != preset.path => {
+                            preset.path = to.to_owned();
+                            touched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if touched {
+                    // ADR-0339
+                    // An overwrite-move = delete + rename, so `[a, b]` with `a → b` gives `[b, b]` — the second is leftover.
+                    let mut seen = HashSet::with_capacity(p.presets.len());
+                    p.presets
+                        .retain(|preset| seen.insert(path_key(Path::new(&preset.path))));
+                    changed.push(p.id);
+                }
+            }
+            !changed.is_empty()
+        })?;
+        changed.sort_unstable();
+        Ok(changed)
+    }
+
+    /// Removes attached paths across the roster per `paths` — one lock · one save (an entry with a caller · rules =
+    /// [`crate::profile_edit::ProfileEditPort::remove_preset_paths`]). Nothing removed = no save (only pending dirty
+    /// changes ride — that save's failure is not this request's failure).
+    // ADR-0339
+    pub(crate) fn try_remove_preset_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<AgentId>, StoreError> {
+        // ADR-0325: looked up by a key that answers like `same_path`.
+        let gone: HashSet<PathKey> = paths.iter().map(|p| path_key(Path::new(p))).collect();
+        let mut changed = Vec::new();
+        self.try_mutate_if(|m| {
+            for p in m.values_mut() {
+                let before = p.presets.len();
+                p.presets
+                    .retain(|preset| !gone.contains(&path_key(Path::new(&preset.path))));
+                if p.presets.len() < before {
+                    changed.push(p.id);
+                }
+            }
+            !changed.is_empty()
+        })?;
+        changed.sort_unstable();
+        Ok(changed)
+    }
+
+    /// `agent.setWorkspace`'s write, in one locked section: the agent still in the roster and never conversed (no stored
+    /// backend session id), then `cwd` written and `display_name` set to `name` only while no override names the agent
+    /// (unset or blank — [`AgentProfile::name_override`]). A refusal (gone ·
+    /// conversed) or a request that changes nothing saves nothing of its own (only a pending dirty change rides — that
+    /// save's failure is not this request's), so a store error never replaces the refusal; a store error of the write
+    /// itself is `Err` with nothing changed.
+    /// ★The conversed check is made here too, not only by the caller★ — the first-submission latch and
+    ///   `observe_session_id` write the session id without the agent's reservation, so a check before this lock can be stale.
+    // ADR-0321
+    // ADR-0386
+    pub(crate) fn try_set_workspace(
+        &self,
+        id: AgentId,
+        cwd: &Path,
+        name: &str,
+    ) -> Result<WorkspaceWrite, StoreError> {
+        let mut outcome = WorkspaceWrite::NotFound;
+        self.try_mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                return false;
+            };
+            if p.backend_session_id.is_some() {
+                outcome = WorkspaceWrite::Conversed;
+                return false;
+            }
+            outcome = WorkspaceWrite::Written;
+            let named = p.name_override().is_some();
+            if p.cwd == cwd && named {
+                return false;
+            }
+            p.cwd = cwd.to_path_buf();
+            if !named {
+                p.display_name = Some(name.to_owned());
+            }
+            true
+        })?;
+        Ok(outcome)
+    }
+
+    /// Inserts the copy `build` makes of `original`, reading the original and inserting the copy in one locked section — so
+    /// a copy queues with the attachment rewrites on this lock ([`Self::try_rewrite_preset_paths`] ·
+    /// [`Self::try_remove_preset_paths`]) and cannot slip past one. `Ok(None)` = the original is gone: nothing is saved for
+    /// this request (only a pending dirty change rides), so a store error never masks it. A store error of the insert is
+    /// `Err` with nothing inserted.
+    // ADR-0386
+    pub(crate) fn try_insert_copy(
+        &self,
+        original: AgentId,
+        build: impl FnOnce(&AgentProfile) -> AgentProfile,
+    ) -> Result<Option<AgentProfile>, StoreError> {
+        let mut inserted = None;
+        self.try_mutate_if(|m| {
+            let Some(source) = m.get(&original) else {
+                return false;
+            };
+            let copy = build(source);
+            inserted = Some(copy.clone());
+            m.insert(copy.id, copy);
+            true
+        })?;
+        Ok(inserted)
+    }
+}
+
+/// What [`ProfileRegistry::try_set_workspace`] did.
+// ADR-0386
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceWrite {
+    /// The folder is set (or already was, with the name pinned).
+    Written,
+    NotFound,
+    /// The agent has conversed — nothing was written.
+    Conversed,
+}
+
+fn attachments_of_profile(p: &AgentProfile) -> Attachments {
+    Attachments {
+        default_preset: p.default_preset,
+        presets: p.presets.clone(),
+    }
+}
+
+fn same_attachments(p: &AgentProfile, a: &Attachments) -> bool {
+    p.default_preset == a.default_preset && p.presets == a.presets
+}
+
+/// The fields the launch preprocessing checked that the launch uses — attachments · command · env. The launch uses that check's answer
+/// only if these three are unchanged after it.
+///
+/// ★The working folder is not included★ — a change (`agent.setWorkspace`) takes that agent's reservation as a working-folder holder so it does not cross a
+///   launch, and the merge keeps the roster value even when the caller copy's working folder is stale (so including it in the copy comparison would cut off a legitimate launch).
+// TRD S25 §1-5 (ga) 2
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct LaunchInputs {
+    pub(crate) attachments: Attachments,
+    pub(crate) command: AgentCommand,
+    pub(crate) env: Vec<(String, String)>,
+}
+
+impl LaunchInputs {
+    pub(crate) fn of(p: &AgentProfile) -> Self {
+        Self {
+            attachments: attachments_of_profile(p),
+            command: p.command.clone(),
+            env: p.env.clone(),
+        }
+    }
+
+    fn matches(&self, p: &AgentProfile) -> bool {
+        same_attachments(p, &self.attachments) && self.same_command_and_env(p)
+    }
+
+    /// Whether `p`'s command · env equal these — the two fields the spawn merge moves from the caller copy to the roster.
+    pub(crate) fn same_command_and_env(&self, p: &AgentProfile) -> bool {
+        p.command == self.command && p.env == self.env
+    }
+}
+
 fn remove_promoting_children(m: &mut ProfileMap, id: AgentId) {
     m.remove(&id);
     // With one-level nesting, children are not parents, so recursive promotion is unnecessary — one sweep is enough.
@@ -990,7 +1433,11 @@ fn retire_session_id(p: &mut AgentProfile) -> bool {
     }
 }
 
-/// Placeholder for previous-release readers — always writes `0` regardless of the live marker (grounds = the `AgentProfile::epoch` comment).
+fn default_preset_attached() -> bool {
+    true
+}
+
+/// A leftover placeholder — always writes `0` regardless of the live marker (grounds = the `AgentProfile::epoch` comment).
 fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_u32(0)
 }
@@ -1000,6 +1447,14 @@ fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<
 fn random_incarnation_tag() -> u32 {
     let b = Uuid::new_v4().into_bytes();
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+
+#[cfg(test)]
+impl ProfileRegistry {
+    /// Whether nobody holds the roster lock now — `false` even when the holder is this thread (does not wait).
+    pub(crate) fn lock_is_free(&self) -> bool {
+        self.profiles.try_lock().is_ok()
+    }
 }
 
 /// A profile store whose save results the test decides — shared by the registry and manager tests.
@@ -1622,7 +2077,7 @@ mod tests {
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
             !json.contains("last_failure"),
-            "if this field went out to agents.json, the daemon-lifetime constraint would break — got {json}"
+            "if this field went out to the profile file, the daemon-lifetime constraint would break — got {json}"
         );
         let back: AgentProfile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(
@@ -1920,7 +2375,7 @@ mod tests {
 
     // ── Write-boundary normalization (ADR-0072) ────────────────────────────────────────────────
 
-    /// ★Reproduction★: load a store that already holds a cyclic pair (a damaged/hand-edited agents.json or a legacy write bypassing
+    /// ★Reproduction★: load a store that already holds a cyclic pair (a damaged/hand-edited profile file or a legacy write bypassing
     ///   reparent validation; load does not normalize),
     /// then trigger any write — boundary normalization heals the cycle. **Fails without normalize_hierarchy** (both parent_ids stay, in
     ///   memory and on disk).
@@ -2151,6 +2606,229 @@ mod tests {
         );
     }
 
+    /// ★An old copy spawn took does not revert presets attached · the working folder changed · the instructions hash written in between★ —
+    ///   a revert would persist as is. Fields whose author is the copy (`env` etc.) still follow the copy.
+    // TRD S25 §1-5 「merge_preserving_live preserved fields」
+    #[test]
+    fn spawn_preserving_upsert_keeps_presets_workspace_and_instructions_hash_from_live() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let mut stale_snapshot = reg.get(id).unwrap();
+
+        assert!(reg
+            .try_update_with(id, |p| {
+                p.default_preset = false;
+                p.presets = vec![AttachedPreset {
+                    path: "presets/review.yaml".into(),
+                }];
+                p.last_applied_instructions_hash = Some("ab12".into());
+                p.cwd = PathBuf::from("C:/moved");
+            })
+            .expect("save succeeds"));
+        stale_snapshot.env = vec![("FROM_SPAWN".into(), "1".into())];
+
+        for via_update in [false, true] {
+            if via_update {
+                assert!(reg.update_preserving_hierarchy(stale_snapshot.clone()));
+            } else {
+                reg.upsert_preserving_hierarchy(stale_snapshot.clone());
+            }
+            let after = reg.get(id).unwrap();
+            assert!(!after.default_preset);
+            assert_eq!(
+                after.presets,
+                vec![AttachedPreset {
+                    path: "presets/review.yaml".into()
+                }]
+            );
+            assert_eq!(
+                after.last_applied_instructions_hash.as_deref(),
+                Some("ab12")
+            );
+            assert_eq!(after.cwd, PathBuf::from("C:/moved"));
+            assert_eq!(
+                after.env, stale_snapshot.env,
+                "fields whose author is the copy follow the copy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_profile_has_only_the_default_preset_and_no_instructions_hash() {
+        let p = sample();
+        assert!(p.default_preset);
+        assert!(p.presets.is_empty());
+        assert_eq!(p.last_applied_instructions_hash, None);
+    }
+
+    // ── Notice fingerprint (ADR-0341) ──
+
+    /// A new (or duplicated) agent starts with nothing recorded — its first delivered launch shows every notice.
+    #[test]
+    fn a_new_profile_has_no_notice_fingerprint() {
+        assert_eq!(sample().notice_fingerprint, None);
+    }
+
+    /// The launch writes the fingerprint, not the spawn copy — a stale copy must not undo a record.
+    #[test]
+    fn spawn_preserving_upsert_keeps_the_notice_fingerprint_from_live() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let stale_snapshot = reg.get(id).unwrap();
+        let live = reg.epoch_for_spawn(id).unwrap();
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+
+        reg.upsert_preserving_hierarchy(stale_snapshot.clone());
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("x")
+        );
+        assert!(reg.update_preserving_hierarchy(stale_snapshot));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("x")
+        );
+    }
+
+    /// Written for the current incarnation only, saved when it changes, and the empty set is a value of its own.
+    #[test]
+    fn record_notice_fingerprint_is_guarded_by_the_incarnation_and_saves_a_change() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let before = saves(&store);
+
+        assert!(!reg.record_notice_fingerprint(id, live.wrapping_add(1), None, "x".into()));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint,
+            None,
+            "another incarnation"
+        );
+        assert!(!reg.record_notice_fingerprint(Uuid::new_v4(), live, None, "x".into()));
+
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+        assert_eq!(saves(&store), before + 1, "a change is saved");
+        assert_eq!(
+            store
+                .load()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .notice_fingerprint
+                .as_deref(),
+            Some("x")
+        );
+        assert!(
+            !reg.record_notice_fingerprint(id, live, Some("x"), "x".into()),
+            "same value"
+        );
+        assert_eq!(saves(&store), before + 1, "the same value writes nothing");
+
+        assert!(reg.record_notice_fingerprint(id, live, Some("x"), String::new()));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some(""),
+            "an empty set is recorded, not cleared to `None`"
+        );
+    }
+
+    /// ★Compare-and-set on the baseline★ — X → Y → X: launch A (plan Y, compared against X) records late, after launch B
+    /// (plan X) compared against the still-stored X and showed nothing. B's record over A's Y is skipped (B's baseline X
+    /// moved), so the next X launch shows X again instead of X staying hidden for good.
+    #[test]
+    fn record_notice_fingerprint_writes_only_over_the_baseline_it_compared_against() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+        let before = saves(&store);
+
+        assert!(
+            !reg.record_notice_fingerprint(id, live, None, "y".into()),
+            "the stored value moved from the baseline (None → x)"
+        );
+        assert!(
+            !reg.record_notice_fingerprint(id, live, Some("z"), "y".into()),
+            "another baseline"
+        );
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("x"),
+            "a skipped record leaves the stored value"
+        );
+        assert_eq!(saves(&store), before, "a skipped record writes nothing");
+
+        assert!(reg.record_notice_fingerprint(id, live, Some("x"), "y".into()));
+        assert_eq!(
+            reg.get(id).unwrap().notice_fingerprint.as_deref(),
+            Some("y")
+        );
+    }
+
+    /// Not a launch input — a record between the check and the compare must not race the launch.
+    #[test]
+    fn the_notice_fingerprint_is_not_a_launch_input() {
+        let (reg, _store, id, live) = registry_with_live_incarnation();
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert!(reg.record_notice_fingerprint(id, live, None, "x".into()));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+    }
+
+    /// Written for the current incarnation only (a later one is current → skipped, a gone profile → skipped), saved
+    /// when it changes, and the same value writes nothing.
+    #[test]
+    fn record_instructions_hash_is_guarded_by_the_incarnation_and_saves_a_change() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let before = saves(&store);
+
+        assert!(!reg.record_instructions_hash(id, live.wrapping_sub(1), "h"));
+        assert_eq!(
+            reg.get(id).unwrap().last_applied_instructions_hash,
+            None,
+            "an earlier incarnation's late report"
+        );
+        assert_eq!(saves(&store), before, "a skipped record writes nothing");
+        assert!(!reg.record_instructions_hash(Uuid::new_v4(), live, "h"));
+
+        assert!(reg.record_instructions_hash(id, live, "h"));
+        assert_eq!(saves(&store), before + 1, "a change is saved");
+        assert_eq!(
+            store
+                .load()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .last_applied_instructions_hash
+                .as_deref(),
+            Some("h")
+        );
+        assert!(!reg.record_instructions_hash(id, live, "h"), "same value");
+        assert_eq!(saves(&store), before + 1, "the same value writes nothing");
+
+        let next = reg.epoch_for_spawn(id).unwrap();
+        assert!(
+            !reg.record_instructions_hash(id, live, "old"),
+            "a later incarnation is current"
+        );
+        assert!(reg.record_instructions_hash(id, next, "k"));
+        assert_eq!(
+            reg.get(id)
+                .unwrap()
+                .last_applied_instructions_hash
+                .as_deref(),
+            Some("k")
+        );
+    }
+
+    /// Not a launch input — the record lands after the spawn and must not race the next launch's check.
+    #[test]
+    fn the_instructions_hash_is_not_a_launch_input() {
+        let (reg, _store, id, live) = registry_with_live_incarnation();
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert!(reg.record_instructions_hash(id, live, "h"));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+    }
+
     #[test]
     fn preserving_upsert_inserts_snapshot_when_no_live_entry() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2324,8 +3002,8 @@ mod tests {
 
     /// ★A **live** incarnation marker must not be carried on disk★: a restarted daemon would put the old marker back on restored agents, a
     ///   surviving client would keep its old
-    /// cursor, and the new frames (numbered from 0) would be dropped by dedup and leave the slot empty. (The key itself is carried as a
-    ///   `0` placeholder; see the forward-compat test below.)
+    /// cursor, and the new frames (numbered from 0) would be dropped by dedup and leave the slot empty. (The key itself is carried — a
+    ///   leftover `0` placeholder; grounds = the `AgentProfile::epoch` comment.)
     #[test]
     fn the_live_incarnation_tag_never_reaches_disk() {
         let mut p = sample();
@@ -2342,9 +3020,8 @@ mod tests {
         );
     }
 
-    /// ★Even if an old counter is carried, the in-memory value does not come from the file★ — an `agents.json` left by a previous release
-    ///   (upgrade → revert → upgrade) holds a
-    /// nonzero counter; restoring it would cause what the test above prevents.
+    /// ★Even if the file carries a non-zero value, the in-memory value does not come from the file★ — restoring it would cause what the
+    ///   test above prevents (old cursor kept → new frames all dropped by dedup).
     #[test]
     fn a_persisted_non_zero_tag_is_never_restored_into_memory() {
         let mut v: serde_json::Value =
@@ -2354,18 +3031,13 @@ mod tests {
         let back: AgentProfile = serde_json::from_value(v).expect("deserialize");
         assert_eq!(
             back.epoch, 0,
-            "the file's old counter must not be restored as the in-memory marker"
+            "the file's value must not be restored as the in-memory marker"
         );
     }
 
-    /// ★The key stays and only the value is pinned to 0★ — a binary reverted to the previous release declares `epoch` **required**, so a
-    ///   file with no key fails with
-    /// `missing field`; that release then moves it to `.corrupt-<ts>` and the next save overwrites with an empty list (profiles, session
-    ///   ids and tree parents vanish).
-    /// **0, not the live marker**: 0 is the old counter's "never respawned" state, harmless to an old binary; a random number would sit in
-    ///   the counter's place.
+    /// The key is a leftover placeholder no reader reads — fix this test too when removing it (grounds = the `AgentProfile::epoch` comment).
     #[test]
-    fn the_persisted_incarnation_tag_is_a_fixed_zero_so_older_readers_still_parse() {
+    fn the_persisted_incarnation_tag_is_a_fixed_zero_placeholder() {
         let mut p = sample();
         p.epoch = 0xDEAD_BEEF;
         let v: serde_json::Value =
@@ -2374,7 +3046,7 @@ mod tests {
         assert_eq!(
             v.get("epoch"),
             Some(&serde_json::json!(0)),
-            "the key that old readers read as required must be carried as 0: {v}"
+            "the placeholder key is carried as 0, not as the live marker: {v}"
         );
     }
 
@@ -2479,6 +3151,27 @@ mod tests {
         }
     }
 
+    /// The first-turn hash record is an internal write too — a failed save keeps it in memory, dirty.
+    #[test]
+    fn a_failed_save_keeps_the_instructions_hash_dirty() {
+        for failure in FAILURES {
+            let (reg, store, id) = scripted();
+            let live = reg.epoch_for_spawn(id).unwrap();
+            store.set(failure);
+
+            assert!(reg.record_instructions_hash(id, live, "h"), "{failure:?}");
+            assert_eq!(
+                reg.get(id)
+                    .unwrap()
+                    .last_applied_instructions_hash
+                    .as_deref(),
+                Some("h"),
+                "{failure:?}"
+            );
+            assert!(reg.is_dirty(), "{failure:?}");
+        }
+    }
+
     #[test]
     fn a_refused_internal_change_leaves_the_file_alone_and_rides_the_first_save_after() {
         use crate::persistence::FileProfileStore;
@@ -2487,7 +3180,7 @@ mod tests {
             "engram-profile-test-dirty-refused-{}",
             Uuid::new_v4()
         ));
-        let path = dir.join("agents.json");
+        let path = dir.join(crate::persistence::PROFILES_FILE);
         let reg = ProfileRegistry::new(Arc::new(FileProfileStore::new(dir.clone())));
         let p = sample();
         let id = p.id;
@@ -2562,7 +3255,7 @@ mod tests {
             reg.commit_session_id(id, live, None, sid);
             let before = reg.get(id).unwrap();
             let mut moved = before.clone();
-            moved.cwd = PathBuf::from("C:/elsewhere");
+            moved.env = vec![("MOVED".into(), "1".into())];
             store.set(failure);
 
             let err = reg.try_rename(id, Some("new name".into())).unwrap_err();
@@ -2586,7 +3279,7 @@ mod tests {
             assert_eq!(after.display_name, None, "{failure:?}");
             assert_eq!(after.parent_id, None);
             assert!(after.auto_restore);
-            assert_eq!(after.cwd, before.cwd);
+            assert_eq!(after.env, before.env);
             assert_eq!(after.backend_session_id, Some(sid));
             assert_eq!(
                 reg.list().len(),
@@ -2656,7 +3349,7 @@ mod tests {
         assert!(!reg.try_rename(Uuid::new_v4(), None).unwrap());
         assert!(reg.try_update_with(id, |p| p.auto_restore = false).unwrap());
         let mut moved = reg.get(id).unwrap();
-        moved.cwd = PathBuf::from("C:/elsewhere");
+        moved.env = vec![("MOVED".into(), "1".into())];
         assert!(reg.try_update_preserving_hierarchy(moved).unwrap());
         assert!(!reg.try_update_preserving_hierarchy(sample()).unwrap());
 
@@ -2671,7 +3364,7 @@ mod tests {
         assert_eq!(disk.parent_id, Some(parent_id));
         assert_eq!(disk.display_name.as_deref(), Some("name"));
         assert!(!disk.auto_restore);
-        assert_eq!(disk.cwd, PathBuf::from("C:/elsewhere"));
+        assert_eq!(disk.env, vec![("MOVED".to_string(), "1".to_string())]);
         assert_eq!(disk.backend_session_id, None);
         assert_eq!(disk.old_session_ids, vec![sid]);
 
@@ -2816,5 +3509,503 @@ mod tests {
             as_json(reg.list()),
             "if not dirty, the last save = memory"
         );
+    }
+
+    // ── attachment read · write (TRD S25 §1-5 profile edit port · ADR-0311 · ADR-0335) ──────────────
+
+    fn attached(paths: &[&str]) -> Vec<AttachedPreset> {
+        paths
+            .iter()
+            .map(|p| AttachedPreset {
+                path: (*p).to_string(),
+            })
+            .collect()
+    }
+
+    fn rename(from: &str, to: &str) -> PresetPathRename {
+        PresetPathRename {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    /// Seeds one more profile with the attached paths.
+    fn seed_with(reg: &ProfileRegistry, paths: &[&str]) -> AgentId {
+        let mut p = sample();
+        p.presets = attached(paths);
+        let id = p.id;
+        reg.upsert(p);
+        id
+    }
+
+    fn paths_of(reg: &ProfileRegistry, id: AgentId) -> Vec<String> {
+        reg.attachments_of(id)
+            .unwrap()
+            .presets
+            .into_iter()
+            .map(|p| p.path)
+            .collect()
+    }
+
+    #[test]
+    fn attachment_reads_mirror_the_profile_fields() {
+        let (reg, _store, id) = scripted();
+        let other = seed_with(&reg, &["/a.md", "engram/default"]);
+
+        assert_eq!(
+            reg.attachments_of(id),
+            Some(Attachments {
+                default_preset: true,
+                presets: vec![],
+            }),
+            "just created = 「Default」 only"
+        );
+        assert_eq!(paths_of(&reg, other), ["/a.md", "engram/default"]);
+        assert_eq!(reg.attachments_of(Uuid::new_v4()), None);
+
+        let mut all = reg.attachments();
+        all.sort_by_key(|(id, _)| *id);
+        let mut expected = vec![
+            (id, reg.attachments_of(id).unwrap()),
+            (other, reg.attachments_of(other).unwrap()),
+        ];
+        expected.sort_by_key(|(id, _)| *id);
+        assert_eq!(all, expected);
+    }
+
+    #[test]
+    fn launch_inputs_unchanged_tells_same_changed_and_gone() {
+        let (reg, store, id) = scripted();
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        let before = store.attempts();
+
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+        assert_eq!(store.attempts(), before, "the comparison does not save");
+
+        let next = Attachments {
+            default_preset: false,
+            presets: attached(&["/a.md"]),
+        };
+        assert!(reg.try_set_attachments(id, next).unwrap());
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(false));
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+
+        // Command · env are in the same comparison — the spawn merge moves those two from the caller copy.
+        assert!(reg.update_with(id, |p| p.env.push(("ADDED".into(), "1".into()))));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(false));
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert!(reg.update_with(id, |p| p.command = AgentCommand::Shell {
+            program: "other".into(),
+            args: vec![],
+        }));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(false));
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+
+        // The working folder is outside the comparison (the launch reservation guards it).
+        assert!(reg.update_with(id, |p| p.cwd = PathBuf::from("/elsewhere")));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+
+        reg.try_remove(id).unwrap();
+        assert_eq!(
+            reg.launch_inputs_unchanged(id, &seen),
+            None,
+            "a vanished profile is told apart from 「changed」"
+        );
+    }
+
+    #[test]
+    fn try_set_attachments_saves_a_change_and_reports_whether_the_agent_exists() {
+        let (reg, store, id) = scripted();
+        let next = Attachments {
+            default_preset: false,
+            presets: attached(&["/b.md", "/a.md"]),
+        };
+
+        assert!(reg.try_set_attachments(id, next.clone()).unwrap());
+        let disk = store.disk(id).unwrap();
+        assert!(!disk.default_preset);
+        assert_eq!(disk.presets, next.presets, "attach order kept");
+
+        let before = store.attempts();
+        assert!(
+            reg.try_set_attachments(id, next.clone()).unwrap(),
+            "the same value is still 「present」"
+        );
+        assert_eq!(store.attempts(), before, "the same value is not saved");
+
+        assert!(
+            !reg.try_set_attachments(Uuid::new_v4(), next).unwrap(),
+            "`false` = not in the roster"
+        );
+    }
+
+    #[test]
+    fn attachment_writes_that_fail_to_save_leave_memory_as_it_was() {
+        for failure in FAILURES {
+            let (reg, store, id) = scripted();
+            let other = seed_with(&reg, &["/a.md"]);
+            let before = (reg.attachments_of(id), reg.attachments_of(other));
+            store.set(failure);
+
+            let err = reg
+                .try_set_attachments(
+                    id,
+                    Attachments {
+                        default_preset: false,
+                        presets: attached(&["/x.md"]),
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(
+                    (failure, &err),
+                    (Outcome::FailsIo, StoreError::Io(_))
+                        | (Outcome::Refuses(_), StoreError::Refused(_))
+                ),
+                "returns the store's `Err` as is — {failure:?} → {err}"
+            );
+            assert!(reg
+                .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+                .is_err());
+
+            assert_eq!(
+                (reg.attachments_of(id), reg.attachments_of(other)),
+                before,
+                "{failure:?}"
+            );
+            assert!(!reg.is_dirty(), "{failure:?}");
+        }
+    }
+
+    /// The mapping applies all at once — each line matches only original values (ADR-0335).
+    #[test]
+    fn rewrite_maps_every_matching_agent_once_against_the_original_values() {
+        let (reg, store, untouched) = scripted();
+        let a = seed_with(&reg, &["/a.md", "/x.md", "/a.md"]);
+        let b = seed_with(&reg, &["/b.md"]);
+        let c = seed_with(&reg, &["/c.md"]);
+        let x = seed_with(&reg, &["/x.md"]);
+        let before = store.attempts();
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[
+                rename("/a.md", "/b.md"),
+                rename("/b.md", "/c.md"),
+                rename("/x.md", "/x.md"),
+            ])
+            .unwrap();
+
+        let mut expected = vec![a, b];
+        expected.sort_unstable();
+        assert_eq!(
+            changed, expected,
+            "changed agents only — an identity mapping (`/x.md` → `/x.md`) is not a change"
+        );
+        assert_eq!(
+            paths_of(&reg, a),
+            ["/b.md", "/x.md"],
+            "`/a.md` becomes `/b.md` — it does not chain on to `/c.md` · the later duplicate is removed"
+        );
+        assert_eq!(paths_of(&reg, b), ["/c.md"]);
+        assert_eq!(paths_of(&reg, c), ["/c.md"]);
+        assert_eq!(paths_of(&reg, x), ["/x.md"]);
+        assert!(paths_of(&reg, untouched).is_empty());
+        assert_eq!(store.attempts(), before + 1, "the whole roster in one save");
+        assert_eq!(
+            store
+                .disk(a)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["/b.md", "/x.md"]
+        );
+    }
+
+    #[test]
+    fn rewrite_with_a_repeated_source_uses_its_first_line() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[
+                rename("/a.md", "/first.md"),
+                rename("/a.md", "/second.md"),
+            ])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, a), ["/first.md"]);
+    }
+
+    #[test]
+    fn rewrite_with_nothing_to_change_saves_nothing() {
+        let (reg, store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+        let before = store.attempts();
+
+        assert!(reg
+            .try_rewrite_preset_paths(&[rename("/nowhere.md", "/b.md")])
+            .unwrap()
+            .is_empty());
+        assert!(reg.try_rewrite_preset_paths(&[]).unwrap().is_empty());
+        assert_eq!(store.attempts(), before);
+        assert_eq!(paths_of(&reg, a), ["/a.md"]);
+    }
+
+    /// Matches the whole path with platform `same_path` — no prefix match (a folder move is expanded per item by the caller).
+    /// Case follows the OS rules (Windows = folds · elsewhere = case-sensitive — ADR-0325 · ADR-0335).
+    #[test]
+    fn rewrite_matches_the_whole_path_by_same_path() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/dir/a.md", "/A.md"]);
+        let folds =
+            engram_dashboard_platform::fs::same_path(Path::new("/A.md"), Path::new("/a.md"));
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/dir", "/moved"), rename("/a.md", "/b.md")])
+            .unwrap();
+
+        if folds {
+            assert_eq!(changed, vec![a]);
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md", "/b.md"]);
+        } else {
+            assert!(changed.is_empty());
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md", "/A.md"]);
+        }
+    }
+
+    /// 「Changed」 is literal — a case-only fix of a name is a change too. Several `from` with the same key = the first line wins.
+    #[test]
+    fn rewrite_counts_a_case_only_rename_as_a_change() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/A.md"), rename("/A.md", "/second.md")])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, a), ["/A.md"]);
+    }
+
+    /// Return order = id order — not the iteration order of the roster (`HashMap`). With eight, the chance of matching by luck is 1/8!.
+    #[test]
+    fn rewrite_returns_the_changed_agents_in_id_order() {
+        let (reg, _store, _id) = scripted();
+        let mut ids: Vec<AgentId> = (0..8).map(|_| seed_with(&reg, &["/a.md"])).collect();
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+            .unwrap();
+
+        ids.sort_unstable();
+        assert_eq!(changed, ids);
+    }
+
+    /// Paths that coincide after the rewrite keep only the first — the later spot of an overwrite-move is leftover.
+    #[test]
+    fn rewrite_keeps_only_the_first_of_paths_that_now_coincide() {
+        let (reg, store, _id) = scripted();
+        let ab = seed_with(&reg, &["/a.md", "/b.md"]);
+        let ba = seed_with(&reg, &["/b.md", "/a.md"]);
+        let axb = seed_with(&reg, &["/a.md", "/x.md", "/b.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+            .unwrap();
+
+        let mut expected = vec![ab, ba, axb];
+        expected.sort_unstable();
+        assert_eq!(changed, expected);
+        assert_eq!(paths_of(&reg, ab), ["/b.md"]);
+        assert_eq!(paths_of(&reg, ba), ["/b.md"], "keeps the first spot");
+        assert_eq!(paths_of(&reg, axb), ["/b.md", "/x.md"]);
+        assert_eq!(
+            store
+                .disk(ab)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["/b.md"]
+        );
+    }
+
+    /// Coincidence is judged by `same_path` too — on Windows `/B.md`, differing only in case, equals `/b.md`, so only the first stays.
+    #[test]
+    fn rewrite_dedupes_by_same_path() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md", "/B.md"]);
+        let folds =
+            engram_dashboard_platform::fs::same_path(Path::new("/B.md"), Path::new("/b.md"));
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md")])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        if folds {
+            assert_eq!(paths_of(&reg, a), ["/b.md"]);
+        } else {
+            assert_eq!(paths_of(&reg, a), ["/b.md", "/B.md"]);
+        }
+    }
+
+    /// The list of an agent not changed this time stays as is even if it already has duplicates.
+    #[test]
+    fn rewrite_leaves_an_untouched_agents_duplicates_alone() {
+        let (reg, _store, _id) = scripted();
+        let dup = seed_with(&reg, &["/d.md", "/d.md"]);
+        let a = seed_with(&reg, &["/a.md"]);
+
+        let changed = reg
+            .try_rewrite_preset_paths(&[rename("/a.md", "/b.md"), rename("/d.md", "/d.md")])
+            .unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, dup), ["/d.md", "/d.md"]);
+    }
+
+    fn strings(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    /// Removal spans the whole roster, and the order of the remaining items · the 「Default」 field stay (ADR-0339).
+    #[test]
+    fn remove_drops_matching_entries_across_agents_and_keeps_the_rest_in_order() {
+        let (reg, store, untouched) = scripted();
+        let a = seed_with(&reg, &["/x.md", "/a.md", "/y.md", "/a.md", "/z.md"]);
+        let b = seed_with(&reg, &["/b.md", "/x.md"]);
+        let c = seed_with(&reg, &["/c.md"]);
+        let emptied = seed_with(&reg, &["/a.md"]);
+        // With the default (true) a touched field would go unnoticed — set the two that change to false and watch them.
+        assert!(reg.update_with(a, |p| p.default_preset = false));
+        assert!(reg.update_with(emptied, |p| p.default_preset = false));
+        let before = store.attempts();
+
+        let changed = reg
+            .try_remove_preset_paths(&strings(&["/a.md", "/b.md"]))
+            .unwrap();
+
+        let mut expected = vec![a, b, emptied];
+        expected.sort_unstable();
+        assert_eq!(changed, expected);
+        assert_eq!(paths_of(&reg, a), ["/x.md", "/y.md", "/z.md"]);
+        assert_eq!(paths_of(&reg, b), ["/x.md"]);
+        assert_eq!(paths_of(&reg, c), ["/c.md"]);
+        assert!(paths_of(&reg, untouched).is_empty());
+        assert!(paths_of(&reg, emptied).is_empty());
+        assert!(
+            !reg.attachments_of(a).unwrap().default_preset,
+            "the 「Default」 field stays"
+        );
+        assert!(
+            !reg.attachments_of(emptied).unwrap().default_preset,
+            "the 「Default」 field stays even with an empty list"
+        );
+        assert_eq!(store.attempts(), before + 1, "the whole roster in one save");
+        assert_eq!(
+            store
+                .disk(a)
+                .unwrap()
+                .presets
+                .into_iter()
+                .map(|p| p.path)
+                .collect::<Vec<_>>(),
+            ["/x.md", "/y.md", "/z.md"]
+        );
+    }
+
+    /// Removal does not deduplicate the remaining items — unlike a rewrite, removal creates no duplicates (ADR-0339).
+    #[test]
+    fn remove_keeps_surviving_duplicates() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/x.md", "/a.md", "/x.md"]);
+
+        let changed = reg.try_remove_preset_paths(&strings(&["/a.md"])).unwrap();
+
+        assert_eq!(changed, vec![a]);
+        assert_eq!(paths_of(&reg, a), ["/x.md", "/x.md"]);
+    }
+
+    /// Matching uses the whole path with platform `same_path` — no prefix match, and case follows the OS rules (ADR-0325).
+    #[test]
+    fn remove_matches_the_whole_path_by_same_path() {
+        let (reg, _store, _id) = scripted();
+        let a = seed_with(&reg, &["/dir/a.md", "/A.md"]);
+        let folds =
+            engram_dashboard_platform::fs::same_path(Path::new("/A.md"), Path::new("/a.md"));
+
+        let changed = reg
+            .try_remove_preset_paths(&strings(&["/dir", "/a.md"]))
+            .unwrap();
+
+        if folds {
+            assert_eq!(changed, vec![a]);
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md"]);
+        } else {
+            assert!(changed.is_empty());
+            assert_eq!(paths_of(&reg, a), ["/dir/a.md", "/A.md"]);
+        }
+    }
+
+    /// Return order = id order — not the iteration order of the roster (`HashMap`). With eight, the chance of matching by luck is 1/8!.
+    #[test]
+    fn remove_returns_the_changed_agents_in_id_order() {
+        let (reg, _store, _id) = scripted();
+        let mut ids: Vec<AgentId> = (0..8).map(|_| seed_with(&reg, &["/a.md"])).collect();
+
+        let changed = reg.try_remove_preset_paths(&strings(&["/a.md"])).unwrap();
+
+        ids.sort_unstable();
+        assert_eq!(changed, ids);
+    }
+
+    #[test]
+    fn remove_with_nothing_to_remove_saves_nothing() {
+        let (reg, store, _id) = scripted();
+        let a = seed_with(&reg, &["/a.md"]);
+        let before = store.attempts();
+
+        assert!(reg
+            .try_remove_preset_paths(&strings(&["/nowhere.md"]))
+            .unwrap()
+            .is_empty());
+        assert!(reg.try_remove_preset_paths(&[]).unwrap().is_empty());
+        assert_eq!(store.attempts(), before);
+        assert_eq!(paths_of(&reg, a), ["/a.md"]);
+    }
+
+    #[test]
+    fn remove_that_fails_to_save_leaves_memory_as_it_was() {
+        for failure in FAILURES {
+            let (reg, store, _id) = scripted();
+            let a = seed_with(&reg, &["/a.md", "/b.md"]);
+            let b = seed_with(&reg, &["/a.md"]);
+            let before = (reg.attachments_of(a), reg.attachments_of(b));
+            store.set(failure);
+
+            let err = reg
+                .try_remove_preset_paths(&strings(&["/a.md"]))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    (failure, &err),
+                    (Outcome::FailsIo, StoreError::Io(_))
+                        | (Outcome::Refuses(_), StoreError::Refused(_))
+                ),
+                "returns the store's `Err` as is — {failure:?} → {err}"
+            );
+            assert_eq!(
+                (reg.attachments_of(a), reg.attachments_of(b)),
+                before,
+                "{failure:?}"
+            );
+            assert!(!reg.is_dirty(), "{failure:?}");
+        }
     }
 }

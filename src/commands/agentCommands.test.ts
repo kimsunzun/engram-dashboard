@@ -50,20 +50,14 @@ beforeEach(() => {
   clientMock.interruptAgent.mockReset()
   clientMock.interruptAgent.mockImplementation(async () => undefined)
   dialogMock.open.mockReset()
-  useAgentStore.setState({ presets: [], profiles: [] })
+  useAgentStore.setState({ profiles: [] })
   useInterruptStore.setState({ pending: {}, views: {} })
 })
 afterEach(() => {
-  useAgentStore.setState({ presets: [], profiles: [] })
+  useAgentStore.setState({ profiles: [] })
 })
 
 describe('agent.spawn routing', () => {
-  it('preset(id) → resolve cwd from store.presets → spawnAgent(cwd)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram', name: null }] })
-    run('agent.spawn', { preset: 'pr1' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work/engram', 'claude')
-  })
-
   it('raw cwd → spawnAgent(trimmed cwd)', () => {
     run('agent.spawn', { cwd: '  C:/new/path  ' })
     expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/new/path', 'claude')
@@ -78,18 +72,6 @@ describe('agent.spawn routing', () => {
     expect(() => run('agent.spawn', { cwd: '   ' })).toThrow()
     expect(() => run('agent.spawn', {})).toThrow()
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
-  })
-
-  it('unknown preset id → throw (no silent no-op)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work', name: null }] })
-    expect(() => run('agent.spawn', { preset: 'nope' })).toThrow(/unknown preset/)
-    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
-  })
-
-  it('preset wins over cwd (when both are given, the resolved preset value is used)', () => {
-    useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/from/preset', name: null }] })
-    run('agent.spawn', { preset: 'pr1', cwd: 'C:/ignored' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/from/preset', 'claude')
   })
 })
 

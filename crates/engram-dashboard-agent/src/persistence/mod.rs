@@ -1,5 +1,9 @@
-//! Profile and preset persistence — the store for `agents.json` and `presets.json`. Both files use this module's one internal store
-//! (same rules, same implementation).
+//! Profile persistence — the store of the profile file ([`PROFILES_FILE`]).
+//!
+//! ★The old version's `agents.json` is not this store's file★ (ADR-0314 decision 5 — old data is dropped without asking) — it is
+//! never read, changed or deleted, and its temp-file names are not swept. So a folder holding only the old file starts with an empty
+//! roster, and downgrading to an old build and back leaves each version's file untouched — that is why there is no version marker ·
+//! migration · backup. Do not make the old name read again — old-version profiles (old agents) would mix into the new roster.
 //!
 //! The rules are base `file`'s data-file rules (ADR-0291):
 //! - Writes are atomic (temp in the same folder → rename) — no half file on a crash.
@@ -11,9 +15,10 @@
 //!
 //! ★Serializing saves is the caller's job★ — the registry saves while holding its own map lock (ADR-0071) and is the only production caller.
 //! This module holds one leaf lock (the store-state field) and does no IO, logging or outside calls under it — lock order =
-//! `latch → expected field → profiles|presets → store-state field`.
+//! `latch → expected field → profiles → store-state field`.
+// ADR-0291
+// ADR-0314
 
-use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -31,15 +36,12 @@ use serde_json::{Map, Value};
 
 use crate::profile::{AgentProfile, ProfileStore, Refusal, StoreError, StoreStatus};
 
-pub mod presets;
-pub use presets::{FilePresetStore, PRESETS_FILE};
-
 /// File name of the profile store — the text that tells the caller of a save refusal or failure names this file.
-pub const AGENTS_FILE: &str = "agents.json";
+/// ★Change the same-named line in `.gitignore` with it★ — profiles carry plaintext `env` (ADR-0264 decision 7).
+pub const PROFILES_FILE: &str = "agent-profiles.json";
 
 const PROFILES: FileKind = FileKind {
-    name: AGENTS_FILE,
-    legacy_tmp: "agents.json.tmp",
+    name: PROFILES_FILE,
     list_key: "profiles",
     spec: file::Spec {
         version_key: "schema_version",
@@ -104,7 +106,8 @@ fn warn_if_secret(profiles: &[AgentProfile]) {
                 tracing::warn!(
                     agent = %p.id,
                     env_key = %k,
-                    "profile env has a key that looks like a credential — stored in plaintext in agents.json. Do not put credentials in env."
+                    file = PROFILES_FILE,
+                    "profile env has a key that looks like a credential — stored in plaintext in the profile file. Do not put credentials in env."
                 );
             }
         }
@@ -118,11 +121,13 @@ const DATA_HOOKS: OsHooks = OsHooks {
     sync_dir,
 };
 
-/// Load read — uses a separate long budget.
-// ADR-0291 R14 (D7): a lock still held there makes this run read-only for its whole duration (R17), so it is kept long so that one brief
-//   hold does not bind the whole run. The upper end is the shell's daemon-discovery deadline (5 s — on failure `Down` without retry):
-//   loading comes before the connection info is published, and a worst case of ~2 s for both files leaves the rest of startup its share.
-const LOAD_HOOKS: OsHooks = OsHooks {
+/// The load-read budget — longer than the data-file one. Every data file the daemon reads once at boot uses it: this
+/// store's file, asset-library `library.json` and daemon `identity.json`.
+// ADR-0291 R14 (D7): a lock still held after it makes the file read-only for the whole run (R17), so it is long enough
+//   that one brief hold does not bind the run. The upper end is the shell's daemon-discovery deadline (5 s — on
+//   failure `Down` with no retry): the boot loads run before the connection record is published, about 1 s each in
+//   the worst case, about 3 s for the three files, which leaves the rest of the boot its share.
+pub const LOAD_HOOKS: OsHooks = OsHooks {
     retry: retry_load,
     sync_dir,
 };
@@ -154,9 +159,7 @@ fn retry_load(attempt: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
 #[derive(Clone, Copy)]
 struct FileKind {
     name: &'static str,
-    /// The fixed temp name old builds used. `file::sweep_temps` leaves unnumbered names alone as possibly someone else's, so the store
-    ///   removes it itself (ADR-0291 R12).
-    legacy_tmp: &'static str,
+    /// The top-level field carrying the list.
     list_key: &'static str,
     spec: file::Spec,
 }
@@ -434,21 +437,6 @@ impl FileStore {
                 "could not find leftover temp files — proceeding without cleanup"
             ),
         }
-        let legacy = self.dir.join(self.kind.legacy_tmp);
-        match fs::remove_file(&legacy) {
-            Ok(()) => tracing::debug!(
-                file = name,
-                path = %legacy.display(),
-                "removed the old fixed temp file"
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                file = name,
-                path = %legacy.display(),
-                %error,
-                "could not remove the old fixed temp file"
-            ),
-        }
     }
 }
 
@@ -496,8 +484,10 @@ fn read_list<T: DeserializeOwned>(doc: &Map<String, Value>, key: &str) -> Result
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
-    use crate::profile::AgentCommand;
+    use crate::profile::{AgentCommand, AttachedPreset};
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("engram-persist-test-{name}"));
@@ -532,24 +522,22 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★A binary reverted to the previous release must be able to read this file★: that struct declares `epoch` as **required**, so
-    /// without the key parsing fails with `missing field`, that release moves the file to `.corrupt-<ts>` and starts empty, and the next
-    /// save overwrites it — profiles, session ids and tree parents disappear wholesale. The value carried is a fixed `0` (the old
-    ///   counter's "no respawn" state — see the `AgentProfile::epoch` comment), not the live marker.
+    /// The `epoch` key is a leftover placeholder no reader reads — fix this test too when removing it (rationale = the
+    /// `AgentProfile::epoch` comment).
     #[test]
-    fn agents_json_carries_a_zero_epoch_key_for_older_readers() {
+    fn the_profile_file_carries_a_zero_epoch_placeholder_not_the_live_tag() {
         let dir = temp_dir("epoch-key");
         let store = FileProfileStore::new(dir.clone());
         let mut p = sample();
         p.epoch = 0xDEAD_BEEF;
         store.save(&[p]).unwrap();
 
-        let raw = fs::read(dir.join(PROFILES.name)).expect("read agents.json");
+        let raw = fs::read(dir.join(PROFILES.name)).expect("read the profile file");
         let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON parse");
         assert_eq!(
             v["profiles"][0].get("epoch"),
             Some(&serde_json::json!(0)),
-            "the key that old readers read as required must be carried as 0: {v}"
+            "the placeholder key is carried as 0, not as the live marker: {v}"
         );
 
         assert_eq!(
@@ -566,6 +554,170 @@ mod tests {
         let store = FileProfileStore::new(dir.clone());
         assert!(store.load().is_empty());
         assert_eq!(store.status(), StoreStatus::Writable);
+    }
+
+    // ADR-0264
+    #[test]
+    fn the_repo_gitignore_covers_the_profile_file_and_its_side_copies() {
+        const GITIGNORE: &str = include_str!("../../../../.gitignore");
+        let rule = format!("**/data/daemon/state/{PROFILES_FILE}*");
+        assert!(
+            GITIGNORE.lines().any(|line| line.trim() == rule),
+            "`.gitignore` has no `{rule}` line"
+        );
+    }
+
+    // ── old-version file · new fields ──
+
+    /// The shape of the old version's `agents.json` — as that version's reader read it (no new fields).
+    const OLD_AGENTS_JSON: &str = r#"{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "00000000-0000-0000-0000-0000000000a1",
+      "name": "C:\\work\\old",
+      "display_name": "old",
+      "parent_id": null,
+      "command": { "kind": "Claude", "extra_args": [], "output_format": "Terminal" },
+      "cwd": "C:\\work\\old",
+      "env": [],
+      "backend_session_id": "00000000-0000-0000-0000-0000000000b1",
+      "old_session_ids": [],
+      "epoch": 0,
+      "auto_restore": true,
+      "restart_policy": "Always",
+      "restart_count": 0,
+      "failed_reason": null,
+      "created_at": 1,
+      "last_active": 1,
+      "last_start_at": null
+    }
+  ]
+}"#;
+
+    #[test]
+    fn only_the_old_agents_json_present_starts_an_empty_roster_and_leaves_it_byte_for_byte() {
+        let dir = temp_dir("old-only");
+        put(&dir, "agents.json", OLD_AGENTS_JSON);
+        let before = fs::read(dir.join("agents.json")).unwrap();
+
+        let store = FileProfileStore::new(dir.clone());
+        assert!(
+            store.load().is_empty(),
+            "an old-version agent mixed into the new roster"
+        );
+        assert_eq!(store.status(), StoreStatus::Writable);
+        let p = sample();
+        store.save(std::slice::from_ref(&p)).unwrap();
+
+        assert_eq!(
+            fs::read(dir.join("agents.json")).unwrap(),
+            before,
+            "the old-version file is neither read nor changed"
+        );
+        assert!(!dir.join("agents.json.corrupt").exists());
+        let ours = FileProfileStore::new(dir.clone()).load();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].id, p.id);
+
+        // The downgrade-and-upgrade path — even if the old-version file changes in between, the new roster neither mixes nor empties.
+        put(
+            &dir,
+            "agents.json",
+            &OLD_AGENTS_JSON.replace(r#""auto_restore": true"#, r#""auto_restore": false"#),
+        );
+        let reloaded = FileProfileStore::new(dir.clone()).load();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded[0].id, p.id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_new_fields_survive_a_save_and_reload_and_the_cwd_key_keeps_its_spelling() {
+        let dir = temp_dir("new-fields");
+        let mut p = sample();
+        p.default_preset = false;
+        p.presets = vec![
+            AttachedPreset {
+                path: "프리셋/리뷰.yaml".into(), // hangul-ok — non-ASCII path fixture
+            },
+            AttachedPreset {
+                path: "공용/코딩 습관.yaml".into(), // hangul-ok — non-ASCII path fixture
+            },
+        ];
+        p.last_applied_instructions_hash = Some("ab12".into());
+        FileProfileStore::new(dir.clone())
+            .save(std::slice::from_ref(&p))
+            .unwrap();
+
+        let raw: Value =
+            serde_json::from_slice(&fs::read(dir.join(PROFILES.name)).unwrap()).unwrap();
+        assert!(raw["profiles"][0].get("cwd").is_some(), "{raw}");
+
+        let back = &FileProfileStore::new(dir.clone()).load()[0];
+        assert!(!back.default_preset);
+        assert_eq!(back.presets, p.presets, "attach order kept too");
+        assert_eq!(back.last_applied_instructions_hash.as_deref(), Some("ab12"));
+        assert_eq!(back.cwd, p.cwd);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The notice fingerprint survives a daemon restart — a recorded empty set stays distinct from "nothing recorded",
+    /// and an item without the key reads as nothing recorded.
+    // ADR-0341
+    #[test]
+    fn the_notice_fingerprint_survives_a_save_and_reload() {
+        let dir = temp_dir("notice-fingerprint");
+        let mut shown = sample();
+        shown.notice_fingerprint = Some("[\"omitted\",{}]".into());
+        let mut empty = sample();
+        empty.notice_fingerprint = Some(String::new());
+        let never = sample();
+        FileProfileStore::new(dir.clone())
+            .save(&[shown.clone(), empty.clone(), never.clone()])
+            .unwrap();
+
+        let back = FileProfileStore::new(dir.clone()).load();
+        let of = |id| {
+            back.iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .notice_fingerprint
+                .clone()
+        };
+        assert_eq!(of(shown.id), shown.notice_fingerprint);
+        assert_eq!(of(empty.id), Some(String::new()));
+        assert_eq!(of(never.id), None);
+
+        let _ = fs::remove_dir_all(&dir);
+
+        let without_key = temp_dir("notice-fingerprint-missing");
+        put(&without_key, PROFILES.name, OLD_AGENTS_JSON);
+        assert_eq!(
+            FileProfileStore::new(without_key.clone()).load()[0].notice_fingerprint,
+            None
+        );
+        let _ = fs::remove_dir_all(&without_key);
+    }
+
+    /// An item without the new fields is not damage either — it reads as freshly created.
+    #[test]
+    fn an_item_without_the_new_fields_reads_as_freshly_created() {
+        let dir = temp_dir("new-fields-missing");
+        put(&dir, PROFILES.name, OLD_AGENTS_JSON);
+
+        let store = FileProfileStore::new(dir.clone());
+        let loaded = store.load();
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].default_preset);
+        assert!(loaded[0].presets.is_empty());
+        assert_eq!(loaded[0].last_applied_instructions_hash, None);
+        store.save(&loaded).unwrap();
+        assert!(
+            !dir.join(aside_name()).exists(),
+            "a loaded file is ours, so no side copy is made"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── Damaged · newer edition · read failure ──
@@ -848,23 +1000,27 @@ mod tests {
 
     // ── Startup sweep ──
 
+    /// ★Old-version temp names are not swept★ — the old version's `agents.json` side is not touched by a single byte (module head).
     #[test]
-    fn the_first_load_sweeps_the_old_fixed_temp_and_our_own_numbered_temps() {
+    fn the_first_load_sweeps_our_own_numbered_temps_but_not_the_old_files() {
         let dir = temp_dir("sweep");
         let me = std::process::id();
         let own = format!("{}.tmp{me}.7", PROFILES.name);
-        put(&dir, PROFILES.legacy_tmp, "old");
+        let old_numbered = format!("agents.json.tmp{me}.7");
         put(&dir, &own, "half");
-        put(&dir, "agents.json.tmpx", "not ours");
+        put(&dir, &format!("{}.tmpx", PROFILES.name), "not ours");
+        put(&dir, "agents.json.tmp", "old fixed temp");
+        put(&dir, &old_numbered, "old numbered temp");
 
         let store = FileProfileStore::new(dir.clone());
         store.load();
-        assert!(!dir.join(PROFILES.legacy_tmp).exists());
         assert!(!dir.join(&own).exists());
         assert!(
-            dir.join("agents.json.tmpx").exists(),
+            dir.join(format!("{}.tmpx", PROFILES.name)).exists(),
             "names not in our form are left alone"
         );
+        assert_eq!(read(&dir, "agents.json.tmp"), "old fixed temp");
+        assert_eq!(read(&dir, &old_numbered), "old numbered temp");
 
         // Later loads do not sweep — removing the temp file of a save in progress in between would make its rename fail.
         put(&dir, &own, "in flight");

@@ -14,6 +14,7 @@ use axum::extract::State;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use engram_dashboard_agent::commands::SHELL_ONLY;
 use engram_dashboard_agent::manager::AgentManager;
 use http::{Method, Request, StatusCode};
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -912,7 +913,7 @@ struct ControlCatalogState {
 ///   - Fixed = executor hazard. `CommandRoster::entries` takes a blocking mutex, which parks an async worker instead of yielding; the blocking pool now bears the wait, matching the sibling (`control_agent_handler`).
 ///   - Not fixed = lock hold time. `entries` still clones the whole registry (cap 4096 × help 4 KiB) while holding the mutex shared with command delivery (`OwnerLookupSource::lookup`) and connection cleanup, so this route still contends with delivery — what changed is who waits.
 ///     The cloning discipline is the registry module's (the "known cost" in the `command_roster` header).
-/// `decls()` rebuilds `help` on every call (tools crate `CommandTable::decls`) — leave it: the own table has 5 entries, the cost is dominated by the registry side, and memoization belongs to that crate; if the table grows, measure there.
+/// `decls()` rebuilds `help` on every call (tools crate `CommandTable::decls`) — leave it: the own table holds only the daemon's declared commands (a few dozen), the cost is dominated by the registry side, and memoization belongs to that crate; if the table grows, measure there.
 async fn control_commands_handler(
     axum::extract::State(state): axum::extract::State<ControlCatalogState>,
     identity: Option<axum::Extension<BoundIdentity>>,
@@ -927,7 +928,9 @@ async fn control_commands_handler(
             .map(|table| table.decls())
             .unwrap_or_default();
         let registered = state.bus.roster().entries();
-        super::catalog::handle_list(mine, registered)
+        // ADR-0419: the control list omits the shell-only names, which the control routes refuse (`commands::call_daemon_command`);
+        //   WS `ListCommands` keeps them — the shell finds them there.
+        super::catalog::handle_list(mine, registered, SHELL_ONLY)
     })
     .await
     else {
@@ -939,8 +942,12 @@ async fn control_commands_handler(
 
 /// Full-name call — always 200 + JSON (success and bounce alike), the same contract as `/control/agent`; the `Json<…>` extractor and `spawn_blocking` reasoning is canonical in `control_agent_handler` (same table, same function, same treatment).
 ///
-/// This route may be delayed until the deadline (ADR-0160 impact section): another party's name is relayed to its owner and an unanswering owner yields `TIMEOUT` at `CommandDeliveries::DEFAULT_DEADLINE`; the daemon's own names finish on the spot.
-/// `request_id` may be sent by the caller (ADR-0161 decision 1); otherwise the decider issues one (`catalog::handle_call`) — that split is not recreated here.
+/// ★This route **may be delayed until the deadline** (ADR-0160 impact section)★: another party's name is relayed to its owner, and if the owner
+///   does not answer, the seat's deadline (`CommandDeliveries::DEFAULT_DEADLINE`, or the relay launch seat for a
+///   launch-class name — ADR-0369) yields `TIMEOUT`. The daemon's own names
+///   finish on the spot as before, so they do not bear this delay.
+/// ★`request_id` **may be sent by the caller**★ (ADR-0161 decision 1) — if not sent, the decider issues one
+///   (`catalog::handle_call`). That split is not recreated here.
 async fn control_call_handler(
     axum::extract::State(state): axum::extract::State<ControlCatalogState>,
     binding: Option<axum::Extension<super::registry::TokenBinding>>,

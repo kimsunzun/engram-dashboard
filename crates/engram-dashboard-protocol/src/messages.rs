@@ -6,9 +6,9 @@ use ts_rs::TS;
 
 use crate::domain::{
     AgentBackendKind, AgentInfo, AgentOutputFormat, AgentProfile, AgentStatus, Capabilities,
-    EnvelopeFormat, Preset, RestoreReport, SnapshotChunk, UsageLimitSnapshot,
+    EnvelopeFormat, RestoreReport, SnapshotChunk, UsageLimitSnapshot,
 };
-use crate::ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
+use crate::ids::{AgentId, OwnerToken, ProfileId, RequestId};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -118,6 +118,13 @@ pub enum AgentCommand {
         #[serde(default)]
         backend: Option<AgentBackendKind>,
         request_id: RequestId,
+        /// The sender shows the reply's `notices` to a reader, so the daemon may mark the set as shown for the new
+        /// agent (agent `NoticeDelivery::Delivered`). Absent = `false` = withheld: nothing is recorded, and the next
+        /// delivering activation still gets the set.
+        // ADR-0348 · TRD S25 step 20 (M13)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        deliver_notices: bool,
     },
 
     /// The response is [`AgentEvent::ProfileList`] with request_id attached (dedicated reply).
@@ -203,36 +210,6 @@ pub enum AgentCommand {
         request_id: RequestId,
     },
 
-    // ── Preset CRUD (ADR-0061) ──────────────────────────────────────────────────────
-    // Preset = a pre-spawn "cwd bookmark" (not an instance). The daemon solely owns presets.json and
-    // does CRUD only over the wire.
-    /// The response is the dedicated reply [`AgentEvent::PresetList`] with request_id attached (to the requesting connection only).
-    ListPresets { request_id: RequestId },
-
-    /// Create a preset (register · persist only — does not spawn). The daemon normalizes the cwd (dunce::canonicalize) before storing.
-    /// The name is not stored (derived from the cwd basename — ADR-0061). After success, [`AgentEvent::PresetListUpdated`] broadcast.
-    CreatePreset { cwd: String, request_id: RequestId },
-
-    /// Delete a preset (unregister · persist). ★Deleting a preset ≠ ending an agent★ (ADR-0061) — agents already
-    /// spawned from that preset live on regardless. No-op for an unknown id. After success, [`AgentEvent::PresetListUpdated`] broadcast.
-    DeletePreset {
-        #[ts(type = "string")]
-        preset_id: PresetId,
-        request_id: RequestId,
-    },
-
-    /// Set/clear the preset display name override (ADR-0061 enrichment). `name=Some` → store override, `None` → clear
-    /// (back to the cwd basename derivation). trim · empty-string refusal · skip-if-unchanged are handled by the frontend right before confirming — only a valid value
-    /// or an explicit None arrives here. No-op for an unknown id (Ack, same shape as DeletePreset). After success, [`AgentEvent::PresetListUpdated`]
-    /// broadcast (no optimistic update — every window synced, ADR-0061 invariant).
-    RenamePreset {
-        #[ts(type = "string")]
-        preset_id: PresetId,
-        #[ts(type = "string | null")]
-        name: Option<String>,
-        request_id: RequestId,
-    },
-
     /// Global envelope format switch (ADR-0096) — switches the A→B message envelope to colon/xml. The daemon holds **one global
     /// state**, and every later `wrap_message` assembly reads that value (ADR-0086 single wrap point
     /// invariant kept — the state is only an input, assembly is still in one place). ★Steering surface only★: this command arrives only via the path where the src-tauri Tauri
@@ -279,7 +256,9 @@ pub enum AgentCommand {
     RegisterCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
-        #[ts(type = "Array<{ name: string, help: string, agent_args?: Array<string> }>")]
+        #[ts(
+            type = "Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: \"Ordinary\" | \"Launch\" }>"
+        )]
         decls: Box<RawValue>,
         catalog_version: u32,
         request_id: RequestId,
@@ -295,7 +274,9 @@ pub enum AgentCommand {
     UpdateCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
-        #[ts(type = "Array<{ name: string, help: string, agent_args?: Array<string> }>")]
+        #[ts(
+            type = "Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: \"Ordinary\" | \"Launch\" }>"
+        )]
         added: Box<RawValue>,
         removed: Vec<String>,
         request_id: RequestId,
@@ -563,17 +544,6 @@ pub enum AgentEvent {
         profiles: Vec<AgentProfile>,
     },
 
-    /// Preset list update (broadcast, ADR-0061). Auto-pushed after CRUD (create/delete).
-    PresetListUpdated {
-        presets: Vec<Preset>,
-    },
-    /// ListPresets query response (dedicated reply, ADR-0061) — request_id echo. Same payload as the broadcast PresetListUpdated,
-    /// but request_id is attached to remove piggyback matching (same shape as ProfileList).
-    PresetList {
-        request_id: RequestId,
-        presets: Vec<Preset>,
-    },
-
     /// GetSnapshot response (dedicated reply) — the replay buffer snapshot at that moment.
     /// request_id echo to match concurrent queries of the same agent exactly (removes the old agent_id piggyback matching).
     /// Not a broadcast (responds only to the specific request).
@@ -595,6 +565,16 @@ pub enum AgentEvent {
     Spawned {
         request_id: RequestId,
         agent: AgentInfo,
+        /// The launch notices of this activation, one row each: `{"code", "args", "line"?, "text"}` — `args` = the
+        /// code's free JSON, `line` = the 1-based line in the asset file (only when the notice names one), `text` =
+        /// the wording for a reader. Rows as agent `launch::notice_row` builds them.
+        ///
+        /// Absent = none: the activation launched nothing, its plan had none, or this agent was already shown the same
+        /// set. The daemon never sends an empty list.
+        // TRD S25 §1-8 · §5-2 16
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "Array<unknown>")]
+        notices: Option<Vec<serde_json::Value>>,
     },
 
     /// [`AgentCommand::ListCommands`] response (dedicated reply, ADR-0155/0156) — request_id echo.
@@ -721,6 +701,23 @@ pub enum AgentEvent {
     Error {
         request_id: Option<RequestId>,
         message: String,
+        /// Present only when an activation (`Spawn`, `SpawnByCwd`, `SpawnProfile`) was refused because its launch
+        /// material is blocked — nothing was started, and `message` says the same as text. The object is the `args`
+        /// of the bus `agent.spawn` refusal (agent `launch::LaunchBlocked::to_args`): `{"reasons": [row, …]}`, a row
+        /// per reason with its `kind` (`missing` · `broken` · `conflict` · `library_unavailable`), the blocked `item`
+        /// and its `via` chain (a conflict: `items: [{"item", "via"}, …]`), and the reason's `code`, `args` and
+        /// optional 1-based `line`.
+        // TRD S25 §1-8 · §5-2 16
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, type = "Record<string, unknown>")]
+        launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+        /// Present only when an activation that creates (`SpawnByCwd`) added the agent to the roster and it did not
+        /// start — the agent stays registered and asleep under this id; wake it instead of creating another. The
+        /// shell bus `agent.spawnInto` carries it as `args.agent_id`, the same shape as bus `agent.spawn`.
+        // ADR-0348 · TRD S25 step 20 (U3)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        created_agent_id: Option<AgentId>,
     },
 }
 
@@ -1467,109 +1464,239 @@ mod tests {
         }
     }
 
-    // ── Preset wire contract (ADR-0061) — JSON envelope golden + round-trip ─────────────
-    // Pins that preset CRUD serializes in the same shape as profiles (variant name tag + fields); a golden string guards against silent
-    //   wire changes (field rename/omission).
+    // ── Activation replies: launch block reasons · launch notices (TRD S25 §5-2 16) ──
+
+    /// An agent row for the `Spawned` goldens, in the field order the wire writes.
+    const SPAWNED_AGENT_JSON: &str = r#"{"id":"11111111-1111-1111-1111-111111111111","name":"worker","cwd":"C:/proj","status":{"type":"Running"},"cols":80,"rows":24,"epoch":7,"capabilities":{"input":{"raw":true,"message":false,"attachment":false},"output":{"terminal_bytes":true,"structured":false,"markdown":false,"tool_events":false,"usage":false},"control":{"resize":true,"interrupt":true,"cancel":false,"graceful_shutdown":false},"session":{"resume":false,"snapshot":true,"cwd_env":true},"model":{"select":false,"temperature":false,"max_tokens":false}}}"#;
+
+    /// Without a block the failure keeps the old bytes, and an old daemon's failure reads as "not a block".
+    #[test]
+    fn an_error_without_a_launch_block_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(r#"{{"Error":{{"request_id":"{nil}","message":"boom"}}}}"#);
+        let event: AgentEvent = serde_json::from_str(&old).expect("an old failure decodes");
+        let AgentEvent::Error { launch_blocked, .. } = &event else {
+            panic!("Error expected: {event:?}");
+        };
+        assert_eq!(launch_blocked, &None);
+        assert_eq!(serde_json::to_string(&event).unwrap(), old);
+    }
 
     #[test]
-    fn create_preset_command_json_golden() {
-        let request_id = RequestId(Uuid::nil());
-        let cmd = AgentCommand::CreatePreset {
+    fn an_error_carries_the_launch_block_reasons_and_round_trips() {
+        let blocked = serde_json::json!({
+            "reasons": [
+                {
+                    "kind": "missing", "item": "rules/a.md", "via": ["team.yaml"],
+                    "code": "not-found", "args": { "path": "rules/a.md" }, "line": 3
+                },
+                {
+                    "kind": "conflict",
+                    "items": [{ "item": "a.md", "via": [] }, { "item": "b.md", "via": ["x.yaml"] }],
+                    "code": "same-name", "args": {}
+                }
+            ]
+        });
+        let event = AgentEvent::Error {
+            request_id: Some(RequestId(Uuid::nil())),
+            message: "launch blocked".into(),
+            launch_blocked: blocked.as_object().cloned(),
+            created_agent_id: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "Error": {
+                    "request_id": "00000000-0000-0000-0000-000000000000",
+                    "message": "launch blocked",
+                    "launch_blocked": blocked
+                }
+            })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// Without notices the success keeps the old bytes, and an old daemon's success reads as "no notices".
+    #[test]
+    fn a_spawned_reply_without_notices_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(r#"{{"Spawned":{{"request_id":"{nil}","agent":{SPAWNED_AGENT_JSON}}}}}"#);
+        let event: AgentEvent = serde_json::from_str(&old).expect("an old success decodes");
+        let AgentEvent::Spawned { notices, .. } = &event else {
+            panic!("Spawned expected: {event:?}");
+        };
+        assert_eq!(notices, &None);
+        assert_eq!(serde_json::to_string(&event).unwrap(), old);
+    }
+
+    #[test]
+    fn a_spawned_reply_carries_its_notices_and_round_trips() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let notices = serde_json::json!([
+            {
+                "code": "skipped-field", "args": { "field": "model" }, "line": 4,
+                "text": "Notice (skipped-field): intended behavior. Target — model"
+            },
+            { "code": "plain", "args": {}, "text": "Notice (plain): intended behavior." }
+        ]);
+        let mut json: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"Spawned":{{"request_id":"{nil}","agent":{SPAWNED_AGENT_JSON}}}}}"#
+        ))
+        .unwrap();
+        json["Spawned"]["notices"] = notices.clone();
+        let event: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        let AgentEvent::Spawned {
+            notices: Some(rows),
+            ..
+        } = &event
+        else {
+            panic!("Spawned with notices expected: {event:?}");
+        };
+        assert_eq!(&serde_json::Value::Array(rows.clone()), &notices);
+        assert_eq!(serde_json::to_value(&event).unwrap(), json);
+    }
+
+    // ── Create-and-start: delivery request · created-asleep id (TRD S25 step 20) ──
+
+    /// An old sender's create has no `deliver_notices` and reads as `false`; `false` keeps the old bytes.
+    #[test]
+    fn a_spawn_by_cwd_without_the_delivery_key_reads_as_false_and_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(
+            r#"{{"SpawnByCwd":{{"cwd":"C:/proj","backend":"claude","request_id":"{nil}"}}}}"#
+        );
+        let cmd: AgentCommand = serde_json::from_str(&old).expect("an old create decodes");
+        let AgentCommand::SpawnByCwd {
+            deliver_notices, ..
+        } = &cmd
+        else {
+            panic!("SpawnByCwd expected: {cmd:?}");
+        };
+        assert!(!deliver_notices);
+        assert_eq!(serde_json::to_string(&cmd).unwrap(), old);
+    }
+
+    #[test]
+    fn a_spawn_by_cwd_that_asks_for_delivery_round_trips() {
+        let cmd = AgentCommand::SpawnByCwd {
             cwd: "C:/proj".into(),
+            backend: Some(AgentBackendKind::Codex),
+            request_id: RequestId(Uuid::nil()),
+            deliver_notices: true,
+        };
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(
+            json["SpawnByCwd"]["deliver_notices"],
+            serde_json::json!(true)
+        );
+        let back: AgentCommand = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::SpawnByCwd {
+                deliver_notices: true,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// An old daemon's failure has no `created_agent_id` and reads as "nothing created"; `None` keeps the old bytes.
+    #[test]
+    fn an_error_without_a_created_agent_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(r#"{{"Error":{{"request_id":"{nil}","message":"boom"}}}}"#);
+        let event: AgentEvent = serde_json::from_str(&old).expect("an old failure decodes");
+        let AgentEvent::Error {
+            created_agent_id, ..
+        } = &event
+        else {
+            panic!("Error expected: {event:?}");
+        };
+        assert_eq!(created_agent_id, &None);
+        assert_eq!(serde_json::to_string(&event).unwrap(), old);
+    }
+
+    #[test]
+    fn an_error_carries_the_created_agent_next_to_the_launch_block_and_round_trips() {
+        let id = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
+        let blocked = serde_json::json!({ "reasons": [{ "kind": "missing", "item": "a", "via": [], "code": "c", "args": {} }] });
+        let event = AgentEvent::Error {
+            request_id: None,
+            message: "INTERNAL: agent 'w' was created but did not start".into(),
+            launch_blocked: blocked.as_object().cloned(),
+            created_agent_id: Some(id),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "Error": {
+                    "request_id": null,
+                    "message": "INTERNAL: agent 'w' was created but did not start",
+                    "launch_blocked": blocked,
+                    "created_agent_id": "11111111-1111-1111-1111-111111111111"
+                }
+            })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// A reader that predates `created_agent_id` still decodes a frame carrying it — the enums take no
+    /// `deny_unknown_fields`, so the key is dropped. Modeled as a local copy of the step-16 `Error` shape.
+    #[test]
+    fn a_reader_that_predates_the_created_agent_drops_the_key() {
+        #[derive(Debug, serde::Deserialize)]
+        enum OldEvent {
+            Error {
+                request_id: Option<RequestId>,
+                message: String,
+                #[serde(default)]
+                launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+            },
+        }
+        let event = AgentEvent::Error {
+            request_id: None,
+            message: "asleep".into(),
+            launch_blocked: None,
+            created_agent_id: Some(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("created_agent_id"), "{json}");
+        let OldEvent::Error {
             request_id,
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert_eq!(
-            json,
-            r#"{"CreatePreset":{"cwd":"C:/proj","request_id":"00000000-0000-0000-0000-000000000000"}}"#,
-            "CreatePreset wire shape does not match the golden"
-        );
-        let back: AgentCommand = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            back,
-            AgentCommand::CreatePreset { cwd, .. } if cwd == "C:/proj"
-        ));
+            message,
+            launch_blocked,
+        } = serde_json::from_str::<OldEvent>(&json).expect("an old reader decodes the new frame");
+        assert_eq!(request_id, None);
+        assert_eq!(message, "asleep");
+        assert_eq!(launch_blocked, None);
     }
 
+    /// ★The old preset wire does not decode — that is why the version is 8★ (`PROTOCOL_VERSION`'s v8 entry). A daemon of this
+    ///   version fails to parse an old shell's preset command; the version check cuts that pair before the handshake.
     #[test]
-    fn list_delete_preset_commands_roundtrip() {
-        let cases = vec![
-            AgentCommand::ListPresets {
-                request_id: RequestId(Uuid::nil()),
-            },
-            AgentCommand::DeletePreset {
-                preset_id: Uuid::nil(),
-                request_id: RequestId(Uuid::nil()),
-            },
-        ];
-        for cmd in cases {
-            let json = serde_json::to_string(&cmd).unwrap();
-            let back: AgentCommand = serde_json::from_str(&json).unwrap();
-            assert_eq!(json, serde_json::to_string(&back).unwrap());
+    fn the_retired_preset_wire_does_not_decode_and_the_version_is_8() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        for cmd in [
+            format!(r#"{{"ListPresets":{{"request_id":"{nil}"}}}}"#),
+            format!(r#"{{"CreatePreset":{{"cwd":"C:/proj","request_id":"{nil}"}}}}"#),
+            format!(r#"{{"DeletePreset":{{"preset_id":"{nil}","request_id":"{nil}"}}}}"#),
+            format!(
+                r#"{{"RenamePreset":{{"preset_id":"{nil}","name":null,"request_id":"{nil}"}}}}"#
+            ),
+        ] {
+            assert!(serde_json::from_str::<AgentCommand>(&cmd).is_err(), "{cmd}");
         }
-    }
-
-    #[test]
-    fn preset_list_events_json_golden_and_roundtrip() {
-        let preset = Preset {
-            id: Uuid::nil(),
-            cwd: "C:/proj".into(),
-            name: None,
-        };
-        let list = AgentEvent::PresetList {
-            request_id: RequestId(Uuid::nil()),
-            presets: vec![preset.clone()],
-        };
-        let list_json = serde_json::to_string(&list).unwrap();
-        assert_eq!(
-            list_json,
-            r#"{"PresetList":{"request_id":"00000000-0000-0000-0000-000000000000","presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj","name":null}]}}"#,
-            "PresetList wire shape does not match the golden"
-        );
-
-        let updated = AgentEvent::PresetListUpdated {
-            presets: vec![preset],
-        };
-        let updated_json = serde_json::to_string(&updated).unwrap();
-        assert_eq!(
-            updated_json,
-            r#"{"PresetListUpdated":{"presets":[{"id":"00000000-0000-0000-0000-000000000000","cwd":"C:/proj","name":null}]}}"#,
-            "PresetListUpdated wire shape does not match the golden"
-        );
-
-        for json in [list_json, updated_json] {
-            let back: AgentEvent = serde_json::from_str(&json).unwrap();
-            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        for ev in [
+            format!(r#"{{"PresetList":{{"request_id":"{nil}","presets":[]}}}}"#),
+            r#"{"PresetListUpdated":{"presets":[]}}"#.to_string(),
+        ] {
+            assert!(serde_json::from_str::<AgentEvent>(&ev).is_err(), "{ev}");
         }
-    }
-
-    #[test]
-    fn rename_preset_command_json_golden_and_roundtrip() {
-        let cmd = AgentCommand::RenamePreset {
-            preset_id: Uuid::nil(),
-            name: Some("내 프리셋".into()), // hangul-ok
-            request_id: RequestId(Uuid::nil()),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert_eq!(
-            json,
-            r#"{"RenamePreset":{"preset_id":"00000000-0000-0000-0000-000000000000","name":"내 프리셋","request_id":"00000000-0000-0000-0000-000000000000"}}"#, // hangul-ok
-            "RenamePreset wire shape does not match the golden"
-        );
-        let back: AgentCommand = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            back,
-            AgentCommand::RenamePreset { name: Some(ref n), .. } if n == "내 프리셋" // hangul-ok
-        ));
-
-        let clear = AgentCommand::RenamePreset {
-            preset_id: Uuid::nil(),
-            name: None,
-            request_id: RequestId(Uuid::nil()),
-        };
-        let clear_json = serde_json::to_string(&clear).unwrap();
-        let clear_back: AgentCommand = serde_json::from_str(&clear_json).unwrap();
-        assert_eq!(clear_json, serde_json::to_string(&clear_back).unwrap());
+        assert_eq!(crate::PROTOCOL_VERSION, 8);
     }
 
     #[test]

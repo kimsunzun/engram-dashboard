@@ -12,11 +12,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-// ★The create default mode has one home, the core★ — this file keeps no constant of its own (reason: that constant's doc;
-// `spawn_command_by_cwd` refers to it).
-use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
+use engram_dashboard_agent::commands::{
+    create_and_start, created_but_not_started, AgentBackend, CreateRefused, NewAgent,
+};
+use engram_dashboard_agent::launch::{notice_row, Notice};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
+use engram_dashboard_agent::manager::{Activated, NoticeDelivery};
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
 use engram_dashboard_agent::queued_input::{ListedRow, ListedState, QueuedListing};
@@ -32,8 +34,7 @@ use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_agent::commands::{store_command_error, store_error_reason};
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
-use engram_dashboard_agent::persistence::{AGENTS_FILE, PRESETS_FILE};
-use engram_dashboard_agent::preset::Preset as CorePreset;
+use engram_dashboard_agent::persistence::PROFILES_FILE;
 use engram_dashboard_agent::profile::StoreError;
 use engram_dashboard_agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentOutputFormat as CoreAgentOutputFormat,
@@ -55,7 +56,7 @@ use engram_dashboard_protocol::{
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
     ControlCaps as WireControlCaps, DeliveredCopy as WireDeliveredCopy, DropCause as WireDropCause,
     EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, OwnerToken as WireOwnerToken, Preset as WirePreset,
+    OutputCaps as WireOutputCaps, OwnerToken as WireOwnerToken,
     QueuedInputCancel as WireQueuedInputCancel, QueuedInputEvent as WireQueuedInputEvent,
     QueuedInputRow as WireQueuedInputRow, RestartPolicy as WireRestartPolicy,
     RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
@@ -206,10 +207,6 @@ pub(crate) fn command_request_id(
         | AgentCommand::RenameProfile { request_id, .. }
         | AgentCommand::ReparentProfile { request_id, .. }
         | AgentCommand::GetSnapshot { request_id, .. }
-        | AgentCommand::ListPresets { request_id }
-        | AgentCommand::CreatePreset { request_id, .. }
-        | AgentCommand::DeletePreset { request_id, .. }
-        | AgentCommand::RenamePreset { request_id, .. }
         | AgentCommand::SetEnvelopeFormat { request_id, .. }
         | AgentCommand::RegisterCommands { request_id, .. }
         | AgentCommand::UpdateCommands { request_id, .. }
@@ -247,8 +244,8 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         // ── outside the lane: the three where activation waits for the outcome ──────────────────────────────────
         AgentCommand::Spawn { .. }
         | AgentCommand::SpawnProfile { .. }
-        // `SpawnByCwd` belongs here too: it calls `manager.spawn_agent` without `spawn_blocking`, but it creates a new uuid every time,
-        // so there is no pair to overlap with.
+        // `SpawnByCwd` belongs here too: it waits until the real process creation (after `spawn_blocking`) ends. Order carries no meaning —
+        //   it is an ad-hoc creation that makes a new uuid every time, so there is no pair to overlap with.
         | AgentCommand::SpawnByCwd { .. }
         // ⟳ is outside the lane too: a probe launch waits up to the cap (`usage_service::REPLY_WAIT_MAX`). Order has no meaning — two ⟳
         // of the same vendor are merged by the service into one probe, and a subscription replacement reaches by broadcast either way.
@@ -281,10 +278,6 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         | AgentCommand::RenameProfile { .. }
         | AgentCommand::ReparentProfile { .. }
         | AgentCommand::GetSnapshot { .. }
-        | AgentCommand::ListPresets { .. }
-        | AgentCommand::CreatePreset { .. }
-        | AgentCommand::DeletePreset { .. }
-        | AgentCommand::RenamePreset { .. }
         | AgentCommand::SetEnvelopeFormat { .. }
         | AgentCommand::RegisterCommands { .. }
         | AgentCommand::UpdateCommands { .. }
@@ -570,6 +563,12 @@ pub(crate) fn agent_info_to_wire(a: &CoreAgentInfo) -> WireAgentInfo {
     }
 }
 
+/// Launch notices → the `Spawned.notices` rows — `None` for none (the wire never carries an empty list).
+// TRD S25 §5-2 16
+fn notices_to_wire(notices: &[Notice]) -> Option<Vec<serde_json::Value>> {
+    (!notices.is_empty()).then(|| notices.iter().map(notice_row).collect())
+}
+
 pub(crate) fn restore_outcome_to_wire(outcome: &CoreRestoreOutcome) -> WireRestoreOutcome {
     match outcome {
         CoreRestoreOutcome::Resumed => WireRestoreOutcome::Resumed,
@@ -602,9 +601,10 @@ const MISSING_BACKEND: &str = "the backend field is empty — write \"claude\" o
 
 /// The wire backend choice → the core run command. `None` = the field is empty (the caller refuses with [`MISSING_BACKEND`]).
 ///
-/// ★Both branches carry the received `output_format` as is and fill no default★ (filling here would split the requested mode from the
-/// one that comes up). The received value is not always a person's choice: `CreateProfile` passes the packet's field, `SpawnByCwd`
-/// passes a value [`spawn_command_by_cwd`] made up. ★No wildcard★: wire vocabulary growth must fail to compile.
+/// ★Both arms carry the `output_format` they were given — this function fills no default★: filling one here would
+/// split the requested mode from the launched one, unseen until the agent behaves differently. `CreateProfile` passes
+/// the packet's field; `SpawnByCwd`, which has no mode field, does not come here — the agent crate's creation body
+/// (`commands::create_and_start`) holds that default. ★No wildcard★: a new wire word stops the build at this match.
 fn spawn_command_for(
     backend: Option<WireBackendKind>,
     extra_args: Vec<String>,
@@ -622,25 +622,11 @@ fn spawn_command_for(
     }
 }
 
-/// Assembly dedicated to `SpawnByCwd` — that packet has no mode field, so a value is made up here.
-///
-/// Both branches use the common default [`NEW_AGENT_OUTPUT_FORMAT`], so the same backend comes up in the same mode whichever entrance
-/// created it (`agent.new` uses it too; its doc pins that entrances keep no constant of their own). ★Do not fold the `match`★: with a
-/// wildcard a new backend would inherit the default with no decision.
-fn spawn_command_by_cwd(backend: Option<WireBackendKind>) -> Option<CoreSpawnCommand> {
-    let kind = backend?;
-    let output_format = match kind {
-        WireBackendKind::Claude => NEW_AGENT_OUTPUT_FORMAT,
-        WireBackendKind::Codex => NEW_AGENT_OUTPUT_FORMAT,
-    };
-    spawn_command_for(Some(kind), vec![], output_format)
-}
-
 /// Backend-creation policy shape — takes one word, `None` = create, `Some(reason)` = do not create.
 type BackendPolicyFn = fn(&str) -> Option<&'static str>;
 
-/// The word of a wire backend for the policy table (agent does not depend on protocol, so a word is the shared form). Taken from enum
-/// serialization (always lowercase); if serialization fails it becomes an empty word and the production policy closes (fail-closed).
+/// The wire backend's word, for the `SpawnByCwd` refusal text only — the policy itself is asked by the creation body
+/// with the declared spelling. Taken from the enum's serialization (always lowercase), not written by hand.
 fn wire_backend_word(kind: WireBackendKind) -> String {
     serde_json::to_value(kind)
         .ok()
@@ -648,20 +634,18 @@ fn wire_backend_word(kind: WireBackendKind) -> String {
         .unwrap_or_default()
 }
 
-/// The refusal wording when the policy blocks a `SpawnByCwd` backend — `None` = create.
+/// The refusal text when the policy closes a `SpawnByCwd` backend — `reason` is the policy's.
 ///
 /// ★Must stand alone★: the daemon `Error` text reaches the bus caller with no prefix (the shell's `agent.spawnInto` carries it as
 /// `CONFLICT`). The front is the `agent.new` policy-refusal frame (agent `verb_new`) plus "Not spawned."; this side's word is the
 /// lowercase wire serialization (that side: `Claude`) and the code is `CONFLICT` here vs `INVALID_ARGUMENT` there. Kept apart from the
 /// typo net's "unknown backend" — lumped, the caller would fix a typo that is not there.
 // ADR-0279
-fn by_cwd_refusal(kind: WireBackendKind, policy: BackendPolicyFn) -> Option<String> {
+fn by_cwd_refusal(kind: WireBackendKind, reason: &str) -> String {
     let word = wire_backend_word(kind);
-    policy(&word).map(|reason| {
-        format!(
-            "backend '{word}' is a known word, but this surface does not create it now — {reason} Not spawned."
-        )
-    })
+    format!(
+        "backend '{word}' is a known word, but this surface does not create it now — {reason} Not spawned."
+    )
 }
 
 fn output_format_to_wire(f: CoreAgentOutputFormat) -> WireAgentOutputFormat {
@@ -738,18 +722,6 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
 
 fn core_profiles_to_wire(profiles: Vec<CoreProfile>) -> Vec<WireProfile> {
     profiles.iter().map(profile_to_wire).collect()
-}
-
-fn preset_to_wire(p: &CorePreset) -> WirePreset {
-    WirePreset {
-        id: p.id,
-        cwd: p.cwd.to_string_lossy().into_owned(),
-        name: p.name.clone(),
-    }
-}
-
-fn core_presets_to_wire(presets: Vec<CorePreset>) -> Vec<WirePreset> {
-    presets.iter().map(preset_to_wire).collect()
 }
 
 fn snapshot_chunk_to_wire(c: &CoreOutputChunk) -> WireSnapshotChunk {
@@ -980,13 +952,54 @@ fn store_error_text(
     .to_string()
 }
 
-/// Failure of a profile-side request (the manager's `try_` version · activation) → `Error` wording. Only the `agents.json` save `Err`
+/// Failure of a profile-side request (the manager's `try_` version · activation) → `Error` wording. Only the profile file's save `Err`
 /// goes through [`store_error_text`]; the rest is the `PtyError` Display as is.
 // ADR-0291 R17
 fn profile_error_text(conn_id: ConnId, verb: &'static str, what: &str, e: PtyError) -> String {
     match e {
-        PtyError::Store(error) => store_error_text(conn_id, verb, AGENTS_FILE, what, &error),
+        PtyError::Store(error) => store_error_text(conn_id, verb, PROFILES_FILE, what, &error),
         other => other.to_string(),
+    }
+}
+
+/// The failure reply of a wire activation (`Spawn` · `SpawnByCwd` · `SpawnProfile`) — [`profile_error_text`] as the
+/// message, plus a launch block's reasons as `launch_blocked` (the `LaunchBlocked::to_args` object — what the bus
+/// `agent.spawn` wake refusal carries as `args`; the bus after-create refusal adds `agent_id`).
+// TRD S25 §1-8 · §5-2 16
+fn activation_error(
+    conn_id: ConnId,
+    verb: &'static str,
+    what: &str,
+    request_id: engram_dashboard_protocol::RequestId,
+    e: PtyError,
+) -> AgentEvent {
+    AgentEvent::Error {
+        request_id: Some(request_id),
+        launch_blocked: launch_blocked_args(&e),
+        message: profile_error_text(conn_id, verb, what, e),
+        // Only the `SpawnByCwd` created-asleep arm names an agent — every activation failure here created nothing.
+        // ADR-0348
+        created_agent_id: None,
+    }
+}
+
+/// A launch block's reasons as the `Error.launch_blocked` object (`LaunchBlocked::to_args`); `None` for any other
+/// failure.
+fn launch_blocked_args(e: &PtyError) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match e {
+        PtyError::LaunchBlocked(blocked) => Some(blocked.to_args()),
+        _ => None,
+    }
+}
+
+/// `SpawnByCwd.deliver_notices` → the creation body's notice delivery: `true` = the sender shows the reply's notices
+/// to a reader, so the set may be marked as shown.
+// ADR-0348
+fn delivery_for(deliver_notices: bool) -> NoticeDelivery {
+    if deliver_notices {
+        NoticeDelivery::Delivered
+    } else {
+        NoticeDelivery::Withheld
     }
 }
 
@@ -1167,8 +1180,10 @@ pub struct ConnectionCore {
     stopping: AtomicBool,
     #[cfg(test)]
     shutdowns_spawned: std::sync::atomic::AtomicUsize,
-    /// The backend-creation policy `SpawnByCwd` asks before `spawn_agent`. Production is always agent `commands::llm_creation_refusal`
-    /// (set by [`ConnectionCore::new`]); only tests swap in a fake that closes, since the production table closes nothing (ADR-0012).
+    /// The backend creation policy the `SpawnByCwd` arm passes to the one creation body (agent
+    /// `commands::create_and_start`). Production is always agent `commands::llm_creation_refusal`, filled by
+    /// [`ConnectionCore::new`]; only tests swap in a closing fake (today's production table closes nothing, so real
+    /// input cannot reach the refusal arm · ADR-0012).
     /// A stateless function pointer, so a fresh copy per connection cannot diverge.
     // ADR-0279
     llm_policy: BackendPolicyFn,
@@ -1289,6 +1304,8 @@ impl ConnectionCore {
                 Err(message) => AgentEvent::Error {
                     request_id: Some(request_id),
                     message,
+                    launch_blocked: None,
+                    created_agent_id: None,
                 },
             };
             let _ = sink.enqueue(Outbound::event(ev));
@@ -1327,7 +1344,10 @@ impl ConnectionCore {
                 // ★Do not call `spawn_agent` directly — the activation entrance must be one★: it neither records nor clears the "last failure"
                 // (ADR-0172) and has no reactivation guard. Only difference from `SpawnProfile`: no mode derivation (always Fresh).
                 // ADR-0172
-                let result = match manager.agent_snapshot(profile_id) {
+                // The success is an `Ack`, which has no place for launch notices — so `activate_profile` (drops them,
+                //   records nothing). A launch block still answers with its reasons.
+                // TRD S25 §5-2 16
+                match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
                         // Hand this to the blocking pool, never call it here: `activate_profile` blocks until an outcome on a connection-declaring transport
                         // (backstop 15 s) and, on a failure verdict, runs the teardown `session.kill` (pump join bounded by 5 s) — ~20 s with no yield point,
@@ -1342,22 +1362,28 @@ impl ConnectionCore {
                             Err(PtyError::SpawnFailed(format!(
                                 "activation task failed: {e}"
                             )))
-                        })
-                        .map_err(|e| {
-                            profile_error_text(
-                                conn_id,
-                                "Spawn",
-                                &format!("agent {profile_id} was not started"),
-                                e,
-                            )
                         });
                         // ★Push regardless of the outcome, even a store refusal★: an activation failure records that entry's "last failure" (ADR-0172 · ADR-0291 E2).
                         broadcast_profile_list(fanout, manager);
-                        started
+                        match started {
+                            Ok(()) => reply(sink, request_id, Ok(())),
+                            Err(e) => {
+                                let _ = sink.enqueue(Outbound::event(activation_error(
+                                    conn_id,
+                                    "Spawn",
+                                    &format!("agent {profile_id} was not started"),
+                                    request_id,
+                                    e,
+                                )));
+                            }
+                        }
                     }
-                    None => Err(format!("profile not found: {profile_id}")),
-                };
-                reply(sink, request_id, result);
+                    None => reply(
+                        sink,
+                        request_id,
+                        Err(format!("profile not found: {profile_id}")),
+                    ),
+                }
             }
 
             AgentCommand::Kill {
@@ -1538,59 +1564,84 @@ impl ConnectionCore {
                 cwd,
                 backend,
                 request_id,
+                deliver_notices,
             } => {
-                // ★No test measures that this line calls [`spawn_command_by_cwd`]★: the success path is a real process spawn, and reverting to the old
-                // constant keeps the suite green (codex by-cwd would quietly switch to app-server). The function's content is guarded by
-                // `by_cwd_fills_one_shared_default_mode_for_every_backend`.
-                let Some(command) = spawn_command_by_cwd(backend) else {
+                let Some(kind) = backend else {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
                 };
-                // ★Check the policy before `spawn_agent`★: it puts the ad-hoc profile on the roster and disk, so deciding later leaves a rejected profile
-                // behind. The human path sees the same table (ADR-0279 "accepted cost"). A refusal writes no "last failure" (ADR-0172).
+                // No wildcard: a new wire word must stop the build here instead of inheriting a backend unasked.
+                let declared = match kind {
+                    WireBackendKind::Claude => AgentBackend::Claude,
+                    WireBackendKind::Codex => AgentBackend::Codex,
+                };
+                // The body asks the policy before anything is registered, so a refusal leaves no profile and writes no
+                //   last failure (ADR-0172). The gate does not tell callers apart — the person's path sees the same
+                //   table (ADR-0279 "accepted cost").
                 // ADR-0270 · ADR-0279
-                if let Some(message) =
-                    backend.and_then(|kind| by_cwd_refusal(kind, self.llm_policy))
-                {
-                    reply(sink, request_id, Err(message));
-                    return DispatchFlow::Continue;
-                }
-                let profile = CoreProfile::new(
-                    cwd.clone(),
-                    command,
-                    std::path::PathBuf::from(&cwd),
-                    vec![],
-                    false,
-                );
-                // Ad-hoc creation, not activation: no "last failure" is written (ADR-0172) since the uuid is new. Known asymmetry: the bus sibling
-                // (`create_and_start`) records a failure on create+launch; matching it would need `activate_profile` to accept an unregistered
-                // profile — look at both when aligning.
-                match manager.spawn_agent(&profile, SpawnMode::Fresh) {
-                    // A fresh uuid cannot be "already running", yet the outcome is still received by distinguishing.
-                    Ok(outcome) => match outcome.into_info() {
-                        Some(info) => {
-                            let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
-                                request_id,
-                                agent: agent_info_to_wire(&info),
-                            }));
-                        }
-                        None => reply(
-                            sink,
-                            request_id,
-                            Err("ad-hoc spawn produced no session".to_string()),
-                        ),
-                    },
-                    Err(e) => reply(
-                        sink,
+                let policy = self.llm_policy;
+                let roster = RosterFanout::new(self.fanout.clone(), manager.clone());
+                // ★Hand it to the blocking pool★ — this verb also runs the launch-material check (it can wait on the library lock) and the real
+                //   process creation synchronously with no yield. The canonical reason is the same comment on the `Spawn` arm above.
+                // TRD S25 §5-2 4
+                let mgr = manager.clone();
+                // ADR-0348
+                let joined = tokio::task::spawn_blocking(move || {
+                    create_and_start(
+                        mgr.as_ref(),
+                        &roster,
+                        NewAgent {
+                            cwd,
+                            name: None,
+                            backend: declared,
+                            policy,
+                            delivery: delivery_for(deliver_notices),
+                        },
+                    )
+                })
+                .await;
+                let event = match joined {
+                    Ok(Ok(Activated { info, notices })) => AgentEvent::Spawned {
                         request_id,
-                        Err(profile_error_text(
-                            conn_id,
-                            "SpawnByCwd",
-                            "the agent was not created or started",
-                            e,
-                        )),
+                        agent: agent_info_to_wire(&info),
+                        notices: notices_to_wire(&notices),
+                    },
+                    Ok(Err(CreateRefused::Policy { reason })) => AgentEvent::Error {
+                        request_id: Some(request_id),
+                        message: by_cwd_refusal(kind, reason),
+                        launch_blocked: None,
+                        created_agent_id: None,
+                    },
+                    Ok(Err(CreateRefused::NotCreated(e))) => activation_error(
+                        conn_id,
+                        "SpawnByCwd",
+                        "the agent was not created or started",
+                        request_id,
+                        e,
                     ),
-                }
+                    // The agent stays registered and asleep — `INTERNAL` (the bus `agent.spawn` code for the same
+                    //   end) and its id, so the caller wakes it instead of creating another.
+                    // ADR-0348 · TRD S25 step 20 (U3)
+                    Ok(Err(CreateRefused::CreatedAsleep { id, name, error })) => {
+                        AgentEvent::Error {
+                            request_id: Some(request_id),
+                            launch_blocked: launch_blocked_args(&error),
+                            message: CommandError::internal(created_but_not_started(
+                                &name, id, &error,
+                            ))
+                            .to_string(),
+                            created_agent_id: Some(id),
+                        }
+                    }
+                    Err(e) => activation_error(
+                        conn_id,
+                        "SpawnByCwd",
+                        "the agent was not created or started",
+                        request_id,
+                        PtyError::SpawnFailed(format!("spawn task failed: {e}")),
+                    ),
+                };
+                let _ = sink.enqueue(Outbound::event(event));
             }
 
             AgentCommand::ListProfiles { request_id } => {
@@ -1715,10 +1766,22 @@ impl ConnectionCore {
                             SpawnMode::Fresh
                         };
                         // Blocking pool — reason as in the `Spawn` branch. Fresh falls here too: a connection-declaring path waits for the outcome regardless of mode (ADR-0201).
+                        // `Withheld`: the reply carries the notices, but the webview does not show them yet, so this
+                        //   path must not mark the set as seen for the agent (a later delivering caller still gets it).
+                        // ADR-0341
+                        // TRD S25 §5-2 16
+                        // TODO(TRD S25 §5-2 11): when the webview shows `Spawned.notices`, switch the WS activation
+                        //   paths to `Delivered` and make the webview's `SpawnByCwd` senders send
+                        //   `deliver_notices: true` — or "once per agent" breaks. (By-cwd already records through the
+                        //   one creation body — ADR-0348.)
                         let mgr = manager.clone();
                         let profile_for_task = profile.clone();
                         let started = tokio::task::spawn_blocking(move || {
-                            mgr.activate_profile(&profile_for_task, mode)
+                            mgr.activate_profile_reporting(
+                                &profile_for_task,
+                                mode,
+                                NoticeDelivery::Withheld,
+                            )
                         })
                         .await
                         .unwrap_or_else(|e| {
@@ -1731,22 +1794,22 @@ impl ConnectionCore {
                         //   must do the same (CLAUDE.md 「LLM-우선 제어」). // hangul-ok
                         //   Its pair is `core::agent::commands::{wake_existing, create_and_start}`.
                         match started {
-                            Ok(info) => {
+                            Ok(activated) => {
                                 let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
                                     request_id,
-                                    agent: agent_info_to_wire(&info),
+                                    agent: agent_info_to_wire(&activated.info),
+                                    notices: notices_to_wire(&activated.notices),
                                 }));
                             }
-                            Err(e) => reply(
-                                sink,
-                                request_id,
-                                Err(profile_error_text(
+                            Err(e) => {
+                                let _ = sink.enqueue(Outbound::event(activation_error(
                                     conn_id,
                                     "SpawnProfile",
                                     &format!("agent {profile_id} was not started"),
+                                    request_id,
                                     e,
-                                )),
-                            ),
+                                )));
+                            }
                         }
                         broadcast_profile_list(fanout, manager);
                     }
@@ -1758,7 +1821,7 @@ impl ConnectionCore {
                 }
             }
 
-            // The three below and the three presets are versions with a caller — if the store does not accept it nothing changes and an
+            // The three below are versions with a caller — if the store does not accept it nothing changes and an
             //   error is answered with no broadcast.
             // ADR-0291 R17 (D3)
             AgentCommand::SetProfileAutoRestore {
@@ -1871,78 +1934,6 @@ impl ConnectionCore {
                     Err(e) => reply(sink, request_id, Err(e.to_string())),
                 }
             }
-
-            // ── preset CRUD (ADR-0061) ──────────────────────────────────────────────
-            AgentCommand::ListPresets { request_id } => {
-                let _ = sink.enqueue(Outbound::event(AgentEvent::PresetList {
-                    request_id,
-                    presets: core_presets_to_wire(manager.presets().list()),
-                }));
-            }
-
-            AgentCommand::CreatePreset { cwd, request_id } => {
-                match manager.presets().try_create(std::path::PathBuf::from(cwd)) {
-                    Ok(_) => {
-                        reply(sink, request_id, Ok(()));
-                        broadcast_preset_list(fanout, manager);
-                    }
-                    Err(error) => reply(
-                        sink,
-                        request_id,
-                        Err(store_error_text(
-                            conn_id,
-                            "CreatePreset",
-                            PRESETS_FILE,
-                            "the preset was not created",
-                            &error,
-                        )),
-                    ),
-                }
-            }
-
-            AgentCommand::DeletePreset {
-                preset_id,
-                request_id,
-            } => match manager.presets().try_remove(preset_id) {
-                Ok(()) => {
-                    reply(sink, request_id, Ok(()));
-                    broadcast_preset_list(fanout, manager);
-                }
-                Err(error) => reply(
-                    sink,
-                    request_id,
-                    Err(store_error_text(
-                        conn_id,
-                        "DeletePreset",
-                        PRESETS_FILE,
-                        &format!("preset {preset_id} was not deleted"),
-                        &error,
-                    )),
-                ),
-            },
-
-            // A nonexistent id is an `Ack`, not an error (`Ok(false)` — nothing to change).
-            AgentCommand::RenamePreset {
-                preset_id,
-                name,
-                request_id,
-            } => match manager.presets().try_rename(preset_id, name) {
-                Ok(_) => {
-                    reply(sink, request_id, Ok(()));
-                    broadcast_preset_list(fanout, manager);
-                }
-                Err(error) => reply(
-                    sink,
-                    request_id,
-                    Err(store_error_text(
-                        conn_id,
-                        "RenamePreset",
-                        PRESETS_FILE,
-                        &format!("preset {preset_id} was not renamed"),
-                        &error,
-                    )),
-                ),
-            },
 
             AgentCommand::SetEnvelopeFormat { format, request_id } => {
                 // No broadcast — global state is observed on the next message, not a list push target.
@@ -2076,6 +2067,8 @@ impl ConnectionCore {
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                             request_id: None,
                             message: format!("invalid command envelope: {e}"),
+                            launch_blocked: None,
+                            created_agent_id: None,
                         }));
                         return DispatchFlow::Continue;
                     }
@@ -2115,6 +2108,8 @@ impl ConnectionCore {
                         let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                             request_id: None,
                             message: format!("invalid command reply: {e}"),
+                            launch_blocked: None,
+                            created_agent_id: None,
                         }));
                         return DispatchFlow::Continue;
                     }
@@ -2144,6 +2139,8 @@ impl ConnectionCore {
                 let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
                     request_id: None,
                     message: refusal.into(),
+                    launch_blocked: None,
+                    created_agent_id: None,
                 }));
             }
 
@@ -2406,8 +2403,10 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 /// The real adapter of the roster notification port the `control/agent` route calls (ADR-0132).
 ///
 /// It lives here because which event goes in which wire shape is knowledge this module owns; `control/` knows only "the roster changed"
-/// (ADR-0236 dropped the ADR-0130 leaf property). Only a fanout and manager from one assembly are tied via the constructor —
-/// `DaemonWiring::roster_broadcast` is the only production creation point.
+/// (ADR-0236 dropped the ADR-0130 leaf property).
+/// ★No mismatched pair★: the constructor binds only a fanout and a manager **from one assembly** — the production
+///   construction points are `DaemonWiring::roster_broadcast` (the rule in that struct's comment) and the WS
+///   `SpawnByCwd` arm, which builds one from the core's own `fanout` + `manager` (the same assembly).
 /// One notification = `ProfileListUpdated` then `AgentListUpdated`: the port does not know which verb called, and the agent list must
 /// always go so a bus · CLI `agent.rename` of a live agent reaches the shell's tab auto name (TRD S26-window-chrome §4-3).
 pub struct RosterFanout {
@@ -2428,6 +2427,15 @@ impl crate::control::agent::RosterBroadcast for RosterFanout {
     }
 }
 
+/// The agent crate's roster port — the same two frames as [`crate::control::agent::RosterBroadcast`].
+// ADR-0348
+// Named by path, not imported — two `roster_changed` methods in scope would make a plain `.roster_changed()` ambiguous.
+impl engram_dashboard_agent::commands::RosterChanged for RosterFanout {
+    fn roster_changed(&self) {
+        crate::control::agent::RosterBroadcast::roster_changed(self);
+    }
+}
+
 fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     let ev = AgentEvent::ProfileListUpdated {
         profiles: core_profiles_to_wire(manager.agent_snapshots()),
@@ -2439,16 +2447,6 @@ fn broadcast_profile_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>)
 
 fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
     if let Some(text) = event_json(&agent_list_event(manager)) {
-        fanout.broadcast_text(text);
-    }
-}
-
-/// ★create/delete must lead to this broadcast★, or other windows go stale (ADR-0061 invariant).
-fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
-    let ev = AgentEvent::PresetListUpdated {
-        presets: core_presets_to_wire(manager.presets().list()),
-    };
-    if let Some(text) = event_json(&ev) {
         fanout.broadcast_text(text);
     }
 }
@@ -2479,6 +2477,8 @@ fn send_error(
     let _ = sink.enqueue(Outbound::event(AgentEvent::Error {
         request_id,
         message,
+        launch_blocked: None,
+        created_agent_id: None,
     }));
 }
 
@@ -2593,6 +2593,7 @@ mod tests {
                 cwd: "C:/tmp".into(),
                 backend: None,
                 request_id: rid(),
+                deliver_notices: false,
             },
             AgentCommand::RefreshUsageLimits {
                 vendor: WireBackendKind::Claude,
@@ -2694,7 +2695,10 @@ mod tests {
         let call_sites: Vec<usize> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains(".activate_profile(") && !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| {
+                (l.contains(".activate_profile(") || l.contains(".activate_profile_reporting("))
+                    && !l.trim_start().starts_with("//")
+            })
             .map(|(i, _)| i)
             .collect();
         assert!(
@@ -2706,12 +2710,49 @@ mod tests {
         for i in call_sites {
             let line = lines[i];
             assert!(
-                line.contains("mgr.activate_profile("),
+                line.contains("mgr.activate_profile"),
                 "activation is called directly on an async worker — that worker is tied up for up to 20 seconds, and N blocked activations take N workers and stall other connections' commands too: {line}"
             );
             let window = lines[i.saturating_sub(4)..=i].join("\n");
             assert!(
                 window.contains("spawn_blocking"),
+                "only the receiver has the pool-copy name and there is no handover — the name is right but it still runs on an async worker:\n{window}"
+            );
+        }
+    }
+
+    /// ★The ad-hoc create's start (`SpawnByCwd`) is not called on an async worker either★ — the launch-material check
+    /// can wait on the library lock and the real process spawn runs without yielding (TRD S25 §5-2 4). Why it is
+    /// measured from the source, the two axes and what it cannot see are the same as the activation sibling above.
+    /// The call is the one creation body (`create_and_start(`, ADR-0348), and it waits for the codex link verdict too.
+    #[test]
+    fn the_by_cwd_spawn_hands_the_blocking_call_to_the_pool() {
+        let src = include_str!("connection_core.rs");
+        let production = src.split("mod tests {").next().expect("production section");
+
+        let lines: Vec<&str> = production.lines().collect();
+        let call_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                (l.contains("create_and_start(") || l.contains(".spawn_agent("))
+                    && !l.trim_start().starts_with("//")
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !call_sites.is_empty(),
+            "the ad-hoc create call site is gone — this item's premise is stale"
+        );
+        for i in call_sites {
+            let line = lines[i];
+            assert!(
+                line.trim_start().starts_with("create_and_start("),
+                "the by-cwd create does not go through the one creation body: {line}"
+            );
+            let window = lines[i.saturating_sub(4)..=(i + 1).min(lines.len() - 1)].join("\n");
+            assert!(
+                window.contains("spawn_blocking") && window.contains("mgr.as_ref()"),
                 "only the receiver has the pool-copy name and there is no handover — the name is right but it still runs on an async worker:\n{window}"
             );
         }
@@ -2816,6 +2857,7 @@ mod tests {
                     Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
                     Arc::new(multiview.clone()),
                     Arc::new(crate::control::commands::NoUsageLimits),
+                    Arc::new(crate::control::commands::NoLibrary),
                 )));
                 Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
             });
@@ -2851,7 +2893,7 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
-        test_core_on_stores(deliveries, locals, Arc::default())
+        test_core_on_stores(deliveries, locals, Arc::default(), None)
     }
 
     /// The store switch of [`test_core_refusable`] — accept · refuse on load (new version) · write failure; a failure leaves nothing either way.
@@ -2859,8 +2901,8 @@ mod tests {
     const STORE_REFUSES: u8 = 1;
     const STORE_FAILS_IO: u8 = 2;
 
-    /// An assembly that changes the store outcome — the switch ([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`]) hangs on both
-    /// stores (profile · preset). Returns the fanout record and the switch.
+    /// An assembly that changes the store outcome — the switch ([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`]) hangs on the
+    /// profile store. Returns the fanout record and the switch.
     // ADR-0291 R17
     fn test_core_refusable() -> (
         ConnectionCore,
@@ -2872,21 +2914,37 @@ mod tests {
             CommandDeliveries::new(),
             &|_, _| Arc::new(crate::command_delivery::NoLocalCommands),
             refusing.clone(),
+            None,
         );
         (core, fanout, refusing)
     }
 
-    /// The body of [`test_core_built`] — while `refusing` is not [`STORE_SAVES`] both stores fail to save.
+    /// A core whose manager checks launches with `kits` (the running daemon plugs none yet, and the Noop source
+    /// neither blocks nor carries notices), and its fanout record.
+    fn test_core_with_kits(
+        kits: Arc<dyn engram_dashboard_agent::launch::LaunchKitSource>,
+    ) -> (ConnectionCore, Arc<crate::test_doubles::RecordingFanout>) {
+        let (core, _rx, fanout) = test_core_on_stores(
+            CommandDeliveries::new(),
+            &|_, _| Arc::new(crate::command_delivery::NoLocalCommands),
+            Arc::default(),
+            Some(kits),
+        );
+        (core, fanout)
+    }
+
+    /// The body of [`test_core_built`] — while `refusing` is not [`STORE_SAVES`] the profile store fails to save.
+    /// `kits` = the manager's launch-kit source (`None` = the Noop default).
     fn test_core_on_stores(
         deliveries: CommandDeliveries,
         locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
         refusing: Arc<AtomicU8>,
+        kits: Option<Arc<dyn engram_dashboard_agent::launch::LaunchKitSource>>,
     ) -> (
         ConnectionCore,
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
-        use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
         use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore, Refusal};
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
@@ -2917,40 +2975,26 @@ mod tests {
             }
         }
 
-        #[derive(Default)]
-        struct MemPresetStore {
-            saved: StdMutex<Vec<engram_dashboard_agent::preset::Preset>>,
-            refusing: Arc<AtomicU8>,
-        }
-        impl PresetStore for MemPresetStore {
-            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) -> Result<(), StoreError> {
-                refused(&self.refusing)?;
-                *self.saved.lock().unwrap() = p.to_vec();
-                Ok(())
-            }
-            fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
-                self.saved.lock().unwrap().clone()
-            }
-        }
-
         let recording = Arc::new(crate::test_doubles::RecordingFanout::new());
         let fanout: Arc<dyn FrameFanout> = recording.clone();
         let store: Arc<dyn ProfileStore> = Arc::new(MemStore {
-            refusing: refusing.clone(),
-            ..MemStore::default()
-        });
-        let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore {
             refusing,
-            ..MemPresetStore::default()
+            ..MemStore::default()
         });
         let status_sink = Arc::new(crate::status_fanout::DaemonStatusSink::new(fanout.clone()));
         let profiles = Arc::new(ProfileRegistry::new(store));
-        let presets = Arc::new(PresetRegistry::new(preset_store));
         let tracker = Arc::new(SessionTracker::new(
             TrackerConfig::default(),
             Arc::new(|_aid, _sid| {}),
         ));
-        let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
+        let mut manager = AgentManager::new(status_sink, profiles, tracker);
+        if let Some(kits) = kits {
+            manager = manager.with_launch_ports(engram_dashboard_agent::launch::LaunchPorts {
+                kits,
+                ..engram_dashboard_agent::launch::LaunchPorts::noop()
+            });
+        }
+        let manager = Arc::new(manager);
         let manager_for_locals = manager.clone();
         let multiview = MultiViewState::new();
         let locals = locals(&manager_for_locals, &multiview);
@@ -3037,7 +3081,7 @@ mod tests {
             vec![],
             false,
         );
-        // A sid remaining on a command that cannot resume — a hand-edited `agents.json` makes it today.
+        // A sid remaining on a command that cannot resume — a hand-edited profile file makes it today.
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
         let created = core
             .manager
@@ -3995,6 +4039,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(r),
                 message,
+                ..
             }] => {
                 assert_eq!(*r, req);
                 assert!(
@@ -4039,10 +4084,12 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(w),
                 message: write_message,
+                ..
             }],
             [AgentEvent::Error {
                 request_id: Some(c),
                 message: cancel_message,
+                ..
             }],
         ) = (write.as_slice(), cancel.as_slice())
         else {
@@ -4086,6 +4133,7 @@ mod tests {
                 [AgentEvent::Error {
                     request_id: Some(r),
                     message,
+                    ..
                 }] => {
                     assert_eq!(*r, req);
                     assert!(
@@ -4174,6 +4222,7 @@ mod tests {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         }
     }
 
@@ -4418,6 +4467,30 @@ mod tests {
         );
     }
 
+    /// ADR-0369: a registration slot carries the deadline class into the roster (the seat reads it from there); an old
+    /// item without the field registers as ordinary.
+    #[test]
+    fn a_registered_deadline_class_reaches_the_roster_and_an_old_item_is_ordinary() {
+        use engram_dashboard_command::DeadlineClass;
+        let raw = RawValue::from_string(
+            r#"[{"name":"agent.spawnInto","help":"{}","deadline":"Launch"},{"name":"tab.focus","help":"{}"}]"#
+                .to_string(),
+        )
+        .unwrap();
+        let decls = decls_from_wire(&raw).expect("the list unpacks");
+        let commands = CommandRoster::new();
+        let (sink, _inbox) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<crate::conn_port::Frame>(4);
+            let sink: Arc<dyn crate::conn_port::FrameSink> =
+                Arc::new(crate::test_doubles::FakeFrameSink::new(tx));
+            (sink, rx)
+        };
+        commands.attach(1, &sink);
+        commands.register(1, decls).expect("register");
+        assert_eq!(commands.class_of("agent.spawnInto"), DeadlineClass::Launch);
+        assert_eq!(commands.class_of("tab.focus"), DeadlineClass::Ordinary);
+    }
+
     /// An old item missing the field unpacks to an empty `agent_args` (ADR-0308); protocol `decl_agent_args_are_optional_on_the_wire` measures the packet side.
     #[test]
     fn an_old_register_slot_unpacks_to_no_agent_args() {
@@ -4495,9 +4568,11 @@ mod tests {
             [AgentEvent::Ack { .. }, AgentEvent::Error {
                 request_id: Some(a),
                 message: first,
+                ..
             }, AgentEvent::Error {
                 request_id: Some(b),
                 message: second,
+                ..
             }] => {
                 assert_eq!(
                     (*a, *b),
@@ -4528,6 +4603,92 @@ mod tests {
         );
     }
 
+    /// An unknown deadline class breaks the item, so the whole packet is refused with its own number — the valid item
+    /// beside it and the diff's `removed` are not applied, and the connection lives.
+    // ADR-0272
+    #[tokio::test]
+    async fn an_unknown_deadline_class_refuses_the_whole_packet_with_its_request_id() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
+            .await;
+
+        let registered = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::RegisterCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    decls: RawValue::from_string(
+                        r#"[{"name":"tab.focus","help":"{}"},{"name":"agent.spawnInto","help":"{}","deadline":"Someday"}]"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                    catalog_version: 1,
+                    request_id: registered,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
+        let updated = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::UpdateCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    added: RawValue::from_string(
+                        r#"[{"name":"agent.spawnInto","help":"{}","deadline":"Someday"}]"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                    removed: vec!["tab.create".to_string()],
+                    request_id: updated,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { .. }, AgentEvent::Error {
+                request_id: Some(a),
+                message: first,
+                ..
+            }, AgentEvent::Error {
+                request_id: Some(b),
+                message: second,
+                ..
+            }] => {
+                assert_eq!(
+                    (*a, *b),
+                    (registered, updated),
+                    "answered with that packet's number"
+                );
+                for message in [first, second] {
+                    assert!(
+                        message.starts_with("INVALID_ARGUMENT: invalid command declarations"),
+                        "{message}"
+                    );
+                }
+            }
+            other => panic!("an unknown deadline class is an Error carrying the number: {other:?}"),
+        }
+        let names: Vec<String> = core
+            .commands()
+            .entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["tab.create".to_string()],
+            "the refused packets leave the roster as it was"
+        );
+    }
+
     /// `help` is one opaque string to the daemon — registration and lookup must succeed even with a non-JSON value; parsing or
     /// validation here would break it (TRD §3-7 hard constraint · §7 seam table).
     #[tokio::test]
@@ -4543,6 +4704,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: opaque.to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
                 rid(),
             ),
@@ -4580,7 +4742,7 @@ mod tests {
 
     /// The discovery list merges two sources — attached owners' roster and the daemon's own table. Leaving out the own table would deliver
     /// `agent.*` yet hide it, so an LLM trusting the list never calls that family. On overlap the daemon's wins (delivery order own table → roster,
-    /// `command_delivery::deliver`).
+    /// `command_delivery::deliver`). The shell-only `library.emptyTrash` is listed here — this list is the shell's (ADR-0419).
     #[tokio::test]
     async fn list_commands_merges_the_daemons_own_names_and_wins_on_a_clash() {
         // Does not occur in an assembled server — this measures the port contract with an assembly plugging the table in late (production fills
@@ -4597,6 +4759,7 @@ mod tests {
                         name: "agent.list".to_string(),
                         help: "stolen".to_string(),
                         agent_args: Vec::new(),
+                        deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                     },
                 ],
                 rid(),
@@ -4616,6 +4779,7 @@ mod tests {
             Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
             Arc::new(core.multiview().clone()),
             Arc::new(crate::control::commands::NoUsageLimits),
+            Arc::new(crate::control::commands::NoLibrary),
         )));
 
         let req = rid();
@@ -4636,15 +4800,48 @@ mod tests {
                 assert_eq!(
                     names,
                     vec![
+                        "agent.attachPreset",
                         "agent.cancelQueuedInput",
+                        "agent.detachPreset",
+                        "agent.duplicate",
                         "agent.interrupt",
                         "agent.list",
                         "agent.listQueuedInputs",
                         "agent.move",
                         "agent.new",
+                        "agent.presets",
                         "agent.rename",
+                        "agent.reorderPresets",
                         "agent.resolve",
+                        "agent.setWorkspace",
                         "agent.spawn",
+                        "library.addMount",
+                        "library.copy",
+                        "library.delete",
+                        "library.emptyTrash",
+                        "library.folders",
+                        "library.list",
+                        "library.listTrash",
+                        "library.move",
+                        "library.newFile",
+                        "library.newFolder",
+                        "library.read",
+                        "library.refresh",
+                        "library.relink",
+                        "library.relocateMount",
+                        "library.removeMount",
+                        "library.rename",
+                        "library.renameMount",
+                        "library.restore",
+                        "library.status",
+                        "preset.add",
+                        "preset.check",
+                        "preset.get",
+                        "preset.previewFolder",
+                        "preset.remove",
+                        "preset.reorder",
+                        "preset.save",
+                        "preset.setBackend",
                         "tab.create",
                         "usage.get",
                         "usage.refresh"
@@ -4935,6 +5132,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id: None,
                 message,
+                ..
             }] => assert!(message.starts_with("invalid command envelope"), "{message}"),
             other => panic!("must be one Error with no number: {other:?}"),
         }
@@ -5027,6 +5225,7 @@ mod tests {
             [.., AgentEvent::Error {
                 request_id: None,
                 message,
+                ..
             }] => assert!(message.starts_with("invalid command reply"), "{message}"),
             other => panic!("the last must be an Error with no number to the side that sent the outcome: {other:?}"),
         }
@@ -5189,6 +5388,7 @@ mod tests {
             [AgentEvent::Ack { .. }, AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, None, "this frame has no correlation key");
                 assert!(message.contains("deadline"), "{message}");
@@ -5275,6 +5475,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -5304,6 +5505,7 @@ mod tests {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         };
 
         core.dispatch(register(vec![too_long], req), &session, &mock)
@@ -5313,6 +5515,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -5352,6 +5555,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -5521,6 +5725,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert!(
@@ -5554,12 +5759,11 @@ mod tests {
     /// 0 policy calls and the wording; asking the policy would hide the which-field-to-fill wording behind the policy refusal.
     #[tokio::test]
     async fn spawn_by_cwd_without_a_backend_is_refused() {
-        thread_local! {
-            // The policy field is an `fn` pointer and cannot capture a count; kept here (as `CLOSED` in the sibling test).
-            static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        }
+        // The policy field is a `fn` pointer, so the count lives here — process-global, as in the sibling's `CLOSED`:
+        //   the creation body asks the policy on the blocking-pool thread, where a thread-local would not count.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         fn counts_and_closes_everything(_: &str) -> Option<&'static str> {
-            CALLS.with(|calls| calls.set(calls.get() + 1));
+            CALLS.fetch_add(1, Ordering::SeqCst);
             Some("The test closed every word.")
         }
         let (core, _rx) = test_core();
@@ -5573,6 +5777,7 @@ mod tests {
                 cwd: missing_cwd(),
                 backend: None,
                 request_id: req,
+                deliver_notices: false,
             },
             &session,
             &mock,
@@ -5582,6 +5787,7 @@ mod tests {
             [AgentEvent::Error {
                 request_id,
                 message,
+                ..
             }] => {
                 assert_eq!(*request_id, Some(req));
                 assert_eq!(message.as_str(), MISSING_BACKEND);
@@ -5589,7 +5795,7 @@ mod tests {
             other => panic!("expected an Error: {other:?}"),
         }
         assert_eq!(
-            CALLS.with(std::cell::Cell::get),
+            CALLS.load(Ordering::SeqCst),
             0,
             "the policy was asked for an empty field"
         );
@@ -5600,11 +5806,13 @@ mod tests {
         );
         // The counting side really counts — without this the 0 above is green even with a counter that never increments.
         assert!((core.llm_policy)("claude").is_some());
-        assert_eq!(CALLS.with(std::cell::Cell::get), 1);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
     }
 
-    /// All wire backends and their words, taken from [`wire_backend_word`]. Filled by hand; a new variant makes the `match` of `slot` fail
-    /// to compile — add it to the array too (an edit omitting only the array is not caught below).
+    /// Every wire backend and its word — the word comes from the function the refusal text names it with
+    /// ([`wire_backend_word`]; the creation body asks the policy with the declared spelling, compared ignoring case).
+    /// ★Filled by hand, but a new variant makes `slot`'s `match` stop the build here★ — add it to the array then. An
+    /// edit that only leaves the array short is not caught by the assert below (the slot count comes from the same array).
     fn every_wire_backend() -> Vec<(WireBackendKind, String)> {
         const ALL: [WireBackendKind; 2] = [WireBackendKind::Claude, WireBackendKind::Codex];
         fn slot(kind: WireBackendKind) -> usize {
@@ -5666,23 +5874,26 @@ mod tests {
         }
     }
 
-    /// A backend the policy closed is refused with no profile, roster entry or spawn — the decision must precede `spawn_agent` (ADR-0279).
-    /// Production closes nothing today, so a closing fake is plugged in (ADR-0012). Run per wire backend with a fake closing only that word:
-    /// one backend alone lets "only that backend asks the policy" pass, and a fake closing everything lets a wrong word asked pass.
+    /// ★A backend the policy closes is refused with no profile, no roster row and no spawn★ — the invariant that the
+    /// verdict comes before anything is registered (ADR-0279), measured at dispatch level. Today's production table
+    /// closes nothing, so real input cannot reach this arm; a closing fake is plugged in (ADR-0012).
+    /// ★Run per wire backend, with a fake that closes that one word only★ — one backend alone lets "only that backend
+    /// asks the policy" pass green, and a fake that closes everything stays green when the arm asks the wrong word.
     #[tokio::test]
     async fn spawn_by_cwd_refuses_a_backend_the_policy_closes() {
-        thread_local! {
-            // The word the fake closes — the policy field is an `fn` pointer and cannot capture; kept here. `#[tokio::test]` is a current-thread
-            // runtime and the handler calls the policy synchronously inside dispatch.
-            static CLOSED: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
-        }
+        // The word the fake closes. A process-global, not a thread-local: the creation body asks the policy on the
+        //   blocking-pool thread. The body asks with the declared spelling (`Codex`) and the refusal text names the
+        //   wire word (`codex`), so the fake compares ignoring case.
+        static CLOSED: StdMutex<String> = StdMutex::new(String::new());
         fn closes_the_chosen_word(word: &str) -> Option<&'static str> {
-            CLOSED.with(|closed| {
-                (*closed.borrow() == word).then_some("The test closed this backend.")
-            })
+            CLOSED
+                .lock()
+                .unwrap()
+                .eq_ignore_ascii_case(word)
+                .then_some("The test closed this backend.")
         }
         for (kind, word) in every_wire_backend() {
-            CLOSED.with(|closed| *closed.borrow_mut() = word.clone());
+            *CLOSED.lock().unwrap() = word.clone();
             let (core, _rx) = test_core();
             let core = core.with_llm_policy(closes_the_chosen_word);
             let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -5694,6 +5905,7 @@ mod tests {
                     cwd: missing_cwd(),
                     backend: Some(kind),
                     request_id: req,
+                    deliver_notices: false,
                 },
                 &session,
                 &mock,
@@ -5703,6 +5915,7 @@ mod tests {
                 [AgentEvent::Error {
                     request_id,
                     message,
+                    ..
                 }] => {
                     assert_eq!(*request_id, Some(req), "{word}");
                     assert!(
@@ -5801,30 +6014,6 @@ mod tests {
                 assert_eq!(*output_format, CoreAgentOutputFormat::Terminal);
             }
             other => panic!("expected Codex: {other:?}"),
-        }
-    }
-
-    /// `SpawnByCwd` has no mode field, so the daemon makes up a value — pinned here. Both backends use `NEW_AGENT_OUTPUT_FORMAT` (canonical:
-    /// the doc of [`spawn_command_by_cwd`]). Do not copy the concrete value: this measures that both branches look at that one home.
-    #[test]
-    fn by_cwd_fills_one_shared_default_mode_for_every_backend() {
-        assert!(
-            spawn_command_by_cwd(None).is_none(),
-            "an empty backend field leads to a refusal here too"
-        );
-        match spawn_command_by_cwd(Some(WireBackendKind::Codex)) {
-            Some(CoreSpawnCommand::Codex { output_format, .. }) => assert_eq!(
-                output_format, NEW_AGENT_OUTPUT_FORMAT,
-                "the by-cwd entrance's codex diverged from the common default"
-            ),
-            other => panic!("expected Codex: {other:?}"),
-        }
-        match spawn_command_by_cwd(Some(WireBackendKind::Claude)) {
-            Some(CoreSpawnCommand::Claude { output_format, .. }) => assert_eq!(
-                output_format, NEW_AGENT_OUTPUT_FORMAT,
-                "the by-cwd entrance's claude diverged from the common default"
-            ),
-            other => panic!("expected Claude: {other:?}"),
         }
     }
 
@@ -6847,10 +7036,11 @@ mod tests {
             [AgentEvent::Error {
                 request_id: Some(r),
                 message,
+                ..
             }] => {
                 assert_eq!(*r, req);
                 assert!(
-                    message.starts_with("CONFLICT:") && message.contains("agents.json"),
+                    message.starts_with("CONFLICT:") && message.contains(PROFILES_FILE),
                     "{message}"
                 );
             }
@@ -6894,12 +7084,11 @@ mod tests {
         );
     }
 
-    /// Every roster · preset change the store did not accept answers with an error and emits no broadcast (D3). The wording names the code
-    ///   (`CONFLICT`, same split as the bus) and the file (`agents.json` · `presets.json`); the three presets are `Ack` only when the store accepts.
+    /// Every roster change the store did not accept answers with an error and emits no broadcast (D3). The wording names the code
+    ///   (`CONFLICT`, same split as the bus) and the file (the profile file).
     // ADR-0291 R17 (D3)
     #[tokio::test]
-    async fn every_ws_roster_or_preset_change_the_store_refuses_answers_an_error_and_broadcasts_nothing(
-    ) {
+    async fn every_ws_roster_change_the_store_refuses_answers_an_error_and_broadcasts_nothing() {
         let (core, fanout, refusing) = test_core_refusable();
         let session = ConnectionSession::new(1);
         let alpha = unlaunchable_profile("alpha");
@@ -6910,11 +7099,6 @@ mod tests {
         core.manager
             .try_create_agent(lead.clone())
             .expect("registered when saved");
-        let preset = core
-            .manager
-            .presets()
-            .try_create(std::env::temp_dir())
-            .expect("preset when saved");
         let profiles = || {
             let mut rows: Vec<_> = core
                 .manager
@@ -6925,18 +7109,7 @@ mod tests {
             rows.sort();
             rows
         };
-        let presets = || {
-            let mut rows: Vec<_> = core
-                .manager
-                .presets()
-                .list()
-                .into_iter()
-                .map(|p| (p.id, p.name))
-                .collect();
-            rows.sort();
-            rows
-        };
-        let (profiles_before, presets_before) = (profiles(), presets());
+        let profiles_before = profiles();
         refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
         let temp = std::env::temp_dir().to_string_lossy().into_owned();
@@ -6944,10 +7117,10 @@ mod tests {
         let cases = [
             (
                 "CreateProfile",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::CreateProfile {
                     name: "new".into(),
-                    cwd: temp.clone(),
+                    cwd: temp,
                     extra_args: vec![],
                     env: vec![],
                     auto_restore: false,
@@ -6958,7 +7131,7 @@ mod tests {
             ),
             (
                 "RenameProfile",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::RenameProfile {
                     profile_id: alpha.id,
                     name: Some("beta".into()),
@@ -6967,7 +7140,7 @@ mod tests {
             ),
             (
                 "ReparentProfile",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::ReparentProfile {
                     child_id: alpha.id,
                     parent_id: Some(lead.id),
@@ -6976,35 +7149,10 @@ mod tests {
             ),
             (
                 "SetProfileAutoRestore",
-                "agents.json",
+                PROFILES_FILE,
                 AgentCommand::SetProfileAutoRestore {
                     profile_id: alpha.id,
                     auto_restore: true,
-                    request_id: rid(),
-                },
-            ),
-            (
-                "CreatePreset",
-                "presets.json",
-                AgentCommand::CreatePreset {
-                    cwd: temp.clone(),
-                    request_id: rid(),
-                },
-            ),
-            (
-                "DeletePreset",
-                "presets.json",
-                AgentCommand::DeletePreset {
-                    preset_id: preset.id,
-                    request_id: rid(),
-                },
-            ),
-            (
-                "RenamePreset",
-                "presets.json",
-                AgentCommand::RenamePreset {
-                    preset_id: preset.id,
-                    name: Some("renamed".into()),
                     request_id: rid(),
                 },
             ),
@@ -7017,6 +7165,7 @@ mod tests {
                 [AgentEvent::Error {
                     request_id: Some(_),
                     message,
+                    ..
                 }] => assert!(
                     message.starts_with("CONFLICT:") && message.contains(file),
                     "{label}: {message}"
@@ -7027,7 +7176,6 @@ mod tests {
 
         assert_eq!(fanout.texts().len(), before, "broadcast 0");
         assert_eq!(profiles(), profiles_before, "roster unchanged");
-        assert_eq!(presets(), presets_before, "presets unchanged");
     }
 
     /// WS activation pushes the profile list even on a store refusal (E2) — the "last failure" axis reaches the screen only through
@@ -7059,7 +7207,7 @@ mod tests {
 
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
-                message.starts_with("CONFLICT:") && message.contains("agents.json"),
+                message.starts_with("CONFLICT:") && message.contains(PROFILES_FILE),
                 "{message}"
             ),
             other => panic!("expected 1 Error: {other:?}"),
@@ -7107,7 +7255,7 @@ mod tests {
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
                 message.starts_with("CONFLICT:")
-                    && message.contains("agents.json")
+                    && message.contains(PROFILES_FILE)
                     && message.contains("restart the daemon"),
                 "{message}"
             ),
@@ -7139,6 +7287,7 @@ mod tests {
                 cwd: missing.to_string_lossy().into_owned(),
                 backend: Some(WireBackendKind::Claude),
                 request_id: rid(),
+                deliver_notices: false,
             },
             &session,
             &mock,
@@ -7146,10 +7295,19 @@ mod tests {
         .await;
 
         match mock.events().as_slice() {
-            [AgentEvent::Error { message, .. }] => assert!(
-                message.starts_with("CONFLICT: the agent was not created or started: agents.json"),
-                "{message}"
-            ),
+            [AgentEvent::Error {
+                message,
+                created_agent_id,
+                ..
+            }] => {
+                assert!(
+                    message.starts_with(&format!(
+                        "CONFLICT: the agent was not created or started: {PROFILES_FILE}"
+                    )),
+                    "{message}"
+                );
+                assert_eq!(created_agent_id, &None, "nothing was created");
+            }
             other => panic!("expected 1 Error: {other:?}"),
         }
         assert!(core.manager.list_agents().is_empty(), "nothing came up");
@@ -7188,7 +7346,7 @@ mod tests {
         match mock.events().as_slice() {
             [AgentEvent::Error { message, .. }] => assert!(
                 message.starts_with("INTERNAL:")
-                    && message.contains("writing agents.json failed: disk full"),
+                    && message.contains(&format!("writing {PROFILES_FILE} failed: disk full")),
                 "{message}"
             ),
             other => panic!("expected 1 Error: {other:?}"),
@@ -7617,5 +7775,452 @@ mod tests {
             1,
             "a refused cancel does not touch the roster"
         );
+    }
+
+    // ── Wire activation replies: launch block reasons · launch notices (TRD S25 §5-2 16) ──
+
+    mod launch_replies {
+        use super::*;
+        use engram_dashboard_agent::launch::{
+            notice_text, BlockReason, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan,
+            NoopLaunchKits, PrepareError, Reason,
+        };
+
+        /// Blocks every launch with the reasons it holds.
+        struct BlockingKits(LaunchBlocked);
+
+        impl LaunchKitSource for BlockingKits {
+            fn check(&self, _profile: &CoreProfile) -> Result<LaunchPlan, LaunchBlocked> {
+                Err(self.0.clone())
+            }
+            fn prepare(
+                &self,
+                plan: LaunchPlan,
+                id: AgentId,
+                epoch: u32,
+            ) -> Result<LaunchKit, PrepareError> {
+                NoopLaunchKits.prepare(plan, id, epoch)
+            }
+            fn release(&self, _id: AgentId, _epoch: u32) {}
+        }
+
+        /// Passes every launch with the Noop plan plus these notices.
+        struct NoticingKits(Vec<Notice>);
+
+        impl LaunchKitSource for NoticingKits {
+            fn check(&self, profile: &CoreProfile) -> Result<LaunchPlan, LaunchBlocked> {
+                let mut plan = NoopLaunchKits.check(profile)?;
+                plan.notices = self.0.clone();
+                Ok(plan)
+            }
+            fn prepare(
+                &self,
+                plan: LaunchPlan,
+                id: AgentId,
+                epoch: u32,
+            ) -> Result<LaunchKit, PrepareError> {
+                NoopLaunchKits.prepare(plan, id, epoch)
+            }
+            fn release(&self, _id: AgentId, _epoch: u32) {}
+        }
+
+        fn blocked() -> LaunchBlocked {
+            LaunchBlocked {
+                reasons: vec![BlockReason::Missing {
+                    item: "rules/a.md".into(),
+                    via: vec!["team.yaml".into()],
+                    reason: Reason {
+                        code: "not-found".into(),
+                        args: serde_json::json!({ "path": "rules/a.md" }),
+                        line: Some(3),
+                    },
+                }],
+            }
+        }
+
+        async fn dispatch_events(core: &ConnectionCore, cmd: AgentCommand) -> Vec<AgentEvent> {
+            let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+            let mock = MockOutboundSink::new(tx);
+            core.dispatch(cmd, &ConnectionSession::new(1), &mock).await;
+            mock.events()
+        }
+
+        /// Every wire activation that the launch check blocks answers with the reasons as structured
+        /// `launch_blocked` — the `LaunchBlocked::to_args` object — and starts nothing.
+        #[tokio::test]
+        async fn a_blocked_ws_activation_answers_with_its_reasons_and_starts_nothing() {
+            let expected = serde_json::json!({
+                "reasons": [{
+                    "kind": "missing", "item": "rules/a.md", "via": ["team.yaml"],
+                    "code": "not-found", "args": { "path": "rules/a.md" }, "line": 3
+                }]
+            });
+            for verb in ["Spawn", "SpawnProfile", "SpawnByCwd"] {
+                let (core, _fanout) = test_core_with_kits(Arc::new(BlockingKits(blocked())));
+                // The policy is not under test — an open one lets `SpawnByCwd` reach the launch check.
+                let core = core.with_llm_policy(|_| None);
+                let stored = core
+                    .manager
+                    .try_create_agent(live_profile("blocked"))
+                    .expect("register");
+                let req = rid();
+                let cmd = match verb {
+                    "Spawn" => AgentCommand::Spawn {
+                        profile_id: stored.id,
+                        request_id: req,
+                    },
+                    "SpawnProfile" => AgentCommand::SpawnProfile {
+                        profile_id: stored.id,
+                        resume: false,
+                        request_id: req,
+                    },
+                    _ => AgentCommand::SpawnByCwd {
+                        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                        backend: Some(WireBackendKind::Claude),
+                        request_id: req,
+                        deliver_notices: false,
+                    },
+                };
+                match dispatch_events(&core, cmd).await.as_slice() {
+                    [AgentEvent::Error {
+                        request_id,
+                        message,
+                        launch_blocked: Some(reasons),
+                        created_agent_id,
+                    }] => {
+                        assert_eq!(*request_id, Some(req), "{verb}");
+                        assert_eq!(
+                            serde_json::Value::Object(reasons.clone()),
+                            expected,
+                            "{verb}"
+                        );
+                        assert!(!message.is_empty(), "{verb}: the text stays");
+                        assert_eq!(created_agent_id, &None, "{verb}: nothing was created");
+                    }
+                    other => panic!("{verb}: one Error with the reasons expected: {other:?}"),
+                }
+                assert!(
+                    core.manager.list_agents().is_empty(),
+                    "{verb}: nothing started"
+                );
+                assert_eq!(
+                    core.manager.agent_snapshots().len(),
+                    1,
+                    "{verb}: nothing created"
+                );
+            }
+        }
+
+        /// A failure that is not a launch block carries no `launch_blocked` — the field is not "any failure".
+        #[tokio::test]
+        async fn a_ws_activation_failure_that_is_not_a_block_carries_no_reasons() {
+            for verb in ["Spawn", "SpawnProfile"] {
+                let (core, _rx) = test_core();
+                let stored = core
+                    .manager
+                    .try_create_agent(unlaunchable_profile("broken"))
+                    .expect("register");
+                let req = rid();
+                let cmd = if verb == "Spawn" {
+                    AgentCommand::Spawn {
+                        profile_id: stored.id,
+                        request_id: req,
+                    }
+                } else {
+                    AgentCommand::SpawnProfile {
+                        profile_id: stored.id,
+                        resume: false,
+                        request_id: req,
+                    }
+                };
+                match dispatch_events(&core, cmd).await.as_slice() {
+                    [AgentEvent::Error {
+                        request_id,
+                        launch_blocked,
+                        ..
+                    }] => {
+                        assert_eq!(*request_id, Some(req), "{verb}");
+                        assert_eq!(launch_blocked, &None, "{verb}");
+                    }
+                    other => panic!("{verb}: one Error expected: {other:?}"),
+                }
+            }
+        }
+
+        // ── WS create-and-start through the one creation body (ADR-0348 · TRD S25 step 20) ──
+
+        /// Passes the first launch check of a profile id (the pre-create check) and blocks every later one (the
+        /// prelaunch after the add) — a block after the add, with no process started.
+        struct BlocksAfterTheAdd {
+            blocked: LaunchBlocked,
+            passed_once: StdMutex<std::collections::HashSet<AgentId>>,
+        }
+
+        impl LaunchKitSource for BlocksAfterTheAdd {
+            fn check(&self, profile: &CoreProfile) -> Result<LaunchPlan, LaunchBlocked> {
+                if self.passed_once.lock().unwrap().insert(profile.id) {
+                    NoopLaunchKits.check(profile)
+                } else {
+                    Err(self.blocked.clone())
+                }
+            }
+            fn prepare(
+                &self,
+                plan: LaunchPlan,
+                id: AgentId,
+                epoch: u32,
+            ) -> Result<LaunchKit, PrepareError> {
+                NoopLaunchKits.prepare(plan, id, epoch)
+            }
+            fn release(&self, _id: AgentId, _epoch: u32) {}
+        }
+
+        fn by_cwd(req: RequestId) -> AgentCommand {
+            AgentCommand::SpawnByCwd {
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                backend: Some(WireBackendKind::Claude),
+                request_id: req,
+                deliver_notices: false,
+            }
+        }
+
+        /// A WS create blocked after the add answers `INTERNAL` with the shared created-asleep wording, the block's
+        /// reasons and the id of the row it left — registered, asleep, marked `Other` — and announces the roster once.
+        #[tokio::test]
+        async fn a_ws_create_blocked_after_the_add_names_the_asleep_agent() {
+            let (core, fanout) = test_core_with_kits(Arc::new(BlocksAfterTheAdd {
+                blocked: blocked(),
+                passed_once: StdMutex::default(),
+            }));
+            let core = core.with_llm_policy(|_| None);
+            let before = fanout.texts().len();
+            let req = rid();
+
+            let events = dispatch_events(&core, by_cwd(req)).await;
+
+            let rows = core.manager.agent_snapshots();
+            let [row] = rows.as_slice() else {
+                panic!("one registered row expected: {rows:?}");
+            };
+            match events.as_slice() {
+                [AgentEvent::Error {
+                    request_id,
+                    message,
+                    launch_blocked: Some(reasons),
+                    created_agent_id,
+                }] => {
+                    assert_eq!(*request_id, Some(req));
+                    assert_eq!(*created_agent_id, Some(row.id), "the row it left");
+                    assert!(
+                        message.starts_with("INTERNAL: agent '")
+                            && message
+                                .contains(&format!("({}) was created but did not start: ", row.id))
+                            && message.contains("fix the listed items first"),
+                        "{message}"
+                    );
+                    assert_eq!(reasons, &blocked().to_args());
+                }
+                other => panic!("one created-asleep Error expected: {other:?}"),
+            }
+            assert_eq!(row.last_failure, Some(CoreFailureKind::Other));
+            assert!(core.manager.list_agents().is_empty(), "nothing started");
+            assert_eq!(
+                broadcast_kinds(&fanout, before),
+                ["ProfileListUpdated", "AgentListUpdated"],
+                "the roster is announced once"
+            );
+        }
+
+        /// A WS create blocked before the add names no agent, leaves no row and announces nothing.
+        #[tokio::test]
+        async fn a_ws_create_blocked_before_the_add_names_no_agent_and_announces_nothing() {
+            let (core, fanout) = test_core_with_kits(Arc::new(BlockingKits(blocked())));
+            let core = core.with_llm_policy(|_| None);
+            let before = fanout.texts().len();
+
+            let events = dispatch_events(&core, by_cwd(rid())).await;
+
+            match events.as_slice() {
+                [AgentEvent::Error {
+                    launch_blocked: Some(_),
+                    created_agent_id: None,
+                    message,
+                    ..
+                }] => assert!(!message.starts_with("INTERNAL:"), "{message}"),
+                other => panic!("one pre-add block expected: {other:?}"),
+            }
+            assert!(core.manager.agent_snapshots().is_empty(), "no row");
+            assert!(broadcast_kinds(&fanout, before).is_empty(), "no announce");
+        }
+
+        #[test]
+        fn the_delivery_request_maps_to_the_notice_delivery() {
+            assert_eq!(delivery_for(true), NoticeDelivery::Delivered);
+            assert_eq!(delivery_for(false), NoticeDelivery::Withheld);
+        }
+
+        /// The production text up to the test module.
+        fn production_source() -> &'static str {
+            include_str!("connection_core.rs")
+                .split("mod tests {")
+                .next()
+                .expect("production part")
+        }
+
+        /// The production text of the `SpawnByCwd` arm — from its pattern to the next arm.
+        fn by_cwd_arm_source() -> &'static str {
+            let production = production_source();
+            let start = production
+                .find("AgentCommand::SpawnByCwd {\n                cwd,")
+                .or_else(|| production.find("AgentCommand::SpawnByCwd {\r\n                cwd,"))
+                .expect("the SpawnByCwd arm");
+            let end = start
+                + production[start..]
+                    .find("AgentCommand::ListProfiles")
+                    .expect("the next arm");
+            &production[start..end]
+        }
+
+        /// ★The arm passes the sender's request into the body★ — a literal `NoticeDelivery::` there would answer
+        /// every sender the same way (withheld never records the notices; delivered marks as shown a set the webview
+        /// does not show).
+        // ADR-0348 · TRD S25 step 20 (M13)
+        #[test]
+        fn the_by_cwd_arm_passes_the_sender_delivery_request_into_the_body() {
+            let arm = by_cwd_arm_source();
+            assert!(
+                arm.contains("delivery: delivery_for(deliver_notices)"),
+                "{arm}"
+            );
+            assert!(!arm.contains("NoticeDelivery::"), "{arm}");
+        }
+
+        /// ★Only the `SpawnByCwd` created-asleep arm names a created agent★ — every other `Error` (incl. every
+        /// [`activation_error`]) created nothing, and a stray id would send a caller to wake an agent that is not
+        /// there.
+        // ADR-0348 · TRD S25 step 20 (U3)
+        #[test]
+        fn only_the_by_cwd_created_asleep_arm_names_a_created_agent() {
+            let production = production_source();
+            assert_eq!(production.matches("created_agent_id: Some(").count(), 1);
+            let arm = by_cwd_arm_source();
+            assert!(
+                arm.contains("CreateRefused::CreatedAsleep")
+                    && arm.contains("created_agent_id: Some(id)"),
+                "{arm}"
+            );
+            let body = &production[production
+                .find("fn activation_error(")
+                .expect("activation_error")..];
+            let body = &body[..body.find("\n}").expect("end of activation_error")];
+            assert!(body.contains("created_agent_id: None"), "{body}");
+        }
+
+        /// `SpawnProfile`'s success carries the launch notices as rows (absent when there are none) and leaves the
+        /// agent's notice fingerprint unrecorded — the webview shows no notices yet.
+        #[tokio::test]
+        async fn a_ws_spawn_profile_success_carries_the_launch_notices_and_records_nothing() {
+            let notices = vec![
+                Reason {
+                    code: "skipped-field".into(),
+                    args: serde_json::json!({ "field": "model" }),
+                    line: Some(4),
+                },
+                Reason {
+                    code: "plain".into(),
+                    args: serde_json::json!({}),
+                    line: None,
+                },
+            ];
+            let rows = serde_json::json!([
+                {
+                    "code": "skipped-field", "args": { "field": "model" }, "line": 4,
+                    "text": notice_text(&notices[0])
+                },
+                { "code": "plain", "args": {}, "text": notice_text(&notices[1]) }
+            ]);
+            for (kits, expected) in [(notices.clone(), Some(rows)), (Vec::new(), None)] {
+                let (core, _fanout) = test_core_with_kits(Arc::new(NoticingKits(kits)));
+                let stored = core
+                    .manager
+                    .try_create_agent(live_profile("noticed"))
+                    .expect("register");
+                let req = rid();
+                let events = dispatch_events(
+                    &core,
+                    AgentCommand::SpawnProfile {
+                        profile_id: stored.id,
+                        resume: false,
+                        request_id: req,
+                    },
+                )
+                .await;
+                let _ = core.manager.kill_agent(stored.id);
+                match events.as_slice() {
+                    [AgentEvent::Spawned {
+                        request_id,
+                        agent,
+                        notices,
+                    }] => {
+                        assert_eq!(*request_id, req);
+                        assert_eq!(agent.id, stored.id);
+                        assert_eq!(
+                            notices.clone().map(serde_json::Value::Array),
+                            expected,
+                            "the notice rows"
+                        );
+                    }
+                    other => panic!("one Spawned expected: {other:?}"),
+                }
+                assert_eq!(
+                    core.manager
+                        .agent_snapshot(stored.id)
+                        .expect("still registered")
+                        .notice_fingerprint,
+                    None,
+                    "the WS records no notice fingerprint"
+                );
+            }
+        }
+
+        /// `Spawn` answers `Ack`, which carries no notices — so a success with notices leaves the fingerprint
+        /// unrecorded.
+        #[tokio::test]
+        async fn a_ws_spawn_success_acks_and_records_no_notice_fingerprint() {
+            let notices = vec![Reason {
+                code: "plain".into(),
+                args: serde_json::json!({}),
+                line: None,
+            }];
+            let (core, _fanout) = test_core_with_kits(Arc::new(NoticingKits(notices)));
+            let stored = core
+                .manager
+                .try_create_agent(live_profile("noticed"))
+                .expect("register");
+            let req = rid();
+            let events = dispatch_events(
+                &core,
+                AgentCommand::Spawn {
+                    profile_id: stored.id,
+                    request_id: req,
+                },
+            )
+            .await;
+            let started = !core.manager.list_agents().is_empty();
+            let _ = core.manager.kill_agent(stored.id);
+            match events.as_slice() {
+                [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+                other => panic!("one Ack expected: {other:?}"),
+            }
+            assert!(started, "the agent started");
+            assert_eq!(
+                core.manager
+                    .agent_snapshot(stored.id)
+                    .expect("still registered")
+                    .notice_fingerprint,
+                None,
+                "the WS records no notice fingerprint"
+            );
+        }
     }
 }

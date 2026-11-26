@@ -1,12 +1,12 @@
 //! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
-//!   [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) ·
-//! atomic writes ([`write_atomic`] · [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp
-//!   files ([`sweep_temps`]).
+//! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_capped_bytes`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
+//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]) · the
+//! temp-name maker ([`temp_path`]) and readers ([`is_temp_name`] · [`temp_target`]).
 //!
 //! It knows no file names · locations · schemas · version key names — each owner (store) owns those and hands the read-rule part over as a
 //!   [`Spec`]. The only names decided here sit next to the target: the temp file `<name>.tmp<pid>.<n>`
-//! and the set-aside copy `<name>.corrupt`. ★The code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it
-//!   (`temp_owner`) live only here★ — change all three together (tests read back the names they made).
+//! and the set-aside copy `<name>.corrupt`. ★The code that makes that shape ([`temp_path`] · [`copy_aside`]) and the code that reads it
+//!   (`split_temp_name`) live only here★ — change all three together (tests read back the names they made).
 //!
 //! ★"May we overwrite?" is decided again for every write, right before it, from the current file★ — one [`Loaded::write_policy`] table;
 //!   the owner drives the order (read → decide → set aside → write). A file written by a newer version and a file that
@@ -308,18 +308,25 @@ fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> 
 ///   the read itself — [`classify`] tells them apart (unusable content = corrupt, IO failure = left alone).
 /// No lock retry — use [`read_file_capped`] if needed.
 pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
+    let buf = read_capped_bytes(source, cap)?;
+    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// [`read_capped`] without the UTF-8 step — the bytes of `source`, read only up to `cap + 1`; over the cap =
+/// `ErrorKind::InvalidData`, other kinds = IO failures of the read itself. No lock retry.
+pub fn read_capped_bytes(source: impl io::Read, cap: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
 
     let mut buf = Vec::new();
     // cap + 1 = the smallest amount that can tell 「did it go over?」. Even if it went over, the amount read stops here.
-    source.take(cap + 1).read_to_end(&mut buf)?;
+    source.take(cap.saturating_add(1)).read_to_end(&mut buf)?;
     if buf.len() as u64 > cap {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("exceeded the {cap} byte cap"),
         ));
     }
-    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    Ok(buf)
 }
 
 /// Opens the file and reads it with [`read_capped`] — if the open or read fails on a lock, it opens again via [`OsHooks::retry`] and
@@ -517,8 +524,10 @@ const ASIDE_SUFFIX: &str = ".corrupt";
 
 /// The temp name next to `path`, `<name>.tmp<pid>.<n>` — the pid tells apart other processes looking at the same folder, and the number
 ///   (one more each time it is
-/// called within the process) tells apart other calls of the same process.
-fn temp_path(path: &Path) -> io::Result<PathBuf> {
+/// called within the process) tells apart other calls of the same process. Public so a caller staging its own file or folder under
+///   this shape (a name [`is_temp_name`] recognises and a library scan skips) need not copy it; it only names — creating at that name
+///   without replacing, and drawing a new name on a collision, is the caller's.
+pub fn temp_path(path: &Path) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     sibling(path, &format!("{TEMP_MARK}{}.{n}", std::process::id()))
@@ -531,10 +540,34 @@ fn temp_path(path: &Path) -> io::Result<PathBuf> {
 ///   written in that shape, so we cannot assert it is ours and must not delete a file that may be someone else's.
 /// To sweep a target written in the old shape, look at this rule first.
 fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
-    let rest = file_name.strip_prefix(target)?.strip_prefix(TEMP_MARK)?;
-    let (pid, n) = rest.split_once('.')?;
+    let (name, pid) = split_temp_name(file_name)?;
+    (name == target).then_some(pid)
+}
+
+/// Whether `file_name` (a bare name, not a path) has the temp-name shape `temp_path` writes, `<name>.tmp<pid>.<n>`, for
+/// any non-empty `<name>` — so a set-aside's `<x>.corrupt.tmp<pid>.<n>` is one too. The pid · number rule is
+/// `temp_owner`'s (exact decimals). It reads the name only; it does not say whose file it is or whether it may be deleted
+/// (that is [`sweep_temps`]).
+pub fn is_temp_name(file_name: &str) -> bool {
+    split_temp_name(file_name).is_some()
+}
+
+/// The `<name>` of `file_name` when it has the temp-name shape `temp_path` writes, `<name>.tmp<pid>.<n>` (the pid · number
+/// rule is [`is_temp_name`]'s), else `None` — so a caller tells its own target's temps from another name's whose
+/// spelling merely starts with it (`x.tmpA.tmp1.2` is a temp of `x.tmpA`, not of `x`). It reads the name only.
+pub fn temp_target(file_name: &str) -> Option<&str> {
+    split_temp_name(file_name).map(|(name, _)| name)
+}
+
+/// `<name>.tmp<pid>.<n>` → (`<name>`, pid). The number has no `.`, so the last `.` ends `<pid>`; the pid has no `.tmp`,
+/// so the last `.tmp` before it ends `<name>`.
+fn split_temp_name(file_name: &str) -> Option<(&str, u32)> {
+    let (head, n) = file_name.rsplit_once('.')?;
     exact_decimal::<u64>(n)?;
-    exact_decimal::<u32>(pid)
+    let mark = head.rfind(TEMP_MARK)?;
+    let name = &head[..mark];
+    let pid = exact_decimal::<u32>(&head[mark + TEMP_MARK.len()..])?;
+    (!name.is_empty()).then_some((name, pid))
 }
 
 fn exact_decimal<T: std::str::FromStr + ToString>(digits: &str) -> Option<T> {
@@ -811,6 +844,32 @@ mod tests {
     }
 
     #[test]
+    fn the_byte_form_keeps_the_cap_and_takes_any_bytes() {
+        let cap = 8u64;
+        let bytes = read_capped_bytes(io::Cursor::new(vec![0xff; cap as usize]), cap).unwrap();
+        assert_eq!(
+            bytes,
+            vec![0xff; cap as usize],
+            "not UTF-8 is not refused here"
+        );
+        let over = read_capped_bytes(io::Cursor::new(vec![b'x'; cap as usize + 1]), cap)
+            .expect_err("over the cap is refused");
+        assert_eq!(over.kind(), io::ErrorKind::InvalidData);
+        let produced = Cell::new(0u64);
+        let reader = Counting {
+            inner: io::Cursor::new(vec![b'x'; 1024]),
+            produced: &produced,
+        };
+        assert!(read_capped_bytes(reader, cap).is_err());
+        assert!(produced.get() <= cap + 1, "read {} bytes", produced.get());
+        // The largest cap reads everything (`cap + 1` must not wrap to a read of nothing).
+        assert_eq!(
+            read_capped_bytes(io::Cursor::new(b"abc".to_vec()), u64::MAX).unwrap(),
+            b"abc"
+        );
+    }
+
+    #[test]
     fn non_utf8_content_is_invalid_data_like_an_oversized_one() {
         let refused = read_capped(io::Cursor::new(vec![0xff, 0xfe, 0x00]), 64)
             .expect_err("non-UTF-8 is refused");
@@ -977,6 +1036,63 @@ mod tests {
             "state.crash.json.tmp12.3",
         ] {
             assert_eq!(temp_owner(name, "state.json"), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_target_of_a_temp_name_is_its_whole_name_before_the_last_mark() {
+        for target in ["state.json", ".rec.json", "x.tmp1.2", ".rec.json.tmpX"] {
+            let temp = temp_path(&Path::new("dir").join(target)).unwrap();
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert_eq!(temp_target(name), Some(target), "{name}");
+        }
+        assert_eq!(temp_target(".rec.json.tmpX.tmp1.2"), Some(".rec.json.tmpX"));
+        assert_eq!(temp_target(".rec.json.tmp1"), None);
+        assert_eq!(temp_target(".rec.json"), None);
+    }
+
+    #[test]
+    fn a_made_temp_name_is_a_temp_name_for_any_target() {
+        for target in ["state.json", "state.json.corrupt", "a", "x.tmp1.2"] {
+            let temp = temp_path(&Path::new("dir").join(target)).unwrap();
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert!(is_temp_name(name), "{name}");
+        }
+    }
+
+    // TRD S25 step-7 §8-1 P1 base row.
+    #[test]
+    fn only_the_exact_numbered_shape_is_a_temp_name_whatever_the_name() {
+        for name in [
+            "state.json.tmp12.3",
+            "state.json.tmp12.0",
+            "state.json.corrupt.tmp12.3",
+            "preset.yaml.tmp4294967295.18446744073709551615",
+            "x.tmp1.2.tmp3.4",
+            "a.tmp0.0",
+        ] {
+            assert!(is_temp_name(name), "{name}");
+        }
+        for name in [
+            "state.json",
+            "state.json.tmpX",
+            "state.json.tmp12",
+            "state.json.tmp12.",
+            "state.json.tmp.3",
+            "state.json.tmp12.3.4",
+            "state.json.tmp12.x",
+            "state.json.tmp+12.3",
+            "state.json.tmp12.+3",
+            "state.json.tmp012.3",
+            "state.json.tmp12.03",
+            "state.json.tmp4294967296.3",
+            "state.json.tmp12.18446744073709551616",
+            "state.json.tmp-1.3",
+            "state.json.tmp 12.3",
+            ".tmp12.3",
+            "",
+        ] {
+            assert!(!is_temp_name(name), "{name}");
         }
     }
 

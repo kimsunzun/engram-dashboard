@@ -11,7 +11,6 @@ import { useAgentStore } from '../../store/agentStore'
 import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
-import PresetPalette from '../slot/PresetPalette'
 import UsageSlot from '../slot/UsageSlot'
 import AgentList from '../agent/AgentList'
 import { isContentSlot } from '../agent/selectOpenTarget'
@@ -78,7 +77,7 @@ function LayoutLeaf({
       // ADR-0066: click-to-focus — clicking the slot pane focuses this slot. viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated), a single control surface (human click = LLM = slot.focus, §5).
       //   ★No optimistic update★: the ring (isFocused) is updated only by the backend emit snapshot (authority = src-tauri, ADR-0035).
       //   ★Bubbling allowed (no stopPropagation/preventDefault)★: do not intercept inner interactions (terminal focus, AgentList buttons, etc.).
-      //   ★Control-slot focus excluded — allowlist (ADR-0066 refinement)★: focusSlot is called only for content slots (empty/agent); the tree (agent_list), palette (preset_palette) and later control variants are non-focusable.
+      //   ★Control-slot focus excluded — allowlist (ADR-0066 refinement)★: focusSlot is called only for content slots (empty/agent); the tree (agent_list) and later control variants are non-focusable.
       //   The gate is the single classifier isContentSlot (allowlist) shared with selectOpenTarget, so the "open" target choice and this gate cannot diverge.
       //   Without it a left-click on a tree node bubbles to the tree slot pane and focuses the tree slot, and the right-click "open" would overwrite the tree with an agent terminal.
       //   If targetViewId is not yet known (tab state not arrived right after boot) it is a no-op (prevents focus leaking to a wrong view).
@@ -201,11 +200,10 @@ const SlotBody = memo(function SlotBody({
           : presence === 'reserved'
             ? 'stopped'
             : 'noTarget'
-  // The preset_palette, agent_list and usage variants are real renderers that fill the slot 100%, so hasContent=true (the centering placeholder style must not break them, ADR-0060/0061/0062).
-  const isPresetPalette = node.content.type === 'preset_palette'
+  // The agent_list and usage variants are real renderers that fill the slot 100%, so hasContent=true (the centering placeholder style must not break them, ADR-0060/0062).
   const isAgentList = node.content.type === 'agent_list'
   const isUsage = node.content.type === 'usage'
-  const hasContent = agentSlot === 'view' || isPresetPalette || isAgentList || isUsage
+  const hasContent = agentSlot === 'view' || isAgentList || isUsage
   return (
     <div
       ref={borderRef}
@@ -264,9 +262,6 @@ const SlotBody = memo(function SlotBody({
               }
             })()
           )
-        ) : node.content.type === 'preset_palette' ? (
-          // List/add/delete flow inside PresetPalette through agentClient (single control surface).
-          <PresetPalette />
         ) : node.content.type === 'agent_list' ? (
           // Actions flow inside AgentList through agentClient/viewStore (single control surface) (§5).
           <AgentList />
@@ -307,7 +302,7 @@ const SlotBody = memo(function SlotBody({
       )}
       {isFocused && (
         // ★Strength 40%★: lowered from 65% because the frame was judged noisy (compared by eye on the actual screen). It equals the 40% ADR-0066 rejected as "too weak to see", but that rejection was made without comparing the real thing, so this measured decision takes precedence. To revert, raise only this line.
-        //   All three themes adapt via color-mix. Control slots (tree/preset) are excluded from focusSlot (isContentSlot gate), so isFocused=false → no ring.
+        //   All three themes adapt via color-mix. Control slots (tree, etc.) are excluded from focusSlot (isContentSlot gate), so isFocused=false → no ring.
         // ADR-0280
         // ★The ring color must not vary with slot state★ — so the ring stands above the absence veil (z-20, whether the leaf or the slot component draws it) and the veil does not dim it. Two premises: no ancestor of the veil under this element has a z-index above 20,
         //   and the ring is this element's last child — then z is equal and the ring, later in tree order, is on top. Below the connection notice (z 40) and menus (1000 and up).

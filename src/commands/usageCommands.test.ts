@@ -80,7 +80,7 @@ describe('registration point', () => {
   })
 
   it('they do not contribute to the slot right-click menu — no menu of any content, the usage slot included, has usageSlot.* (user decision 2026-09-29)', () => {
-    for (const type of ['usage', 'empty', 'agent', 'agent_list', 'preset_palette'] as const) {
+    for (const type of ['usage', 'empty', 'agent', 'agent_list'] as const) {
       expect(buildSlotMenu(type).some(i => i.id.startsWith('usageSlot.'))).toBe(false)
     }
   })

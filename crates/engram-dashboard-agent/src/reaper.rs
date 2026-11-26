@@ -1,7 +1,8 @@
 //! Session reaper — the single consumer of the exit classification (ADR-0019).
 //!
 //! A **single supervisor thread** consumes the `ReapMsg` the pump emits as finish winner: remove from the sessions map (epoch must match)
-//! → profile disposition (auto_restore=false downgrade / untouched — auto-delete abolished by ADR-0083) → list notification.
+//! → drop the control channel → profile disposition (auto_restore=false downgrade / untouched — auto-delete abolished by ADR-0083) →
+//! list notification → reclaim the launch materials.
 //!
 //! Invariants:
 //! - The kill 2 verbs (ADR-0001) and finalize once (ADR-0005) are untouched — the reaper only consumes the done signal, emitted once on
@@ -33,6 +34,9 @@ pub enum ReaperCmd {
 }
 
 /// Shares the AgentManager's field Arcs **as is** — the manager and the reaper see the same sessions/profiles/status_sink/control.
+/// ★The launch-material source is not kept here★ — this bundle is built in the manager constructor and does not see ports that
+///   `with_launch_ports` swaps in later. Materials are reclaimed through the lease the session holds (`AgentSession::take_launch_lease`).
+// TRD S25 §5-2 4 (c2) ③
 pub struct ReaperDeps {
     pub sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     pub profiles: Arc<ProfileRegistry>,
@@ -56,9 +60,11 @@ impl ReaperDeps {
             }
         };
 
-        if removed.is_none() {
+        let Some(removed) = removed else {
             return;
-        }
+        };
+        // Take the materials lease before letting the session go — step 5 below uses it.
+        let lease = removed.take_launch_lease();
         // Drops Arc<AgentSession>. ★Does not assume it is the "last" reference★: the resume-failure observer
         //   (`AgentManager::early_activation_verdict`) holds the same Arc during the early-exit window, so the release can wait until its
         //   next poll (100ms). Harmless — the terminal transition is the pump's alone (ADR-0005), and the link's `GroupOwner` drops with
@@ -80,6 +86,21 @@ impl ReaperDeps {
 
         let agents = list_agents(&self.sessions, &self.profiles);
         self.status_sink.agent_list_updated(agents);
+
+        // 5. ★The only place that reclaims launch materials after session registration★ — same marker winner · outside the lock. It
+        //   runs **after** disposition · list notification so a slow or stuck reclaim does not hold up lowering auto_restore (ADR-0019
+        //   「lowering is last」) or the list notification. The kill · failure cleanup paths do not reclaim (the child is still alive
+        //   then and writes the volatile folder). The lease holds the source that prepared that incarnation, so ports swapped in after
+        //   manager construction reach here too.
+        // ★Best effort★ — the CLI tree may still be alive here (an early-decision observer holds the session `Arc` · a contained pump
+        //   panic · `KILL_ON_JOB_CLOSE` is asynchronous). A reclaim that never runs (daemon exit · forced kill · a `ReapMsg` after
+        //   `Stop`) is backed by the boot sweep.
+        // ADR-0334
+        // TRD S25 §5-2 4 (c2) ② · ④ · ⑥
+        if let Some(lease) = lease {
+            debug_assert_eq!(lease.epoch(), msg.epoch);
+            lease.release();
+        }
 
         tracing::info!(
             agent = %msg.id,
@@ -155,7 +176,7 @@ fn list_agents(
 /// ★ADR-0101 (WYSIWYA): same name chain as manager.agent_info★ — reap_one broadcasts this as agent_list_updated on every exit, so
 ///   profile.name would revert tree names to full-path labels. Name = display_name(override) ?? basename(session.cwd); the profile-absent
 ///   fallback uses the shared core (name::canonical_name_or_id_fallback).
-/// ★cwd source = session.cwd★ (canonical, as AgentInfo.cwd): profile.cwd (raw) would diverge from the tree basename (manager.rs
+/// ★cwd source = session.cwd★ (the launch's working folder, as AgentInfo.cwd): profile.cwd (raw) would diverge from the tree basename (manager.rs
 ///   resolve_canonical_name).
 // ADR-0101
 fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) -> AgentInfo {

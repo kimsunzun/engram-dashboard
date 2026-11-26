@@ -159,6 +159,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == expect_id => {
                     panic!("expected Ack but got Error(req={rid:?}): {message}");
                 }
@@ -176,6 +177,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == expect_id => {
                     return message;
                 }
@@ -241,6 +243,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("CRUD failure Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -271,6 +274,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => {
                     panic!("expected Created but got Error(req={rid:?}): {message}")
                 }
@@ -285,7 +289,9 @@ impl Client {
         let deadline = std::time::Instant::now() + Duration::from_secs(20);
         while std::time::Instant::now() < deadline {
             match self.next().await {
-                Some(Incoming::Event(AgentEvent::Spawned { request_id, agent })) => {
+                Some(Incoming::Event(AgentEvent::Spawned {
+                    request_id, agent, ..
+                })) => {
                     assert_eq!(request_id, req, "request_id echo of Spawned");
                     return agent;
                 }
@@ -295,6 +301,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => {
                     panic!("expected Spawned but got Error(req={rid:?}): {message}")
                 }
@@ -364,6 +371,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("Spawn failure Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -394,6 +402,7 @@ impl Client {
                 Some(Incoming::Event(AgentEvent::Error {
                     request_id: Some(rid),
                     message,
+                    ..
                 })) if rid == req => panic!("Kill failure Error(req={rid:?}): {message}"),
                 Some(_) => continue,
                 None => break,
@@ -2073,6 +2082,7 @@ async fn case40_ws_spawn_by_cwd() {
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         backend: Some(WireBackendKind::Claude),
         request_id: req,
+        deliver_notices: false,
     })
     .await;
     let agent = c.await_spawned(req).await;
@@ -2227,6 +2237,7 @@ async fn case45_ws_activation_does_not_block_the_next_command() {
             Some(Incoming::Event(AgentEvent::Error {
                 request_id: Some(rid),
                 message,
+                ..
             })) if rid == spawn_req => {
                 panic!("Spawn failed — that is not what this case measures: {message}")
             }
@@ -2336,6 +2347,7 @@ mod real_process {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
 
+    use engram_dashboard_agent::persistence::PROFILES_FILE;
     use engram_dashboard_base::testing::wait_until;
     use engram_dashboard_daemon::data_dir::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
@@ -2418,7 +2430,7 @@ mod real_process {
     }
 
     /// At boot the daemon restores this profile via restore_all → a live PTY child (cmd.exe). ShellBackend loads program/args onto the PTY as is (no shim wrapping), so cmd.exe is the daemon's direct child and identifiable by child_pids(daemon_pid).
-    fn write_restorable_shell_agents_json(data_dir: &Path) {
+    fn write_restorable_shell_profile_file(data_dir: &Path) {
         // schema_version == 1 (`PROFILES` in persistence/mod.rs); shape pinned (regression detection).
         let profile = AgentProfile::new(
             "step7-restore-shell".into(),
@@ -2435,7 +2447,7 @@ mod real_process {
         let file = format!("{{\"schema_version\":1,\"profiles\":{profiles_json}}}");
         let state = DataLayout::new(data_dir).daemon_state_dir();
         std::fs::create_dir_all(&state).expect("state folder");
-        std::fs::write(state.join("agents.json"), file).expect("agents.json write");
+        std::fs::write(state.join(PROFILES_FILE), file).expect("profile file write");
     }
 
     // ── case1: daemon .exe kill → PTY child (cmd.exe) Job (KILL_ON_JOB_CLOSE) cleanup together ──────
@@ -2448,7 +2460,7 @@ mod real_process {
 
         let ctx = fresh_iso("kill");
         let data_dir = ctx.data_dir.clone();
-        write_restorable_shell_agents_json(&data_dir);
+        write_restorable_shell_profile_file(&data_dir);
         let mut daemon = spawn_daemon_iso(&ctx);
 
         let info = match poll_daemon_json(&data_dir, std::time::Duration::from_secs(15)) {

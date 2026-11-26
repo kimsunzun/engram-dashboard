@@ -1,4 +1,4 @@
-// ADR-0061: names are not stored; the cwd basename is used. ★Single source★: the preset display name (PresetPalette) and the agent row display name (AgentList) must derive names by the same rule — copies would diverge on win/posix and root edges.
+// ADR-0061: names are not stored; the cwd basename is used. ★Single source★: every place that derives a name from a path must use the same rule — copies would diverge on win/posix and root edges.
 
 import { t } from '../i18n'
 

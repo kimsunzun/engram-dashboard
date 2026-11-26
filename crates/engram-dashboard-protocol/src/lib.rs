@@ -41,11 +41,11 @@ pub use discovery::DaemonInfo;
 pub use domain::{
     AgentBackendKind, AgentFailureKind, AgentInfo, AgentOutputFormat, AgentProfile,
     AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, EnvelopeFormat, InputCaps,
-    ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
+    ModelCaps, OutputCaps, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
     SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
     UsageWindow,
 };
-pub use ids::{AgentId, OwnerToken, PresetId, ProfileId, RequestId};
+pub use ids::{AgentId, OwnerToken, ProfileId, RequestId};
 pub use messages::{
     AgentCommand, AgentEvent, CommandListEntry, DeliveredCopy, DropCause, OutputChunk,
     QueuedInputCancel, QueuedInputEvent, QueuedInputRow, StructuredEvent, SubscribeAction,
@@ -77,5 +77,18 @@ pub use secret::Secret;
 ///   + `AgentEvent::UsageLimitsUpdated`. Command axis: an old daemon's uncorrelated parse-failure `Error` leaves a subscribe failure invisible and ⟳ hanging.
 ///   Not a reason: the snapshot shape (`UsageLimitSnapshot`'s `revision` · `detail`) and `subscribed`.
 ///
+/// - v8: the old preset (working-folder bookmark) wire is removed — commands `ListPresets` · `CreatePreset` · `DeletePreset` ·
+///   `RenamePreset` and events `PresetList` · `PresetListUpdated` (TRD S25-preset-library §5-2 1). Command axis, non-tolerant like v3 · v6:
+///   old shell + new daemon = the daemon cannot decode the preset command and answers `Error{request_id: None}`, so the shell's request
+///   hangs until its reply cap.
+///   v8 also widens the activation replies (TRD S25-preset-library §5-2 16) — `AgentEvent::Error.launch_blocked`
+///   (the structured launch block) and `AgentEvent::Spawned.notices` (the launch notices). Both are optional fields:
+///   absent = the old bytes, and an old reader drops the unknown key. The other direction (an earlier v8 daemon, a new
+///   shell) is also safe: that daemon ran Noop launch kits, which neither block nor notify, so absent is the truth.
+///   v8 also gains `AgentCommand::SpawnByCwd.deliver_notices` and `AgentEvent::Error.created_agent_id` (TRD S25 step 20,
+///   ADR-0348) — optional both ways: absent = `false` / `None` = the old bytes, and an old peer drops the unknown key (an
+///   earlier v8 daemon answers withheld, which only shows the set again; an old shell still has the asleep agent named in
+///   the message text).
+///
 /// Measured against this criterion and **not bumped**: [`StructuredEvent::TurnEnd`] — the analysis lives in that variant's doc.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;

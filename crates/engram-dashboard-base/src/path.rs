@@ -11,20 +11,35 @@
 /// ★`\` → `/` runs regardless of OS★ — on POSIX `\` is a legal file name character, so it changes that name.
 /// TODO(ADR-0230): look again when porting to macOS.
 pub fn normalize_spelling(raw: &str) -> String {
-    let unquoted = match raw.chars().next() {
+    unquote(raw).replace('\\', "/")
+}
+
+/// Strips one layer of wrapping quotes, by the same rule as [`normalize_spelling`] (an empty pair is kept), and
+/// nothing else — for a caller whose path reader takes `\` itself, where `\` → `/` would change a verbatim spelling
+/// (`\\?\D:\x` → `//?/D:/x`, a UNC server named `?`).
+pub fn unquote(raw: &str) -> &str {
+    match raw.chars().next() {
         Some(quote @ ('"' | '\'')) => raw
             .strip_prefix(quote)
             .and_then(|rest| rest.strip_suffix(quote))
             .filter(|inner| !inner.is_empty())
             .unwrap_or(raw),
         _ => raw,
-    };
-    unquoted.replace('\\', "/")
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_spelling;
+    use super::{normalize_spelling, unquote};
+
+    #[test]
+    fn unquote_strips_one_quote_layer_and_keeps_backslashes() {
+        assert_eq!(unquote(r#""\\?\D:\lib""#), r"\\?\D:\lib");
+        assert_eq!(unquote(r"'C:\a b'"), r"C:\a b");
+        assert_eq!(unquote("\"\""), "\"\"", "an empty pair is kept");
+        assert_eq!(unquote(r#""'x'""#), "'x'");
+        assert_eq!(unquote(r"\\?\D:\lib"), r"\\?\D:\lib");
+    }
 
     #[test]
     fn normalize_spelling_strips_one_quote_pair_and_turns_backslashes_around() {

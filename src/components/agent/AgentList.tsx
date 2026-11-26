@@ -3,7 +3,7 @@
 //!
 //! ★State = shape, not color (icon)★ (ADR-0062): state stays distinguishable on e-ink (monochrome) by choosing the shape via statusGlyphIcon, not color literals. ◐ (awaiting input) is vocabulary only (no backend signal, never lit).
 //!
-//! ★Display name = display_name override ?? cwd basename (frontend-derived, ADR-0061)★ (shared basename util — single source with PresetPalette). cwd is not shown (name only).
+//! ★Display name = display_name override ?? cwd basename (frontend-derived, ADR-0061)★ (shared basename util). cwd is not shown (name only).
 //!
 //! ★Owns only the ROW right-click menu (ADR-0064)★: a pane-background right-click bubbles to the parent unified slot menu (agent_list "create agent" = agentlist.createAgent command + common slot ops); only a row right-click is intercepted
 //! with stopPropagation to show the item-targeted menu (activate/open/kill/rename/delete). Actions flow only through agentClient / viewStore (backend-authoritative invoke→emit) — no raw invoke/ptyApi (ADR-0011).
@@ -194,7 +194,7 @@ export default function AgentList() {
   }
 
   // "Open" = assign this agent to the target slot of this window's active view (reuses the existing assign path — same as AgentTree).
-  //   ★Target slot = selectOpenTarget (pure function)★: the focused slot by default; when focus is on a control slot (tree/palette), an unknown content slot, or focus=null it falls back to the first empty slot instead of overwriting (safety net for the LayoutLeaf click-to-focus gate); with no empty slot nothing is assigned (never clobber).
+  //   ★Target slot = selectOpenTarget (pure function)★: the focused slot by default; when focus is on a control slot (tree, etc.), an unknown content slot, or focus=null it falls back to the first empty slot instead of overwriting (safety net for the LayoutLeaf click-to-focus gate); with no empty slot nothing is assigned (never clobber).
   const openInFocusedSlot = (agentId: string) => {
     if (!beginInFlight(agentId)) return
     const vs = useViewStore.getState()
@@ -265,7 +265,7 @@ export default function AgentList() {
       .finally(() => endInFlight(childId))
   }
 
-  // Display name = display_name override ?? cwd basename (ADR-0061), same precedence as PresetPalette. Starting a rename seeds the draft and `draftStart` with it.
+  // Display name = display_name override ?? cwd basename (ADR-0061). Starting a rename seeds the draft and `draftStart` with it.
   const displayNameOf = (node: AgentTreeNode): string => node.displayName ?? basename(node.cwd)
 
   // The row menu is closed by the caller.
@@ -510,7 +510,7 @@ export default function AgentList() {
   }
 
   return (
-    // ★Structure = label (fixed) outside + only the tree in the area below★ (same as PresetPalette/AgentMonitoringPicker, ADR-0053): the label is a flex sibling outside the scroll so it stays fixed. react-arborist (react-window) owns its virtualized scroll,
+    // ★Structure = label (fixed) outside + only the tree in the area below★ (same as AgentMonitoringPicker, ADR-0053): the label is a flex sibling outside the scroll so it stays fixed. react-arborist (react-window) owns its virtualized scroll,
     //   so it is not wrapped in ScrollArea (scroll-ownership conflict). ★Pane-background marker = this outer flex container (data-agent-list)★: a pane-background right-click bubbles to the parent unified slot menu (ADR-0064); only a row right-click is stopPropagation'd by the row handler.
     <div
       data-agent-list="1"

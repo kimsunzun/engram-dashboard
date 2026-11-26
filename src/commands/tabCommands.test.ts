@@ -350,23 +350,26 @@ describe('layout.setSlotContent variant shape validation', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'a-1' })
   })
 
-  it('unit variants (empty/agent_list/preset_palette) pass without extra fields', () => {
+  it('unit variants (empty/agent_list) pass without extra fields', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'empty' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'agent_list' } })
-    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'preset_palette' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'empty' })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
-    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
+  })
+
+  it('the removed kind preset_palette is refused by the whitelist', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'preset_palette' } }),
+    ).toThrow(/SlotContent variant/)
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
   // ★Case-insensitive acceptance + normalization to the declared spelling★: the tag flowing to the store and backend must be the declared spelling of the SlotContent union, not the caller's (wire bytes identical).
   it('type accepted case-insensitively → normalized to the declared spelling and routed', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'EMPTY' } })
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'Agent_List' } })
-    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'PRESET_PALETTE' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'empty' })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
-    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
   })
 
   it('agent variant folds only the tag and carries agent_id as is', () => {

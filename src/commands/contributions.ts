@@ -1,6 +1,6 @@
 // ADR-0064 §4 invariant (no scattered imports): new content = its module + one line here.
 //
-// ★Mind the load order★: slotCommands / slotContentCommands / presetCommands / agentCommands register their commands
+// ★Mind the load order★: slotCommands / slotContentCommands / agentCommands register their commands
 //   and *then* reference those ids with registerSlotMenu. buildSlotMenu's resolve happens at render time (right-click),
 //   so it does not depend on import order, but every register must be done by manifest load time for right-click to be safe
 //   — this file imports them all, so that invariant holds.
@@ -9,7 +9,6 @@ import './tabCommands'
 import './slotCommands'
 import './slotContentCommands'
 import './renderModeCommands'
-import './presetCommands'
 import './agentCommands'
 import './scrollCommands'
 import './chatCommands'

@@ -8,7 +8,7 @@
  * runs with them** — so the field is left open but the values are narrowed to the confirmed two (so the contract's **shape** does not
  * change later).
  * ★The worth of adding a variant is decided by **whether its pair already exists**★: the run command (`AgentCommand`)
- * **is written as is into `agents.json`** with `#[serde(tag = "kind")]`, and an old build meeting an unknown kind treats that
+ * **is written as is into the profile file** with `#[serde(tag = "kind")]`, and an old build meeting an unknown kind treats that
  * file **as one lump** as damaged and **comes up with an empty roster** — the first save copies that file aside to `.corrupt` and overwrites it
  * (persistence `FileProfileStore::load` · builds older than that move it to `.corrupt-<ms>` at load). So
  * adding here a backend **not yet** in `AgentCommand` is a migration that breaks disk compatibility, and adding a backend whose pair **already

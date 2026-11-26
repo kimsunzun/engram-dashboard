@@ -12,19 +12,24 @@
 //!   ending a process tree — Windows `taskkill`, ending one identity only if it still runs) ·
 //! [`group`] (strong owner of a process group, weak handles, held members, join-notification port — Windows Job Object) · [`file_holders`]
 //!   (processes holding a file open — Restart Manager) · [`fs`] (opening while denying
-//! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync) · [`spawn`] (windowless spawn,
+//! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync, creating and walking directory
+//!   links — Windows junction, path keys and path comparison, folder-path normalization, the Win32 reserved-device-name test, file
+//!   identity, the network share a path is on, a rename that never replaces, clearing read-only below a folder without following
+//!   links, a folder's modified time, opening a file for reading without following its last name, a path as
+//!   forward-slash text) · [`spawn`] (windowless spawn,
 //!   tree-root spawn with a kill handle — Windows = suspended, put in the group, resume;
 //! "program not found" verdict; spawning outside this process's Job — WMI) · [`shell`] (interactive default shell, wrapping a CLI in a
 //!   console shell) · [`env`] (home dir, executable name/sibling path, env var name
 //! comparison) · [`window`] (identity, placement and z-order, restoring placement, topmost window under the cursor, diagnostics,
 //!   foreground checks, title bar chrome, snap overlay behind feature `snap-overlay`) ·
-//! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read).
+//! [`input`] (cursor position, primary button, Esc state) · [`os`] (whether the host uses Windows path rules) · [`pty`]
+//!   (whether closing a pseudo-terminal waits for its output to be read).
 //!   Module headers and public docs are the source of truth.
 //!
 //! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`; variant matching happens here too (TRD S21-slot-docking
 //!   revision 6.3 §8, B10, revision 7 §5-1).
 //!
-//! ★`testing` (real-process helpers), `group::GroupRef::gone` and `spawn::wmi_create_raw` (diagnostic) are behind cargo feature
+//! ★`testing` (real-process helpers and a non-Unicode path), `group::GroupRef::gone` and `spawn::wmi_create_raw` (diagnostic) are behind cargo feature
 //!   `test-support`★ (TRD 1-3 §3-8; same name as base's ADR-0275 decision 5): declared
 //! `#[cfg(any(test, feature = "test-support"))]`. CI gate ③ (a 1-or-more-lines expectation paired with a 0-lines expectation) measures
 //!   that the feature is not in the daemon/shell/CLI production graph; commands and
@@ -44,7 +49,13 @@
 //! 2. **Interface = functions + handle types, compile-time branching** (ADR-0266 decision 5): no trait object picking the OS; a test fake
 //!   is **the caller's** small trait, so this API has no test seam traits.
 //! 3. **Branches outside Windows are placeholders** (ADR-0266 decision 7): no new implementations for other OSes — the branches that
-//!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered.
+//!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered. Exception = `fs`'s directory links (symbolic
+//!   link), file identity (device number · inode) and path key (as is), whose behaviour on other OSes the design fixes — std only
+//!    (TRD S25 §1-6 · ADR-0325 · ADR-0336) — and `fs`'s no-replace rename (Linux `renameat2`, Apple `renamex_np`, through `libc` —
+//!    ADR-0409) and no-follow read open (`O_NOFOLLOW` through `libc` — ADR-0365), and the Unix branches of
+//!    `fs::make_removable` · `make_entries_removable` (a folder's owner bits added through a no-follow handle, or on
+//!    Linux through an `O_PATH` handle and `/proc/self/fd` when it cannot be opened, `libc` — T-131; other OSes do
+//!    nothing, ADR-0409 decision 11).
 //!    ★`#[cfg]`-split branches get no compile verification here★ (development and CI are Windows only — ADR-0230). `cfg!(windows)`
 //!   branches (`env::env_key_eq`, the three `fs` failure classifications) are type-checked on
 //!    both sides but never run on another OS.
@@ -57,9 +68,13 @@
 //!
 //! - **0 workspace crate dependencies — not even base** (ADR-0266 「Rejected alternatives」 second, ADR-0268). Gate ① is that wall; the
 //!   compiler does not enforce the leaf property.
-//! - **Production third parties: `windows` (Windows targets only), the `tracing` facade, `raw-window-handle`** (TRD 1-3 §0 ①, TRD
-//!   S21-slot-docking 6.3 §8 · B10 · 7 §5-1); dev dependencies are outside this rule. `windows` turns on the
-//!   union of binding features and is not split per cargo feature (ADR-0275 decision 13). `tracing` only for rule 4 paths.
+//! - **Production third parties: `windows` · `junction` (both Windows targets only), `libc` (Unix targets only), the `tracing` facade,
+//!   `raw-window-handle`** (TRD 1-3 §0 ①, TRD S21-slot-docking 6.3 §8 · B10 · 7 §5-1 · ADR-0336 · ADR-0409); dev dependencies are
+//!   outside this rule. `windows` turns on the
+//!   union of binding features and is not split per cargo feature (ADR-0275 decision 13). `junction` only for `fs`'s junction
+//!   creation; it is an OS crate (inside gate ⑤'s list — its `windows-sys` is not a direct dependency, so the gate does not count
+//!   it). `libc` only for `fs`'s no-replace rename and no-follow read open; an OS crate (inside gate ⑤'s list).
+//!   `tracing` only for rule 4 paths.
 //!   `raw-window-handle` only as the argument trait (`HasWindowHandle`); a no-dependency leaf, not an OS
 //!   crate (outside gate ⑤'s list).
 //! - ★**No async runtime (`tokio` etc.)**★ — sync crates (agent, now) call this layer too, and a runtime here would silently spread to
@@ -126,7 +141,7 @@
 //!   already printed as another member's dependency folds into `(*)` at its root and shows none of its own (measured — down to this
 //!   crate's `windows`).
 //! - **dev dependencies are not counted** (tests, `examples/`; agent's `windows` dev = `examples/spike*.rs`).
-//! - **Pair** — this crate must have 1+ (`windows` now); a broken list regex or `cargo tree` output shape (including dropping
+//! - **Pair** — this crate must have 1+ (`windows` · `junction` · `libc` now); a broken list regex or `cargo tree` output shape (including dropping
 //!   `--no-dedupe`) would read as "0 violations".
 //! - ★**Limits**★ — only direct dependencies: a third party wrapping OS APIs (outside the list) or an unlisted OS crate (`-sys` siblings,
 //!   `windows-core`) taken in by another member is unseen; widen the list when such a crate appears.
@@ -207,6 +222,7 @@ pub mod file_holders;
 pub mod fs;
 pub mod group;
 pub mod input;
+pub mod os;
 pub mod process;
 pub mod pty;
 pub mod shell;

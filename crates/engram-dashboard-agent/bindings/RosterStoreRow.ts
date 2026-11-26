@@ -2,6 +2,6 @@
 import type { StoreStatusRow } from "./StoreStatusRow";
 
 /**
- * The two roster stores — `agents` (agents.json · agent roster) · `presets` (presets.json · path bookmarks).
+ * The roster store — `agents` (the profile file `agent-profiles.json` · agent roster).
  */
-export type RosterStoreRow = { agents: StoreStatusRow, presets: StoreStatusRow, };
+export type RosterStoreRow = { agents: StoreStatusRow, };

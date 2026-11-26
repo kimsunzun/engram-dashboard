@@ -7,7 +7,8 @@ description = "Engram Dashboard boundary contract — client↔daemon wire proto
 [dependencies]
 # ★No workspace crate goes here★ — ADR-0272 「impact」 invariant; the wall is the `ci.yml` step `protocol gate 1`.
 serde = { version = "1", features = ["derive"] }
-# discovery::DaemonInfo parse/serialize (daemon.json shared contract) · `raw_value` = raw text of command fields (ADR-0272 decision 3)
+# discovery::DaemonInfo (the shared daemon.json contract) · the free-JSON fields of the activation replies ·
+# `raw_value` = the command slots' raw text (ADR-0272 decision 3)
 serde_json = { version = "1", features = ["raw_value"] }
 serde_bytes = "0.11"   # OutputChunk::TerminalBytes — Vec<u8> as bytes, not number[] (for the JSON path)
 uuid = { version = "1", features = ["v4", "serde"] }

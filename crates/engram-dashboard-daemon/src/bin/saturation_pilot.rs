@@ -15,8 +15,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
-use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
@@ -183,7 +182,6 @@ async fn run_one(
         _relay_sweeper,
         data_dir,
         profile_dir,
-        preset_dir,
     } = match wire(&run_id).await {
         Ok(w) => w,
         Err(e) => {
@@ -237,7 +235,6 @@ async fn run_one(
                     data_dir: &data_dir,
                     workspace: &workspace,
                     profile_dir: &profile_dir,
-                    preset_dir: &preset_dir,
                 },
                 cfg,
             )
@@ -333,7 +330,6 @@ async fn run_one(
             data_dir: &data_dir,
             workspace: &workspace,
             profile_dir: &profile_dir,
-            preset_dir: &preset_dir,
         },
         cfg,
     )
@@ -659,9 +655,8 @@ struct Wiring {
     /// ★This struct must hold the reaper★ — as a local of `wire()`, the seat table closes the moment the function returns (`CommandDeliveries::drain`) and every later relay of this server is bounced as 「shutting down」. The roster is empty so no relays happen today; that is the trap for whoever runs relays through this pilot (the same shape was already stepped on in three fixtures).
     _relay_sweeper: engram_dashboard_daemon::command_delivery::BusSweeper,
     data_dir: PathBuf,
-    /// Per-run profile/preset temp dir — cleanup must delete it too so temp does not leak.
+    /// Per-run profile temp dir — cleanup must delete it too so temp does not leak.
     profile_dir: PathBuf,
-    preset_dir: PathBuf,
 }
 
 /// Mirrors the wire() order of control_send.rs.
@@ -701,18 +696,12 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         url,
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: the pilot calls handle_send directly, so the CLI path is not needed.
-        // ADR-0092: the pilot is unrelated to priming (injection is established by the priming_smoke bin) — Noop.
-        Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
     ));
 
     let sink: Arc<dyn StatusSink> = Arc::new(NoopStatus);
     let profile_dir = std::env::temp_dir().join(format!("engram-pilot-prof-{tag}"));
-    let preset_dir = std::env::temp_dir().join(format!("engram-pilot-preset-{tag}"));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         profile_dir.clone(),
-    ))));
-    let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
-        preset_dir.clone(),
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
@@ -722,7 +711,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         Arc::new(|_, _| {}),
     ));
     let manager = Arc::new(AgentManager::new_with_control(
-        sink, profiles, presets, tracker, control,
+        sink, profiles, tracker, control,
     ));
     slot.set(manager.clone());
     command_slot.set(Arc::new(
@@ -731,6 +720,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
             broadcast_slot.clone(),
             Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
             Arc::new(engram_dashboard_daemon::control::commands::NoUsageLimits),
+            Arc::new(engram_dashboard_daemon::control::commands::NoLibrary),
         ),
     ));
     let messaging = Arc::new(
@@ -749,7 +739,6 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         _relay_sweeper: relay_sweeper,
         data_dir,
         profile_dir,
-        preset_dir,
     })
 }
 
@@ -1506,7 +1495,6 @@ struct CleanupPaths<'a> {
     data_dir: &'a std::path::Path,
     workspace: &'a std::path::Path,
     profile_dir: &'a std::path::Path,
-    preset_dir: &'a std::path::Path,
 }
 
 async fn cleanup(
@@ -1530,7 +1518,6 @@ async fn cleanup(
     mcp_handle.shutdown().await;
     let _ = std::fs::remove_dir_all(paths.data_dir);
     let _ = std::fs::remove_dir_all(paths.profile_dir);
-    let _ = std::fs::remove_dir_all(paths.preset_dir);
     if cfg.keep_workspace {
         eprintln!("[pilot] workspace kept: {}", paths.workspace.display());
     } else {

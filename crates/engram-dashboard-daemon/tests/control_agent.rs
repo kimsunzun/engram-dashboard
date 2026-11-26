@@ -5,9 +5,12 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engram_dashboard_agent::launch::{
+    BlockReason, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan, LaunchPorts,
+    NoopLaunchKits, PrepareError, Reason,
+};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::MAX_ROSTER_SIZE;
-use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, ProfileStore, StoreError,
 };
@@ -21,7 +24,9 @@ use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandD
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::conn_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
-use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
+use engram_dashboard_daemon::control::commands::{
+    make_daemon_table, NoInputLeases, NoLibrary, NoUsageLimits,
+};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_without_help, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -134,17 +139,6 @@ impl ProfileStore for MemProfileStore {
     }
     fn load(&self) -> Vec<AgentProfile> {
         self.saved.lock().expect("poisoned").clone()
-    }
-}
-
-#[derive(Default)]
-struct MemPresetStore;
-impl PresetStore for MemPresetStore {
-    fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-        Ok(())
-    }
-    fn load(&self) -> Vec<Preset> {
-        vec![]
     }
 }
 
@@ -261,6 +255,7 @@ impl Fixture {
                     name: name.to_string(),
                     help: help.to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("registration of the attached connection");
@@ -316,6 +311,14 @@ async fn fixture(tag: &str) -> Fixture {
 
 /// `with_table = false` reproduces an assembly where the table is not yet plugged in (the 503 contract); otherwise the table is plugged in as in production.
 async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
+    fixture_assembled(tag, with_table, None).await
+}
+
+/// Builds the launch-kit source of a fixture from its profile registry (a race needs to change it mid-check).
+type KitsOf = Box<dyn FnOnce(Arc<ProfileRegistry>) -> Arc<dyn LaunchKitSource>>;
+
+/// `kits` = the manager's launch-kit source (`None` = the Noop default, today's launch).
+async fn fixture_assembled(tag: &str, with_table: bool, kits: Option<KitsOf>) -> Fixture {
     let registry = Arc::new(ControlRegistry::new());
     let manager_slot = Arc::new(ManagerSlot::new());
     let broadcast = Arc::new(CountingBroadcast::default());
@@ -345,10 +348,10 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
 
     let control: Arc<dyn ControlChannel> = Arc::new(NoopControlChannel);
-    let manager = Arc::new(AgentManager::new_with_control(
+    let profiles = Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default())));
+    let mut manager = AgentManager::new_with_control(
         Arc::new(NoopSink),
-        Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
-        Arc::new(PresetRegistry::new(Arc::new(MemPresetStore))),
+        profiles.clone(),
         Arc::new(SessionTracker::new(
             TrackerConfig {
                 enabled: false,
@@ -357,7 +360,14 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
             Arc::new(|_, _| {}),
         )),
         control,
-    ));
+    );
+    if let Some(kits) = kits {
+        manager = manager.with_launch_ports(LaunchPorts {
+            kits: kits(profiles),
+            ..LaunchPorts::noop()
+        });
+    }
+    let manager = Arc::new(manager);
     manager_slot.set(manager.clone());
     if with_table {
         // This table is what the route actually runs (ADR-0155) — uses the same assembly function as the production assembly (`lib.rs`).
@@ -366,6 +376,7 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
             broadcast_slot.clone(),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         )));
     }
 
@@ -588,21 +599,27 @@ async fn the_state_a_mutation_reports_is_the_state_the_roster_reports() {
     f.shutdown_agents();
 }
 
-/// For create+launch, strictly checks only what is deterministic regardless of machine: 1 registration · notifications (registration + activation outcome) · appearing in the roster · a response within the status vocabulary. Startup success depends on claude existing (it creates a claude agent), so it is not asserted — a startup regression is seen by the shell-backend test above.
+/// Create-and-start, checking strictly only what does not depend on the machine: one registration · one roster
+/// announcement, after the activation (one `roster_changed` = one profile-list + agent-list frame pair) · the row in
+/// the roster · an answer whose state is a word of the vocabulary. Whether the start succeeds depends on claude being
+/// installed (this creates a claude agent), so it is not asserted here — the shell-backend tests above pin the start.
+// ADR-0348
 #[tokio::test]
-async fn spawn_with_cwd_registers_once_and_announces_both_steps() {
+async fn spawn_with_cwd_registers_once_and_announces_once_after_the_start() {
     let f = fixture("spawn-create").await;
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     let (status, body) = f
         .post(serde_json::json!({ "verb": "spawn", "cwd": cwd, "name": "newborn" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    // Once right after registration + once right after the activation outcome (ADR-0172), regardless of startup success — the failure branch especially needs it (then only the "last failure" this notification carried remains on screen).
+    // Once, after the activation, whether the start succeeded or not — the failure branch needs it most (the
+    //   last failure this frame carries is all the screen shows then). No frame before the activation (TRD S25 step
+    //   20 M3).
     // ADR-0172
     assert_eq!(
         f.broadcast.count(),
-        2,
-        "registration notification + activation outcome notification (independent of startup success): {body}"
+        1,
+        "one announcement after the activation, whatever the start did: {body}"
     );
 
     match body["status"].as_str() {
@@ -1249,6 +1266,7 @@ async fn the_catalog_routes_refuse_calls_without_a_valid_token() {
 /// The list merges two sources — the daemon's own table and names put on by an attached client; if either is missing, an LLM asking learns something present is absent.
 ///
 /// `help` must be byte for byte — also checks the daemon does not open a non-JSON value that was put on.
+/// The shell-only `library.emptyTrash` is the one declared name it leaves out, and no row's `help` names it (ADR-0419).
 #[tokio::test]
 async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     let f = fixture("catalog-list").await;
@@ -1265,20 +1283,68 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     assert_eq!(
         names,
         vec![
+            "agent.attachPreset",
             "agent.cancelQueuedInput",
+            "agent.detachPreset",
+            "agent.duplicate",
             "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
             "agent.move",
             "agent.new",
+            "agent.presets",
             "agent.rename",
+            "agent.reorderPresets",
             "agent.resolve",
+            "agent.setWorkspace",
             "agent.spawn",
+            "library.addMount",
+            "library.copy",
+            "library.delete",
+            "library.folders",
+            "library.list",
+            "library.listTrash",
+            "library.move",
+            "library.newFile",
+            "library.newFolder",
+            "library.read",
+            "library.refresh",
+            "library.relink",
+            "library.relocateMount",
+            "library.removeMount",
+            "library.rename",
+            "library.renameMount",
+            "library.restore",
+            "library.status",
+            "preset.add",
+            "preset.check",
+            "preset.get",
+            "preset.previewFolder",
+            "preset.remove",
+            "preset.reorder",
+            "preset.save",
+            "preset.setBackend",
             "tab.create",
             "usage.get",
             "usage.refresh"
         ],
         "the two sources merge into one list in name order: {body}"
+    );
+    // ADR-0419: the text guard — no command help an agent can read names the shell-only command.
+    for row in &rows {
+        assert!(
+            !row["help"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("emptyTrash"),
+            "{} names the shell-only command in its help: {}",
+            row["name"],
+            row["help"]
+        );
+    }
+    assert!(
+        !names.contains(&"library.emptyTrash"),
+        "the control list omits the shell-only command: {body}"
     );
     let client_row = rows
         .iter()
@@ -1301,6 +1367,37 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     );
     // Discovery is read-only — a screen refresh on pulling the list would make one poll keep shaking the tree.
     assert_eq!(f.broadcast.count(), 0, "discovery changes nothing");
+}
+
+/// The shell-only gate on both control routes (ADR-0419): `/control/call` answers `library.emptyTrash` `UNSUPPORTED`
+/// `shell-only` with the screen sentence and no catalog hint (the catalog does not list it), and `/control/agent`
+/// cannot even name it — it builds only `agent.<verb>` names.
+#[tokio::test]
+async fn both_control_routes_refuse_the_shell_only_command() {
+    let f = fixture("catalog-shell-only").await;
+    let (status, answer) = f
+        .call(serde_json::json!({ "name": "library.emptyTrash", "args": { "rows": [] } }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(answer["code"], "UNSUPPORTED", "{answer}");
+    assert_eq!(answer["args"]["code"], "shell-only", "{answer}");
+    let hint = answer["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains(
+            "emptying the trash and deleting for good are done by the user in the library screen"
+        ),
+        "{hint}"
+    );
+    assert!(
+        !hint.contains("/control/commands") && !hint.contains("catalog"),
+        "no catalog hint for a name the catalog does not list: {hint}"
+    );
+
+    let (status, answer) = f
+        .post(serde_json::json!({ "verb": "library.emptyTrash", "rows": [] }))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "{answer}");
+    assert_eq!(answer["code"], "UNKNOWN_COMMAND", "{answer}");
 }
 
 /// The list's reachability field cannot diverge from what the call route does — call every listed name as is and compare; a "callable" field with an unreachable answer (`UNSUPPORTED`) turns this red.
@@ -2010,5 +2107,104 @@ mod resolver_alignment {
         );
         assert_eq!(control_resolution(&fixture, "twin"), Resolution::Ambiguous);
         assert_eq!(control_resolution(&fixture, "nobody"), Resolution::NotFound);
+    }
+}
+
+// ── Launch refusals on this route (TRD S25 step 16) ──
+
+/// Blocks every launch with the reasons it holds.
+struct BlockingKits(LaunchBlocked);
+
+impl LaunchKitSource for BlockingKits {
+    fn check(&self, _profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        Err(self.0.clone())
+    }
+    fn prepare(
+        &self,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        NoopLaunchKits.prepare(plan, id, epoch)
+    }
+    fn release(&self, _id: AgentId, _epoch: u32) {}
+}
+
+/// Changes the agent's env in the roster during every check, so the launch inputs never settle — a race.
+struct RacingKits(Arc<ProfileRegistry>);
+
+impl LaunchKitSource for RacingKits {
+    fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        let mut changed = profile.clone();
+        changed
+            .env
+            .push(("ENGRAM_RACE".into(), uuid::Uuid::new_v4().to_string()));
+        self.0.try_upsert(changed).expect("roster write");
+        NoopLaunchKits.check(profile)
+    }
+    fn prepare(
+        &self,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        NoopLaunchKits.prepare(plan, id, epoch)
+    }
+    fn release(&self, _id: AgentId, _epoch: u32) {}
+}
+
+/// A launch refused before any process is a `CONFLICT` whose message already says the next step (fix the listed
+/// items / try again), so this route adds no roster tail — "see the roster" would send the caller looking for a
+/// wrong target. A block carries its reasons in `args`; nothing starts either way.
+#[tokio::test]
+async fn a_refused_launch_is_a_conflict_without_a_roster_tail() {
+    let blocked = LaunchBlocked {
+        reasons: vec![BlockReason::Missing {
+            item: "rules/a.md".into(),
+            via: vec!["team.yaml".into()],
+            reason: Reason {
+                code: "not-found".into(),
+                args: serde_json::json!({ "path": "rules/a.md" }),
+                line: Some(3),
+            },
+        }],
+    };
+    let blocking = blocked.clone();
+    let cases: [(&str, KitsOf, Option<serde_json::Value>, &str); 2] = [
+        (
+            "launch-blocked",
+            Box::new(move |_| Arc::new(BlockingKits(blocking)) as Arc<dyn LaunchKitSource>),
+            Some(serde_json::Value::Object(blocked.to_args())),
+            "fix the listed items, then start it again.",
+        ),
+        (
+            "launch-raced",
+            Box::new(|profiles| Arc::new(RacingKits(profiles)) as Arc<dyn LaunchKitSource>),
+            None,
+            "try again.",
+        ),
+    ];
+    for (tag, kits, args, ending) in cases {
+        let f = fixture_assembled(tag, true, Some(kits)).await;
+        seed_shell_agent(&f.manager, "worker");
+
+        let (status, body) = f
+            .post(serde_json::json!({ "verb": "spawn", "target": "worker" }))
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+        assert_eq!(body["status"], "error", "{body}");
+        assert_eq!(body["code"], "CONFLICT", "{body}");
+        assert_eq!(body.get("args").cloned(), args, "{body}");
+        let hint = body["hint"].as_str().unwrap_or_default();
+        assert!(
+            hint.starts_with("launch refused for agent 'worker'") && hint.ends_with(ending),
+            "{body}"
+        );
+        assert!(!hint.contains("agent list"), "no roster tail: {body}");
+        assert!(
+            f.manager.list_agents().is_empty(),
+            "nothing started: {body}"
+        );
+        f.shutdown_agents();
     }
 }

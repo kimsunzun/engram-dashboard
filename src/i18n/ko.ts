@@ -26,7 +26,6 @@ export const ko = {
     close: '닫기',
     resolveSpatial: '공간 타깃 해소',
     fillAgentList: '에이전트 트리 열기',
-    fillPresetPalette: '프리셋 팔레트 열기',
     fillUsage: '사용량 한도 열기',
     newContent: '새 콘텐츠', // ADR-0065 "New content ▶" submenu container label.
     renderModeSet: '렌더 모드 지정',
@@ -84,7 +83,7 @@ export const ko = {
     treeLabel: '에이전트 트리',
     emptyList: '에이전트 없음 — 우클릭으로 생성',
     rowActivate: '활성화(spawn)', // reserved row.
-    rowCancelReserved: '삭제', // reserved row — same vocabulary as preset.deleteBtn.
+    rowCancelReserved: '삭제', // reserved row.
     rowOpen: '열기', // running row.
     rowKill: '종료', // running row.
     rowRename: '이름 변경', // running/reserved row (ADR-0061 enrichment).
@@ -117,16 +116,6 @@ export const ko = {
     rename: '에이전트 이름 변경', // §5 LLM control — RenameProfile.
     cancelQueuedInput: '대기 입력을 목록에서 빼기', // ADR-0231 — the same command as the list ✕.
     interrupt: '응답 중단',
-  },
-  preset: {
-    create: '프리셋 생성',
-    list: '프리셋 목록 조회',
-    delete: '프리셋 삭제', // Reuses the value of the PresetPalette row delete aria-label.
-    add: '추가',
-    rename: '이름 변경', // Reuses the value of the PresetPalette row right-click menu.
-    label: '프리셋',
-    empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
-    deleteBtn: '삭제',
   },
   /**
    * Usage limit slot (TRD S21 usage-limit-slot §1-8). The daemon and wire carry only status codes and numbers; the text is made here (PRD R28·R31).
@@ -283,7 +272,6 @@ export const ko = {
   /** Native OS dialog titles — user-visible text outside the webview. */
   dialog: {
     pickAgentCwd: '에이전트 작업 디렉토리 선택',
-    pickPresetPath: '프리셋 경로 선택',
   },
   common: {
     emptySlot: '- 비어있음 -',

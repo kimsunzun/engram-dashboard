@@ -1,7 +1,7 @@
 //! ScrollArea — the app-wide overlay scroll area seam (ADR-0053).
 //!
 //! ★Role★: a **swap point** thinly wrapping the Radix ScrollArea (@radix-ui/react-scroll-area) primitive. Every frontend
-//!   scroll surface (chat, tree, presets, popup lists, DOM observer, etc.) goes through this seam instead of raw `overflow:auto` —
+//!   scroll surface (chat, tree, popup lists, DOM observer, etc.) goes through this seam instead of raw `overflow:auto` —
 //!   changing scrollbar look/behavior in one place (this component + the theme.css --scrollbar-* tokens) propagates to all
 //!   screens (single source). Components and stores depend only on this seam and do not handle Radix Root/Viewport
 //!   directly (§5 hands/brain separation — even if the scrollbar implementation is swapped wholesale later the consumer code is unchanged). Directly

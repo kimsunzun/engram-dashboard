@@ -48,7 +48,6 @@ const agentStoreState = vi.hoisted(() => ({
   agentsLoaded: false,
   profiles: [] as unknown[],
   profilesLoaded: false,
-  presets: [] as unknown[],
 }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: Object.assign(
@@ -57,9 +56,8 @@ vi.mock('../../store/agentStore', () => ({
   ),
 }))
 
-// Heavy siblings unrelated to the slot branch (tree · palette) are not stood up — this test's node is a single agent slot.
+// Heavy siblings unrelated to the slot branch (the tree) are not stood up — this test's node is a single agent slot.
 vi.mock('../agent/AgentList', () => ({ default: () => <div /> }))
-vi.mock('./PresetPalette', () => ({ default: () => <div /> }))
 
 import ViewLayoutRenderer from '../layout/ViewLayoutRenderer'
 import { useViewStore } from '../../store/viewStore'

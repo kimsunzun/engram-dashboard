@@ -1,23 +1,42 @@
 //! The table of commands the daemon can execute directly — the only place real dependencies come in (rule T-1).
 //!
-//! Three surfaces call this table through the one [`call_daemon_command`], so none skips the entrance check (ADR-0157): the family route
+//! Three surfaces call this table through the one [`call_daemon_command`], so none skips its checks: the family route
 //! (`/control/agent`, `agent.rs`) · the full-name route (`/control/call`, `catalog.rs`) · command bus delivery stage 1 (`command_delivery`).
+//! The entrance makes three checks — the arguments (ADR-0157), the input lease of [`INPUT_AFFECTING`] commands (ADR-0231), and the
+//! shell-only gate: a [`SHELL_ONLY`] command is refused to the two routes, which carry no connection (ADR-0419).
 //! If the table is not plugged into the slot, the two routes are 503 and delivery is a stage-1 miss.
-//! Declarations are not here: the contracts of `agent.*`·`usage.*` belong to agent (ADR-0155 decision 1); this file plugs the daemon's real
-//! things (manager · roster notification fanout · usage service) into them. Daemon-own commands (`mail.*`) would add their declaration block here.
+//! Declarations are not here: the contracts of `agent.*`·`usage.*`·`library.*`·`preset.*` belong to agent (ADR-0155 decision 1); this file plugs the
+//! daemon's real things (manager · roster notification fanout · usage service · library service) into them. Daemon-own commands (`mail.*`)
+//! would add their declaration block here.
 // ADR-0155
 
 use std::sync::Arc;
 
 use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
-    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, RosterChanged,
-    UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
+    make_table, resolve_in, AgentBackend, AgentCommandHost, AgentOutputFormat, AgentRosterRow,
+    LibraryAddMountOk, LibraryCommandHost, LibraryCopyOk, LibraryEmptyTrashOk, LibraryFoldersOk,
+    LibraryKind, LibraryListOk, LibraryListTrashOk, LibraryNewFileKind, LibraryOnConflict,
+    LibraryRefreshOk, LibraryRelinkOk, LibraryRemoveMountOk, LibraryRenameMountOk,
+    LibraryRestoreOk, LibraryStatusOk, ListedBundleArg, PresetAddOk, PresetCheckOk,
+    PresetPreviewFolderOk, PresetSection, PresetSetBackendOk, PresetView, RefreshErrorRow,
+    RosterChanged, TrashAddressRow, UsageCommandHost, UsageVendorRow, INPUT_AFFECTING, SHELL_ONLY,
+};
+use engram_dashboard_agent::launch::{escape_controls, Reason};
+use engram_dashboard_agent::library_commands::{
+    AgentAttachPortAnswer, AgentPresetsPortView, DeletePortAnswer, LibraryReadView, MovePortAnswer,
+    NewAgentPresets, PortClass, PortRefusal, PresetDraftInput, PresetEntries,
 };
 use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::profile::AgentProfile;
 use engram_dashboard_agent::types::AgentId;
+use engram_dashboard_asset_library::format::read::ITEM_PATH_INVALID;
+use engram_dashboard_asset_library::host::judge_new_presets_with_no_library;
+use engram_dashboard_asset_library::path::LibPath;
+use engram_dashboard_asset_library::LIBRARY_UNAVAILABLE;
 use engram_dashboard_command::{
-    CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, Effect, ErrorCode,
+    CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, DeadlineClass, Effect,
+    ErrorCode,
 };
 use futures_util::FutureExt as _;
 
@@ -38,19 +57,24 @@ use super::mcp_server::{CommandTableSlot, RosterBroadcastSlot};
 /// A new `MultiViewState::new()` is wrong — an empty table makes bus and CLI input-affecting commands silently ignore the lease.
 /// `usage` must be the service the connection layer subscribes and ⟳s on (production: `DaemonWiring.usage`), or the bus and the screen read
 /// different books. Non-production assemblies plug in [`NoUsageLimits`].
+/// `library` must be the service `manager` launches through (production: `DaemonWiring.library`), or the bus edits one
+/// library and launches read another. Assemblies without one plug in [`NoLibrary`].
 // ADR-0155
 // ADR-0231
+// ADR-0386
 pub fn make_daemon_table(
     manager: Arc<AgentManager>,
     broadcast: Arc<RosterBroadcastSlot>,
     lease: Arc<dyn InputLease>,
     usage: Arc<dyn UsageCommandHost>,
+    library: Arc<dyn LibraryCommandHost>,
 ) -> DaemonTable {
     DaemonTable {
         table: make_table(
             manager.clone(),
             Arc::new(LateRosterBroadcast(broadcast)),
             usage,
+            library,
         ),
         roster: manager,
         lease,
@@ -60,7 +84,7 @@ pub fn make_daemon_table(
 /// The daemon command table — the `agent.*` table plus the material for checking input-affecting commands ([`INPUT_AFFECTING`]) (roster · lease port) as one value.
 ///
 /// One value, since separate plugging would allow a table with an empty lease port, skipping the lease without a signal; all three enter the slot together.
-/// No door takes out the inner [`CommandTable`]: a second entrance skipping [`call_daemon_command`] would drop both checks (ADR-0157 arguments · ADR-0231 lease).
+/// No door takes out the inner [`CommandTable`]: a second entrance skipping [`call_daemon_command`] would drop all three checks (ADR-0157 arguments · ADR-0231 lease · ADR-0419 shell-only gate).
 // ADR-0231
 pub struct DaemonTable {
     table: CommandTable,
@@ -113,6 +137,298 @@ impl UsageCommandHost for NoUsageLimits {
     }
 }
 
+/// The library port of assemblies without a library service (the test server · smoke bins · harnesses): every
+/// `library.*`, `preset.*` and agent-preset command answers `CONFLICT` `library-unavailable`, except
+/// `library.refresh`, which answers the report a refresh that could not scan gives (one `errors` row with no path) — a
+/// refresh refuses only a `folder` that is not a library path (`INVALID_ARGUMENT` `item-path-invalid`, as the real
+/// service does) — and the `agent.new {presets}` judgement, which applies the attach rule with no catalog (a library
+/// preset refuses the whole call `library-unavailable`; a given `root_generation` is not compared — there is no root).
+/// Do not plug it into production (it plugs the service the manager launches through — [`make_daemon_table`]).
+// ADR-0386
+pub struct NoLibrary;
+
+/// Why [`NoLibrary`] answers nothing.
+const NO_LIBRARY: &str = "this daemon runs no library service";
+
+impl NoLibrary {
+    fn refused<T>() -> Result<T, PortRefusal> {
+        Err(PortRefusal::Refused {
+            class: PortClass::Unavailable,
+            reason: Reason {
+                code: LIBRARY_UNAVAILABLE.to_owned(),
+                args: serde_json::json!({ "message": NO_LIBRARY }),
+                line: None,
+            },
+        })
+    }
+}
+
+impl LibraryCommandHost for NoLibrary {
+    fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
+        Self::refused()
+    }
+    fn add_mount(
+        &self,
+        _name: &str,
+        _path: &str,
+        _create: bool,
+    ) -> Result<LibraryAddMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn remove_mount(&self, _mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+        Self::refused()
+    }
+    fn relocate_mount(
+        &self,
+        _mount: &str,
+        _path: &str,
+        _create: bool,
+    ) -> Result<LibraryStatusOk, PortRefusal> {
+        Self::refused()
+    }
+    fn rename_mount(
+        &self,
+        _mount: &str,
+        _to: &str,
+        _yes: bool,
+        _root_generation: Option<u64>,
+        _plan_digest: Option<&str>,
+    ) -> Result<LibraryRenameMountOk, PortRefusal> {
+        Self::refused()
+    }
+    // ADR-0400 decision 18: no library, nothing to re-check.
+    fn change_number(&self) -> Option<u64> {
+        None
+    }
+    fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
+        Self::refused()
+    }
+    fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal> {
+        if let Some(text) = folder {
+            if let Err(why) = LibPath::parse(text) {
+                return Err(PortRefusal::Refused {
+                    class: PortClass::InvalidArgument,
+                    reason: Reason {
+                        code: ITEM_PATH_INVALID.to_owned(),
+                        args: serde_json::json!({ "path": escape_controls(text), "why": why.to_string() }),
+                        line: None,
+                    },
+                });
+            }
+        }
+        Ok(LibraryRefreshOk {
+            changed: 0,
+            problems: Vec::new(),
+            no_kind: Vec::new(),
+            skipped_links: Vec::new(),
+            errors: vec![RefreshErrorRow {
+                path: None,
+                why: NO_LIBRARY.to_owned(),
+            }],
+        })
+    }
+    fn list(
+        &self,
+        _folder: Option<&str>,
+        _query: Option<&str>,
+        _kinds: &[LibraryKind],
+    ) -> Result<LibraryListOk, PortRefusal> {
+        Self::refused()
+    }
+    fn read(&self, _path: &str) -> Result<LibraryReadView, PortRefusal> {
+        Self::refused()
+    }
+    fn new_folder(
+        &self,
+        _parent: Option<&str>,
+        _name: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<String, PortRefusal> {
+        Self::refused()
+    }
+    fn new_file(
+        &self,
+        _folder: Option<&str>,
+        _name: &str,
+        _kind: LibraryNewFileKind,
+        _root_generation: Option<u64>,
+    ) -> Result<String, PortRefusal> {
+        Self::refused()
+    }
+    fn relink(
+        &self,
+        _from: &str,
+        _to: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<LibraryRelinkOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_get(&self, _path: &str) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_check(
+        &self,
+        _path: &str,
+        _draft: &PresetDraftInput,
+    ) -> Result<PresetCheckOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_add(
+        &self,
+        _path: &str,
+        _entries: &PresetEntries,
+        _backend: Option<&str>,
+        _after: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetAddOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_remove(
+        &self,
+        _path: &str,
+        _entries: &PresetEntries,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_reorder(
+        &self,
+        _path: &str,
+        _section: PresetSection,
+        _order: &[String],
+        _base_rev: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_set_backend(
+        &self,
+        _path: &str,
+        _items: &[String],
+        _backend: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetSetBackendOk, PortRefusal> {
+        Self::refused()
+    }
+    fn preset_save(
+        &self,
+        _path: &str,
+        _draft: &PresetDraftInput,
+        _base_rev: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<PresetView, PortRefusal> {
+        Self::refused()
+    }
+    fn preview_folder(
+        &self,
+        _folder: &str,
+        _backend: Option<&str>,
+        _mode: Option<AgentOutputFormat>,
+    ) -> Result<PresetPreviewFolderOk, PortRefusal> {
+        Self::refused()
+    }
+    fn agent_presets(&self, _agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn attach_preset(
+        &self,
+        _agent: AgentId,
+        _presets: &[String],
+        _after: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn detach_preset(
+        &self,
+        _agent: AgentId,
+        _presets: &[String],
+        _yes: bool,
+        _root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    fn reorder_presets(
+        &self,
+        _agent: AgentId,
+        _order: &[String],
+        _base_rev: &str,
+        _root_generation: Option<u64>,
+    ) -> Result<AgentPresetsPortView, PortRefusal> {
+        Self::refused()
+    }
+    // ADR-0386
+    fn judge_new_presets(
+        &self,
+        profile: &AgentProfile,
+        presets: &[String],
+        _root_generation: Option<u64>,
+    ) -> Result<NewAgentPresets, PortRefusal> {
+        judge_new_presets_with_no_library(profile, presets, NO_LIBRARY)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn move_items(
+        &self,
+        _paths: &[String],
+        _to_folder: &str,
+        _on_conflict: Option<LibraryOnConflict>,
+        _yes: bool,
+        _detach_refs: bool,
+        _plan_digest: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn rename(
+        &self,
+        _path: &str,
+        _name: &str,
+        _yes: bool,
+        _detach_refs: bool,
+        _plan_digest: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<MovePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn copy_items(
+        &self,
+        _paths: &[String],
+        _to_folder: &str,
+        _on_conflict: Option<LibraryOnConflict>,
+        _root_generation: Option<u64>,
+    ) -> Result<LibraryCopyOk, PortRefusal> {
+        Self::refused()
+    }
+    fn delete(
+        &self,
+        _paths: &[String],
+        _yes: bool,
+        _detach_refs: bool,
+        _plan_digest: Option<&str>,
+        _root_generation: Option<u64>,
+    ) -> Result<DeletePortAnswer, PortRefusal> {
+        Self::refused()
+    }
+    fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+        Self::refused()
+    }
+    fn restore(
+        &self,
+        _rows: &[TrashAddressRow],
+        _keep_both: bool,
+        _root_generation: Option<u64>,
+    ) -> Result<LibraryRestoreOk, PortRefusal> {
+        Self::refused()
+    }
+    fn empty_trash(
+        &self,
+        _bundles: &[ListedBundleArg],
+        _rows: &[TrashAddressRow],
+    ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
+        Self::refused()
+    }
+}
+
 /// The only place that calls this table — the three surfaces come in here.
 ///
 /// `None` = not a name of this table; the caller decides: the family route says "unknown verb", the full-name route asks the roster to tell "unknown
@@ -133,10 +449,13 @@ impl UsageCommandHost for NoUsageLimits {
 /// `entrance` is a log label: a contract violation below (an async handler) shows as one error reply, so the log must say which surface.
 /// The input lease check is this one too (ADR-0231): [`INPUT_AFFECTING`] commands go through `admit_input` after the argument check; placing it
 /// elsewhere (`DaemonLocalCommands::run`) would skip `/control/agent`. `caller` = the calling connection (bus `Some(origin)`, CLI routes `None`).
+/// So is the shell-only gate (ADR-0419): a [`SHELL_ONLY`] name with no calling connection is refused before the argument check and the
+/// host is never called ([`shell_only_refusal`]).
 // ADR-0155
 // ADR-0157
 // ADR-0231
 // ADR-0293
+// ADR-0419
 pub fn call_daemon_command(
     table: &DaemonTable,
     name: &str,
@@ -147,6 +466,14 @@ pub fn call_daemon_command(
     // Names not in the table are split off before the check: `check_args` lets unknown names through, so reversing the order would pass someone else's name as "no argument problem" all the way down.
     if !table.table.contains(name) {
         return None;
+    }
+    // ADR-0419: `caller == None` is what marks a non-shell caller. `/control/call` (`catalog::handle_call`) and `/control/agent` pass
+    //   `None`; socket stage 1 passes the sending connection, and only the shell connects there with the daemon token. `CommandBus::invoke`
+    //   makes a synthetic `ConnId` for a connectionless caller but refuses the daemon's own names before stage 1. A new door that passes a
+    //   connection number for a non-shell caller (a seat for these commands on the control route — tracking T-133) opens this gate: keep it
+    //   shut there on purpose. Each door has a test.
+    if caller.is_none() && SHELL_ONLY.contains(&name) {
+        return Some(Err(shell_only_refusal(name)));
     }
     if let Err(rejection) = table.table.check_args(name, args) {
         return Some(Err(rejection));
@@ -197,6 +524,30 @@ fn admit_input(
     Ok(())
 }
 
+/// The code a [`SHELL_ONLY`] command answers off the socket (`args` = `{}`).
+// ADR-0419
+const SHELL_ONLY_CODE: &str = "shell-only";
+
+/// The refusal of a [`SHELL_ONLY`] command from a caller with no connection — `UNSUPPORTED` (retry never), `args` = `{code, args}` as a
+/// library refusal spells it (ADR-0379), `code` [`SHELL_ONLY_CODE`].
+/// Its words are about the trash: `library.emptyTrash` is the one shell-only name, so a second one needs its own. Nothing is kept for a
+/// retry: the refusal happens only where there is no seat. `catalog::refused` adds the catalog hint only to `INVALID_ARGUMENT` and
+/// `UNKNOWN_COMMAND`, so none follows these words — the catalog does not list the name.
+// ADR-0419
+fn shell_only_refusal(name: &str) -> CommandError {
+    let args = serde_json::Map::from_iter([
+        ("code".to_owned(), serde_json::json!(SHELL_ONLY_CODE)),
+        ("args".to_owned(), serde_json::json!({})),
+    ]);
+    CommandError::of(
+        ErrorCode::Unsupported,
+        format!(
+            "{name}: emptying the trash and deleting for good are done by the user in the library screen — an agent or the CLI cannot run this command"
+        ),
+    )
+    .with_args(args)
+}
+
 /// The lease refusal tail of connectionless entrances (the two CLI routes): WS's "acquire first" needs a connection, so this says who holds it and what to wait for.
 // ADR-0231
 const CONNECTIONLESS_LEASE_TAIL: &str =
@@ -245,12 +596,12 @@ impl LocalCommands for DaemonLocalCommands {
     /// The `effect` passed on is correctness material, not an advertising field: delivery decides from it whether to hold the number against re-execution
     /// (`retains_the_id` in `command_delivery`), so a verb declared `Read` whose body changes state silently loses double-application protection. This
     /// cannot be caught here; whoever adds a verb must write `#[effect(...)]` as a contract.
-    fn claim(&self, name: &str) -> Option<Effect> {
+    fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
         self.0
             .get()?
             .specs()
             .find(|spec| spec.name == name)
-            .map(|spec| spec.effect)
+            .map(|spec| (spec.effect, spec.deadline))
     }
 
     /// The entrance label and caller are received and passed on, not made up: two entrances call this adapter — socket dispatch (`bus`, the calling
@@ -299,7 +650,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
     use engram_dashboard_agent::profile::{
         AgentProfile, ProfileRegistry, ProfileStore, StoreError,
     };
@@ -329,16 +679,6 @@ mod tests {
         }
     }
 
-    struct NoPresets;
-    impl PresetStore for NoPresets {
-        fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-            Ok(())
-        }
-        fn load(&self) -> Vec<Preset> {
-            Vec::new()
-        }
-    }
-
     struct NoopSink;
     impl StatusSink for NoopSink {
         fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
@@ -365,7 +705,6 @@ mod tests {
         Arc::new(AgentManager::new(
             Arc::new(NoopSink),
             Arc::new(ProfileRegistry::new(Arc::new(MemProfileStore::default()))),
-            Arc::new(PresetRegistry::new(Arc::new(NoPresets))),
             Arc::new(SessionTracker::new(
                 TrackerConfig {
                     enabled: false,
@@ -397,15 +736,51 @@ mod tests {
     /// The expected value is derived from the CLI verb list — hand-written, it would pass the old list when agent gains verbs; a verb without a declaration stays uncallable by the CLI.
     /// Names without a CLI verb are only those listed below: the two pending-list verbs, interrupt (`agent.interrupt` — ADR-0237) and
     /// multi-word resolution (`agent.resolve` — ADR-0307) are outside `CLI_AGENT_VERBS`, called via the bus and generic calls (`engram <name> …`). A
-    /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*` is not the `agent` family and never reaches `/control/agent`.
+    /// table name not in the list grew without deciding on a CLI verb, so this stops. `usage.*`, `library.*` and `preset.*` are not the `agent`
+    /// family and never reach `/control/agent`; they, the four agent-preset commands, `agent.setWorkspace` and
+    /// `agent.duplicate` are reached by full name (ADR-0386) — except the shell-only `library.emptyTrash`, which only the
+    /// socket runs (ADR-0419).
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 6] = [
+        const BUS_ONLY: [&str; 39] = [
+            "agent.attachPreset",
             "agent.cancelQueuedInput",
+            "agent.detachPreset",
+            "agent.duplicate",
             "agent.interrupt",
             "agent.listQueuedInputs",
+            "agent.presets",
+            "agent.reorderPresets",
             "agent.resolve",
+            "agent.setWorkspace",
+            "library.addMount",
+            "library.copy",
+            "library.delete",
+            "library.emptyTrash",
+            "library.folders",
+            "library.list",
+            "library.listTrash",
+            "library.move",
+            "library.newFile",
+            "library.newFolder",
+            "library.read",
+            "library.refresh",
+            "library.relink",
+            "library.relocateMount",
+            "library.removeMount",
+            "library.rename",
+            "library.renameMount",
+            "library.restore",
+            "library.status",
+            "preset.add",
+            "preset.check",
+            "preset.get",
+            "preset.previewFolder",
+            "preset.remove",
+            "preset.reorder",
+            "preset.save",
+            "preset.setBackend",
             "usage.get",
             "usage.refresh",
         ];
@@ -414,6 +789,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         let mut held: Vec<&str> = table.specs().map(|spec| spec.name).collect();
@@ -430,6 +806,50 @@ mod tests {
         );
     }
 
+    /// `agent.setWorkspace` and `agent.duplicate` run on the real manager through the daemon table: the folder changes
+    /// and the name stays; the copy takes the next name of the family and sits asleep beside the original.
+    // ADR-0386
+    #[test]
+    fn the_daemon_table_changes_a_working_folder_and_duplicates_an_agent() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude" }),
+        )
+        .expect("registration succeeded");
+        // The spelling the manager stores (`normalize_spelling`: `\` → `/`).
+        let folder = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+
+        let set = call(
+            &table,
+            "agent.setWorkspace",
+            json!({ "target": "probe", "cwd": folder }),
+        )
+        .expect("an asleep agent that never conversed");
+        assert_eq!(set["name"], "probe");
+        assert_eq!(set["cwd"], json!(folder));
+
+        let copy = call(&table, "agent.duplicate", json!({ "target": "probe" })).expect("copied");
+        assert_eq!(copy["name"], "probe(1)");
+        assert_eq!(copy["state"], "sleeping");
+
+        let listed = call(&table, "agent.list", json!({})).expect("query succeeded");
+        let cwds: Vec<&serde_json::Value> = listed["agents"]
+            .as_array()
+            .expect("rows")
+            .iter()
+            .map(|row| &row["cwd"])
+            .collect();
+        assert_eq!(cwds, vec![&json!(folder), &json!(folder)], "{listed}");
+    }
+
     /// Assemblies with no client to attach exist (smoke bins · harnesses) — a roster-changing verb panicking there would stop the daemon from starting.
     #[test]
     fn a_missing_broadcast_slot_does_not_panic_the_table() {
@@ -438,6 +858,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         register_one(&table);
@@ -459,6 +880,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         )));
         slot
     }
@@ -577,6 +999,7 @@ mod tests {
             args_type: "FixturePendingArgs",
             ok_type: "FixturePendingOk",
             agent_args: &[],
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         };
 
     static PENDING_DECLARED: &[&engram_dashboard_command::CommandSpec] = &[&PENDING_SPEC];
@@ -631,6 +1054,7 @@ mod tests {
             slot.clone(),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         let broadcast = Arc::new(CountingBroadcast::default());
@@ -697,6 +1121,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
         let ids = names
             .iter()
@@ -749,7 +1174,7 @@ mod tests {
             super::super::ingress::ControlQueryResult::Ok(payload) => {
                 ("OK".to_string(), payload.to_string())
             }
-            super::super::ingress::ControlQueryResult::Error { code, hint } => {
+            super::super::ingress::ControlQueryResult::Error { code, hint, .. } => {
                 (code.to_string(), hint)
             }
         }
@@ -893,6 +1318,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             lease.clone(),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         for target in [json!("   "), json!(5)] {
@@ -928,6 +1354,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             lease.clone(),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
 
         let listed = call_daemon_command(
@@ -964,10 +1391,19 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         )));
         let bus = DaemonLocalCommands::new(slot);
 
-        assert_eq!(bus.claim("agent.resolve"), Some(Effect::Read));
+        assert_eq!(
+            bus.claim("agent.resolve"),
+            Some((Effect::Read, DeadlineClass::Ordinary))
+        );
+        // ADR-0369: the seat of the daemon's own launch verb is sized from its declaration.
+        assert_eq!(
+            bus.claim("agent.spawn"),
+            Some((Effect::Write, DeadlineClass::Launch))
+        );
         let out = bus
             .run(
                 "agent.resolve",
@@ -994,6 +1430,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
         );
         for name in INPUT_AFFECTING {
             let spec = table
@@ -1023,6 +1460,7 @@ mod tests {
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
             usage,
+            Arc::new(NoLibrary),
         )
     }
 
@@ -1087,6 +1525,206 @@ mod tests {
         assert_eq!(row["windows"][0]["window"], "FiveHour");
         assert_eq!(row["windows"][0]["used_pct"], 37.5);
         assert_eq!(row["windows"][0]["left_pct"], 62);
+    }
+
+    /// An assembly without a library service answers every `library.*` and `preset.*` command `CONFLICT`
+    /// `library-unavailable` by value, and `library.refresh` the report of a refresh that could not scan — one `errors`
+    /// row with no path.
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_answers_library_unavailable_and_an_empty_refresh() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        let refusing = [
+            ("library.status", json!({})),
+            (
+                "library.addMount",
+                json!({ "name": "team", "path": "C:/lib" }),
+            ),
+            ("library.removeMount", json!({ "mount": "team" })),
+            (
+                "library.relocateMount",
+                json!({ "mount": "team", "path": "C:/lib" }),
+            ),
+            (
+                "library.renameMount",
+                json!({ "mount": "team", "to": "shared" }),
+            ),
+            ("library.folders", json!({})),
+            ("library.list", json!({})),
+            ("library.read", json!({ "path": "a.md" })),
+            ("library.newFolder", json!({ "name": "x" })),
+            (
+                "library.newFile",
+                json!({ "name": "x", "kind": "Markdown" }),
+            ),
+            ("library.relink", json!({ "from": "a.md", "to": "b.md" })),
+            ("preset.get", json!({ "path": "p.yaml" })),
+            (
+                "preset.check",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                }),
+            ),
+            ("preset.add", json!({ "path": "p.yaml", "items": ["a.md"] })),
+            (
+                "preset.remove",
+                json!({ "path": "p.yaml", "folders": ["C:/f"] }),
+            ),
+            (
+                "preset.reorder",
+                json!({ "path": "p.yaml", "section": "skills", "order": [], "base_rev": "r" }),
+            ),
+            (
+                "preset.setBackend",
+                json!({ "path": "p.yaml", "items": ["a.md"] }),
+            ),
+            (
+                "preset.save",
+                json!({
+                    "path": "p.yaml", "presets": [], "instructions": [], "skills": [], "settings": [],
+                }),
+            ),
+            ("preset.previewFolder", json!({ "folder": "C:/f" })),
+        ];
+        for (name, args) in refusing {
+            let err = call(&table, name, args).expect_err("no library");
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name}");
+            assert_eq!(
+                err.args().and_then(|args| args.get("code")),
+                Some(&json!(LIBRARY_UNAVAILABLE)),
+                "{name}"
+            );
+        }
+        let empty = json!({
+            "changed": 0, "problems": [], "no_kind": [], "skipped_links": [],
+            "errors": [{ "path": null, "why": NO_LIBRARY }],
+        });
+        for args in [json!({}), json!({ "folder": "rules/team" })] {
+            let report = call(&table, "library.refresh", args.clone()).expect("a report");
+            assert_eq!(report, empty, "{args}");
+        }
+    }
+
+    /// Without a library, an agent-preset command on an agent that exists answers `CONFLICT` `library-unavailable` by
+    /// value, as every library command does.
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_refuses_the_agent_preset_commands_library_unavailable() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        let created = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude" }),
+        )
+        .expect("registration succeeded");
+        let target = created["agent_id"].clone();
+        let refusing = [
+            ("agent.presets", json!({ "target": target })),
+            (
+                "agent.attachPreset",
+                json!({ "target": target, "presets": ["engram/default"] }),
+            ),
+            (
+                "agent.detachPreset",
+                json!({ "target": target, "presets": ["p.yaml"] }),
+            ),
+            (
+                "agent.reorderPresets",
+                json!({ "target": target, "order": [], "base_rev": "r" }),
+            ),
+        ];
+        for (name, args) in refusing {
+            let err = call(&table, name, args).expect_err("no library");
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name}");
+            assert_eq!(
+                err.args().and_then(|args| args.get("code")),
+                Some(&json!(LIBRARY_UNAVAILABLE)),
+                "{name}"
+            );
+        }
+    }
+
+    /// Without a library, `agent.new {presets}` applies the attach rule with no catalog: a library preset refuses the
+    /// whole call `CONFLICT` `library-unavailable` and creates nothing; `engram/default` alone creates the agent with
+    /// its skip, and a given `root_generation` is not compared (there is no root).
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_judges_new_agent_presets_by_the_attach_rule() {
+        let manager = manager();
+        let table = make_daemon_table(
+            manager.clone(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+
+        let err = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram/default", "p.yaml"] }),
+        )
+        .expect_err("a library preset with no library");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert_eq!(
+            err.args().and_then(|args| args.get("code")),
+            Some(&json!(LIBRARY_UNAVAILABLE))
+        );
+        assert!(manager.roster().is_empty(), "nothing created");
+
+        let created = call(
+            &table,
+            "agent.new",
+            json!({
+                "cwd": "C:/work/probe", "backend": "Claude", "presets": ["engram/default"],
+                "root_generation": 123_456,
+            }),
+        )
+        .expect("the Default slot alone needs no library");
+        assert_eq!(
+            created["skipped"],
+            json!([{
+                "item": "engram/default", "code": "already-present",
+                "args": { "path": "engram/default" }, "line": null,
+            }])
+        );
+        assert_eq!(manager.roster().len(), 1);
+    }
+
+    /// Without a library, a refresh `folder` that is not a library path is still refused as the real service refuses
+    /// it — `INVALID_ARGUMENT` `item-path-invalid`, not an empty report.
+    // ADR-0386
+    #[test]
+    fn a_table_without_a_library_refuses_an_unparsable_refresh_folder() {
+        let table = make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::new(NoLibrary),
+        );
+        for folder in ["../x", "/abs", "a:b", "rules/"] {
+            let err = call(&table, "library.refresh", json!({ "folder": folder }))
+                .expect_err("not a library path");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{folder}");
+            assert_eq!(
+                err.args().and_then(|args| args.get("code")),
+                Some(&json!(ITEM_PATH_INVALID)),
+                "{folder}"
+            );
+        }
     }
 
     /// An assembly without a usage service fails `usage.*` by value (no panic) — the same code as the same absence on wire ⟳.
@@ -1161,5 +1799,434 @@ mod tests {
             err.message(),
             "command handler panicked: body panic · marked false"
         );
+    }
+
+    /// ADR-0419: with no library service every file and trash command answers `library-unavailable` (`Unavailable` —
+    /// CONFLICT on the bus), as the other library commands do.
+    #[test]
+    fn no_library_answers_every_file_command_library_unavailable() {
+        fn code<T: std::fmt::Debug>(answer: Result<T, PortRefusal>) -> (PortClass, String) {
+            match answer {
+                Err(PortRefusal::Refused { class, reason }) => (class, reason.code),
+                other => panic!("expected a refusal: {other:?}"),
+            }
+        }
+        let paths = ["library/a.md".to_owned()];
+        let row = TrashAddressRow {
+            mount: "library".to_owned(),
+            bundle: "20261123T081500Z-abc123".to_owned(),
+            path: "a.md".to_owned(),
+        };
+        let unavailable = (PortClass::Unavailable, LIBRARY_UNAVAILABLE.to_owned());
+        let library = NoLibrary;
+        assert_eq!(
+            code(library.move_items(&paths, "library/b", None, false, false, None, None)),
+            unavailable
+        );
+        assert_eq!(
+            code(library.rename("library/a.md", "b.md", false, false, None, None)),
+            unavailable
+        );
+        assert_eq!(
+            code(library.copy_items(&paths, "library/b", None, None)),
+            unavailable
+        );
+        assert_eq!(
+            code(library.delete(&paths, false, false, None, None)),
+            unavailable
+        );
+        assert_eq!(code(library.list_trash()), unavailable);
+        assert_eq!(
+            code(library.restore(&[row.clone()], false, None)),
+            unavailable
+        );
+        assert_eq!(code(library.empty_trash(&[], &[row])), unavailable);
+    }
+
+    // ── the shell-only gate (ADR-0419) ───────────────────────────────────────────────────────────────────────────
+
+    /// The library host of the gate tests: `NoLibrary`'s answers, and how many times `empty_trash` was called — the
+    /// proof that a refused shell-only call never reaches the host.
+    #[derive(Default)]
+    struct CountingLibrary {
+        emptied: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingLibrary {
+        fn emptied(&self) -> usize {
+            self.emptied.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl LibraryCommandHost for CountingLibrary {
+        fn status(&self) -> Result<LibraryStatusOk, PortRefusal> {
+            NoLibrary.status()
+        }
+        fn add_mount(
+            &self,
+            name: &str,
+            path: &str,
+            create: bool,
+        ) -> Result<LibraryAddMountOk, PortRefusal> {
+            NoLibrary.add_mount(name, path, create)
+        }
+        fn remove_mount(&self, mount: &str) -> Result<LibraryRemoveMountOk, PortRefusal> {
+            NoLibrary.remove_mount(mount)
+        }
+        fn relocate_mount(
+            &self,
+            mount: &str,
+            path: &str,
+            create: bool,
+        ) -> Result<LibraryStatusOk, PortRefusal> {
+            NoLibrary.relocate_mount(mount, path, create)
+        }
+        fn rename_mount(
+            &self,
+            mount: &str,
+            to: &str,
+            yes: bool,
+            root_generation: Option<u64>,
+            plan_digest: Option<&str>,
+        ) -> Result<LibraryRenameMountOk, PortRefusal> {
+            NoLibrary.rename_mount(mount, to, yes, root_generation, plan_digest)
+        }
+        fn change_number(&self) -> Option<u64> {
+            NoLibrary.change_number()
+        }
+        fn folders(&self) -> Result<LibraryFoldersOk, PortRefusal> {
+            NoLibrary.folders()
+        }
+        fn refresh(&self, folder: Option<&str>) -> Result<LibraryRefreshOk, PortRefusal> {
+            NoLibrary.refresh(folder)
+        }
+        fn list(
+            &self,
+            folder: Option<&str>,
+            query: Option<&str>,
+            kinds: &[LibraryKind],
+        ) -> Result<LibraryListOk, PortRefusal> {
+            NoLibrary.list(folder, query, kinds)
+        }
+        fn read(&self, path: &str) -> Result<LibraryReadView, PortRefusal> {
+            NoLibrary.read(path)
+        }
+        fn new_folder(
+            &self,
+            parent: Option<&str>,
+            name: &str,
+            root_generation: Option<u64>,
+        ) -> Result<String, PortRefusal> {
+            NoLibrary.new_folder(parent, name, root_generation)
+        }
+        fn new_file(
+            &self,
+            folder: Option<&str>,
+            name: &str,
+            kind: LibraryNewFileKind,
+            root_generation: Option<u64>,
+        ) -> Result<String, PortRefusal> {
+            NoLibrary.new_file(folder, name, kind, root_generation)
+        }
+        fn relink(
+            &self,
+            from: &str,
+            to: &str,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryRelinkOk, PortRefusal> {
+            NoLibrary.relink(from, to, root_generation)
+        }
+        fn preset_get(&self, path: &str) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_get(path)
+        }
+        fn preset_check(
+            &self,
+            path: &str,
+            draft: &PresetDraftInput,
+        ) -> Result<PresetCheckOk, PortRefusal> {
+            NoLibrary.preset_check(path, draft)
+        }
+        fn preset_add(
+            &self,
+            path: &str,
+            entries: &PresetEntries,
+            backend: Option<&str>,
+            after: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetAddOk, PortRefusal> {
+            NoLibrary.preset_add(path, entries, backend, after, root_generation)
+        }
+        fn preset_remove(
+            &self,
+            path: &str,
+            entries: &PresetEntries,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_remove(path, entries, root_generation)
+        }
+        fn preset_reorder(
+            &self,
+            path: &str,
+            section: PresetSection,
+            order: &[String],
+            base_rev: &str,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_reorder(path, section, order, base_rev, root_generation)
+        }
+        fn preset_set_backend(
+            &self,
+            path: &str,
+            items: &[String],
+            backend: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetSetBackendOk, PortRefusal> {
+            NoLibrary.preset_set_backend(path, items, backend, root_generation)
+        }
+        fn preset_save(
+            &self,
+            path: &str,
+            draft: &PresetDraftInput,
+            base_rev: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<PresetView, PortRefusal> {
+            NoLibrary.preset_save(path, draft, base_rev, root_generation)
+        }
+        fn preview_folder(
+            &self,
+            folder: &str,
+            backend: Option<&str>,
+            mode: Option<AgentOutputFormat>,
+        ) -> Result<PresetPreviewFolderOk, PortRefusal> {
+            NoLibrary.preview_folder(folder, backend, mode)
+        }
+        fn agent_presets(&self, agent: AgentId) -> Result<AgentPresetsPortView, PortRefusal> {
+            NoLibrary.agent_presets(agent)
+        }
+        fn attach_preset(
+            &self,
+            agent: AgentId,
+            presets: &[String],
+            after: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<AgentAttachPortAnswer, PortRefusal> {
+            NoLibrary.attach_preset(agent, presets, after, root_generation)
+        }
+        fn detach_preset(
+            &self,
+            agent: AgentId,
+            presets: &[String],
+            yes: bool,
+            root_generation: Option<u64>,
+        ) -> Result<AgentPresetsPortView, PortRefusal> {
+            NoLibrary.detach_preset(agent, presets, yes, root_generation)
+        }
+        fn reorder_presets(
+            &self,
+            agent: AgentId,
+            order: &[String],
+            base_rev: &str,
+            root_generation: Option<u64>,
+        ) -> Result<AgentPresetsPortView, PortRefusal> {
+            NoLibrary.reorder_presets(agent, order, base_rev, root_generation)
+        }
+        fn judge_new_presets(
+            &self,
+            profile: &AgentProfile,
+            presets: &[String],
+            root_generation: Option<u64>,
+        ) -> Result<NewAgentPresets, PortRefusal> {
+            NoLibrary.judge_new_presets(profile, presets, root_generation)
+        }
+        #[allow(clippy::too_many_arguments)]
+        fn move_items(
+            &self,
+            paths: &[String],
+            to_folder: &str,
+            on_conflict: Option<LibraryOnConflict>,
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<MovePortAnswer, PortRefusal> {
+            NoLibrary.move_items(
+                paths,
+                to_folder,
+                on_conflict,
+                yes,
+                detach_refs,
+                plan_digest,
+                root_generation,
+            )
+        }
+        fn rename(
+            &self,
+            path: &str,
+            name: &str,
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<MovePortAnswer, PortRefusal> {
+            NoLibrary.rename(path, name, yes, detach_refs, plan_digest, root_generation)
+        }
+        fn copy_items(
+            &self,
+            paths: &[String],
+            to_folder: &str,
+            on_conflict: Option<LibraryOnConflict>,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryCopyOk, PortRefusal> {
+            NoLibrary.copy_items(paths, to_folder, on_conflict, root_generation)
+        }
+        fn delete(
+            &self,
+            paths: &[String],
+            yes: bool,
+            detach_refs: bool,
+            plan_digest: Option<&str>,
+            root_generation: Option<u64>,
+        ) -> Result<DeletePortAnswer, PortRefusal> {
+            NoLibrary.delete(paths, yes, detach_refs, plan_digest, root_generation)
+        }
+        fn list_trash(&self) -> Result<LibraryListTrashOk, PortRefusal> {
+            NoLibrary.list_trash()
+        }
+        fn restore(
+            &self,
+            rows: &[TrashAddressRow],
+            keep_both: bool,
+            root_generation: Option<u64>,
+        ) -> Result<LibraryRestoreOk, PortRefusal> {
+            NoLibrary.restore(rows, keep_both, root_generation)
+        }
+        fn empty_trash(
+            &self,
+            bundles: &[ListedBundleArg],
+            rows: &[TrashAddressRow],
+        ) -> Result<LibraryEmptyTrashOk, PortRefusal> {
+            self.emptied
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            NoLibrary.empty_trash(bundles, rows)
+        }
+    }
+
+    /// A daemon table over a [`CountingLibrary`], in its slot.
+    fn counting_slot() -> (Arc<CommandTableSlot>, Arc<CountingLibrary>) {
+        let library = Arc::new(CountingLibrary::default());
+        let slot = Arc::new(CommandTableSlot::new());
+        slot.set(Arc::new(make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+            Arc::clone(&library) as Arc<dyn LibraryCommandHost>,
+        )));
+        (slot, library)
+    }
+
+    /// With no calling connection a shell-only name is refused `UNSUPPORTED` `shell-only` with the screen sentence,
+    /// before the argument check (an unknown field does not change the answer), and the host is never called — on the
+    /// unit entrance, on `/control/call` (`catalog::handle_call`) and on `/control/agent` (which cannot even name it);
+    /// with a connection (socket stage 1) the same call reaches the host once.
+    // ADR-0419
+    #[test]
+    fn a_shell_only_command_never_reaches_the_host_without_a_connection_and_does_with_one() {
+        let (slot, library) = counting_slot();
+        let table = slot.get().expect("table").clone();
+        for args in [json!({ "rows": [] }), json!({ "nope": 1 })] {
+            let err =
+                call_daemon_command(&table, "library.emptyTrash", &mut args.clone(), "cli", None)
+                    .expect("a name of this table")
+                    .expect_err("refused");
+            assert_eq!(err.code(), ErrorCode::Unsupported, "{args}");
+            assert_eq!(err.retry(), engram_dashboard_command::RetryMode::Never);
+            assert_eq!(
+                err.args(),
+                Some(&serde_json::Map::from_iter([
+                    ("code".to_owned(), json!("shell-only")),
+                    ("args".to_owned(), json!({})),
+                ])),
+                "{args}"
+            );
+            assert!(
+                err.message()
+                    .contains("done by the user in the library screen"),
+                "{}",
+                err.message()
+            );
+        }
+        assert_eq!(library.emptied(), 0, "the unit entrance called the host");
+
+        let socket = DaemonLocalCommands::new(Arc::clone(&slot));
+        let request: super::super::catalog::CallRequest =
+            serde_json::from_value(json!({ "name": "library.emptyTrash", "args": { "rows": [] } }))
+                .expect("a call body");
+        let outcome = super::super::catalog::handle_call(
+            &socket,
+            &crate::command_roster::CommandRoster::new(),
+            request,
+        );
+        assert!(
+            matches!(
+                &outcome,
+                super::super::catalog::CallOutcome::Answered(
+                    super::super::ingress::ControlQueryResult::Error { code, .. }
+                ) if *code == "UNSUPPORTED"
+            ),
+            "{outcome:?}"
+        );
+        let request: super::super::agent::AgentRequest =
+            serde_json::from_value(json!({ "verb": "library.emptyTrash", "rows": [] }))
+                .expect("a verb body");
+        let answer = super::super::agent::handle_agent(&table, request);
+        assert!(
+            matches!(
+                &answer,
+                super::super::ingress::ControlQueryResult::Error { code, .. } if *code == "UNKNOWN_COMMAND"
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(library.emptied(), 0, "a control route called the host");
+
+        socket
+            .run(
+                "library.emptyTrash",
+                &mut json!({ "rows": [] }),
+                "bus",
+                Some(2),
+            )
+            .expect("a name of this table")
+            .expect_err("NoLibrary answers no library");
+        assert_eq!(library.emptied(), 1, "the socket reaches the host");
+    }
+
+    /// The other door that holds a connection number for a connectionless caller — `CommandBus::invoke`, whose fake
+    /// caller would make `caller` `Some` — refuses the daemon's own names before stage 1, so it never runs a shell-only
+    /// command. If it ever runs them, the gate must stay shut there.
+    // ADR-0419
+    #[tokio::test]
+    async fn the_relay_door_never_runs_a_shell_only_command() {
+        let (bus, _sweeper) = crate::command_delivery::CommandBus::new(
+            crate::command_roster::CommandRoster::new(),
+            crate::command_delivery::CommandDeliveries::new(),
+            Arc::new(DaemonLocalCommands::new(table_slot())),
+        );
+        for name in SHELL_ONLY {
+            let reply = bus
+                .invoke(
+                    engram_dashboard_command::RequestId::new(),
+                    name.to_string(),
+                    json!({ "rows": [] }),
+                )
+                .await;
+            let err = reply.outcome.expect_err("refused");
+            assert_eq!(err.code(), ErrorCode::Internal, "{name}");
+            assert!(
+                err.message().contains("nothing was run"),
+                "{name}: {}",
+                err.message()
+            );
+        }
     }
 }

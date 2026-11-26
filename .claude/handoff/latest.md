@@ -1,73 +1,51 @@
-# Handoff: S38 merged; next = prune comments in U1 (leaf crates) and U2 (agent crate), most important first
+# Handoff: S25 step 22 (hook components) — P3, P4 (+T-125, T-131), P5 committed locally; only the GUI check and integration remain
 
-## Read first
-
-- S38 is done and on master (`204bec50` S38 merge, `2558d4da` follow-up merge). The user decided to also prune the comments of the U1/U2 crates (translated in S38 but never pruned): 「그냥 나머지도 전체 진행하되 핸드오프 하는게 좋겠지? 중요한 순서대로 하면됨」. This was S38's declared follow-up (TRD §2: "Pruning U1–U2 comments is a follow-up if the U3–U5 result is good").
-- Cost is the user's main concern. Binding rules from the user: at most 2 workers at once; work in chunks and give feedback between them; reviews are targeted, not full; no Codex check for comment-only work; workers never spawn sub-agents/forks (put that line in every brief). Do not ask the user to avoid the keyboard during QA.
-- Estimate given to the user: ~28k comment lines (U1 ~11.8k + agent ~16.5k), expected −35~45%; about 45 on a scale where this session's whole S38 work (translation+prune+review+QA, worker cache reads ~330M) = 100. Not measured.
-- Engram feedback rows of this session are recorded and committed (rule: no push) — nothing to do there.
+## Know first
+- **Nothing pushed.** Branch is 13 commits ahead of origin (14 with this handoff). P3 (`3211b40d`), P4 (`1e52e5f2`), P5 (`2f383f4a`) are committed locally with "GUI check pending" in their messages — the user asked to run autonomously "until GUI" (「GUI 전까지는 자율모드로 쭉 진행해」) and to test everything together after P4/P5 (「p4 p5 끝나고 다 테스트해보고 정리하면 될듯」).
+- **GUI check is the next gate** (P3 = codex transport row; scene H1 in TRD §5). The QA executor can run GUI 실측 itself (qa binding 「GUI 실측」 / qa-verify recipes) — the user does not have to watch; ask the user whether to run it now.
+- TRD `trd-hook-components.md` is **not** marked Implemented yet (held until the GUI check passes); parent `trd.md` item 22 likewise.
+- Base is behind origin/master (8 commits at last fetch) — merge master at integration (handbook `docs/handbook/branch-commit.md`).
+- Not ours: `src-tauri/bindings/*.ts` line-ending noise, `.claude/explain/`.
+- Codex weekly limit: unknown now; this session used ~8 codex review calls (xhigh/high).
 
 ## One-line state · next first action
+Step 22 code is complete and gated except GUI: P3 (codex assembly + wiring, deep review + fix round, QA PASS minus GUI), P4 + T-125 + T-131 (deep review, 3 fix rounds, QA PASS — no GUI needed), P5 (help/docs, full review, QA PASS minus GUI). **Next:** report to the user (morning), ask the open items one at a time (list below), then run the GUI check (P3 transport + scene H1) via `/engram-qa`; on PASS: mark TRD Implemented (+ parent item 22, README), merge master, push, CI green, `--no-ff` integration per the handbook; then the end-of-server-stage CLI pass with the user; then the client stage (first slot = read-only structure viewer, T-135).
 
-- State: nothing running. wt2 on `v0.5.0/chore/english-internal-text` (merged). `core.hooksPath` is now the relative `scripts/git-hooks` (user-approved), so qa mutation runs in the work tree. All S38 worktrees removed.
-- Next first action: open `docs/handbook/branch-commit.md` and cut a new branch from master for this follow-up (suggested `v0.5.0/chore/prune-comments-leaf-agent`, commit label `S38` as its declared follow-up — confirm against the handbook's numbering rule), then create worktree(s) with `git worktree add` (never Agent `isolation: "worktree"`) and start chunk 1 of the agent crate.
+## Repo state (measured at save)
+- Branch `v0.5.0/feat/preset-library`, HEAD `2f383f4a`, 13 ahead / 0 behind origin (this handoff commit makes 14). Uncommitted: none of ours (only the bindings noise and `.claude/explain/`).
+- Commits this session: tracking decisions `8fb58025` `f0afd41c` `8d0d8651`; ADR-0423 `0390e559` `a86d6e39`; P3 `3211b40d`; ADR-0424/0425 `4597fd45` `173a1a9d` `bf0c981b` `78471fe7`; P4 `1e52e5f2`; P5 `2f383f4a`.
+- Snapshot ref `refs/s25/p3b-wip` (old P3 WIP) can be deleted (`git update-ref -d refs/s25/p3b-wip`).
 
-## Plan (most important first)
+## Verification state
+- P3: review deep (lead, risk = protocol/handshake, codex) → fix round 1 → all PASS. QA: workspace 7076, gates 34/34, frontend 2884, bindings no drift, codex lane incl. H-a..H-d PASS (0.171.0), claude lane PASS (2.1.330), mutation 3/3. **GUI not run.**
+- P4/T-125/T-131: review deep (lead, risk = data integrity, codex) → 3 fix rounds → lead/risk PASS, codex PASS after a one-line test gate (closed by main diff check). QA PASS: workspace 7094, gates 34/34, both lanes, mutation 3 caught. **Unix branches compile-checked only (x86_64-unknown-linux-gnu), never run** (CI is Windows-only).
+- P5: review full (lead PASS, codex FIX doc → fixed). QA: workspace 7095, both lanes, help/commands read literally, pin mutation caught. **GUI (scene H1) not run.**
+- Rerun: `cargo test --workspace -- --test-threads=4`; full QA per `.claude/skill-bindings/qa.md`. Results: `.review-s25-22/p3-qa-result.md`, `p4-qa-result.md`, `p5-qa-result.md`.
 
-Order = most read / largest first:
-1. `crates/engram-dashboard-agent` — 16,545 `//` comment lines (largest, read most). Watch: 37 ts-rs bindings in `crates/engram-dashboard-agent/bindings/` + `commands.schema.json` — `///` docs on ts-export types and on command declarations feed generated files and LLM-facing schema; leave those untouched (the U4 prune broke 11 bindings this way and had to restore them).
-2. `crates/engram-dashboard-transport` — 3,520.
-3. `crates/engram-dashboard-messaging` — 3,079.
-4. `crates/engram-dashboard-platform` — 1,402.
-5. `crates/engram-dashboard-protocol` — 1,058 (wire contract; keep contract docs).
-6. `crates/engram-dashboard-command` — 1,039.
-7. `crates/engram-dashboard-cli` — 1,037.
-8. `crates/engram-dashboard-base` — 667.
-Skip files with <15 comment lines. Build each crate's queue largest-first.
+## Open items for the user (ask one at a time, scene first, no jargon)
+1. GUI check now? (QA runs it; codex transport + scene H1.)
+2. T-136 (O7): codex hook verdicts of boot-restored agents are only logged at info (nothing written in release). Recommend warn.
+3. T-137: (a) deleting a lone hooks.json now asks (recommend keep); (b) a SKILL.md arriving in a referenced hook folder turns it into a skill without asking (recommend record only).
+4. Unfixed recommendations: P3 — silent hooks/list test wall-clock bound (cap + 3 s) may be tight on slow CI; handshake timeouts say "ms" vs turn timeouts "seconds"; lane H-a waits for roster removal not process exit (os error 32 seen once). P4 — keep-both clause in merge (~ops.rs 4534) has no guarding test; empty fresh plan answers skill-unconfirmed for a hook-only call (rare race); markers matched by exact name after a case-only rename (pre-existing); Unix code never run (suggest a Linux CI job for platform + asset-library).
+5. ADR rejected alternatives marked 약함, never shown to the user: ADR-0421 (×2), ADR-0422 (×1), ADR-0423 ("ask hooks/list after history paging"), ADR-0424 ("a code per marker kind"), ADR-0425 ("list folders from the checked handle").
+6. Records left by lanes (user's call to delete): codex threads in ~/.codex (ids in the QA result files), claude session records under ~/.claude/projects/.
+- Still waiting from before: TRD O8 (detect codex review screen), T-109/T-134/T-135 direction items.
 
-Per crate: Sonnet prune worker (`worker-scout-sonnet`) in chunks of ~12–15 files → main samples 2 before→after per file and gives feedback → continue; hand the worker over via its progress file at ~400–500k context. Then one targeted review (`worker-reviewer`, `.s38-review/light-review-brief.md`) per crate group. After every chunk: comment-stripped token compare + `cargo check -p <crate> --tests`; at the end `cargo fmt -p <crate>` then `node scripts/check-hangul.mjs` (fmt can move a trailing `hangul-ok` off its literal) and the crate's tests per `.claude/skill-bindings/qa.md` 「모듈별 명령」. Finally `/engram-qa` (Rust source row → full regression; lanes per the table) → push → CI green → `--no-ff` merge (handbook procedure) — the user authorised merging when done (「다 되면 알아서 머지해」, given for S38; re-confirm only if anything is off).
-
-Briefs to reuse (git-excluded, in wt2 `.s38-review/`): `prune-brief.md` (has the calibrated "Standard": rewrite blocks line by line, cut origins/dates/review labels/restatements, keep rules/why/external facts/do-not-revive/contracts, ★ on load-bearing lines, KEEP `ADR-NNNN`, `TRD S<n> §…`, `FIX <n>`), `light-review-brief.md` (risky deleted comments with English+Korean keywords on word boundaries, changed strings; no forks). Update the brief headers for the new branch/worktree paths and add "run `cargo fmt -p` and report `--check`".
-
-## Also pending (small)
-
-- tracking T-114 (Esc-key test) says "fix"; user decided to leave the test as is (「esc 테스트는 그냥 놔두고, esc만 안누르면 되는거잖아」) → in this follow-up's branch, remove T-114 or change it to "kept as is — QA skips it if a key was pressed".
-
-## Repo state (measured 2026-11-18 16:48)
-
-- wt2: branch `v0.5.0/chore/english-internal-text`, HEAD `c9f0818e` (previous handoff commit, not pushed; 1 ahead of origin) — this handoff's commit comes after this text. Tracked tree clean. master `2558d4da` = origin/master.
-
-## Verification
-
-- S38 QA (tree `4b9bdad9`): full regression PASS, claude/codex/shell real-daemon lanes PASS, Job lane known failure only, mutation PASS, GUI smoke/AC3/AC4 PASS. CI green on `4b9bdad9` and `042b480d`. Master CI for `204bec50`/`2558d4da` not read.
-- Nothing of the follow-up is started or verified.
-
-## Failed approaches (do not repeat)
-
-- "Prune while translating" got translation only; "when unsure, keep" made prune workers timid — use the calibrated Standard and an example block from the start.
-- Long single workers grew to 500–800k context (one cost 56M cache reads) — hand over earlier.
-- Cutting `(TRD …)` tails conflicted with the project binding → restored 166 refs. Read bindings before calibrating.
-- Shortening `///` on ts-rs types changed generated bindings — leave them.
-- A reviewer worker spawned forks past the cap — every brief says "no sub-agents or forks".
-- `git cherry-pick -n` leaves sequencer state → `git cherry-pick --quit`.
-- Orphan Codex broker processes (`app-server-broker.mjs … --cwd <worktree>`) can lock a worktree folder; the user had to `taskkill /F` them (auto mode refused it for main).
-
-## Resume command
-
-`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline -2 master && git -C I:/Engram/apps/engram-dashboard-wt2 worktree list`
+## Failed approaches (do-not)
+- REPL: rg patterns containing backticks inside `$` templates get refused by the rm guard ("unterminated quote") — search file text in JS instead.
+- Resuming a codex thread past 200k tokens is forbidden by the global rule — new call with previous findings + incremental diff (did so for P3 r2, P4 r3).
+- `edit()` with leading-space-sensitive markdown list lines: ADR bodies use 3-space indents — copy exact text.
 
 ## Decisions
-
-User decisions (this part of the session):
-- U1/U2 prune · 상황: ~28k comment lines, estimate ~45 of this session's work, Claude recommended not now or agent-only · 선택지 skip ★ / agent only / all · 고른 것 「그냥 나머지도 전체 진행하되 핸드오프 하는게 좋겠지? 중요한 순서대로 하면됨」 · 갈림 · 조건: 「중요한 순서대로」.
-- (묻지 않음) Esc test · 고른 것 「esc 테스트는 그냥 놔두고, esc만 안누르면 되는거잖아」 · —.
-- (묻지 않음) worktree cleanup and hooks path · 고른 것 「워크트리 정리는 그냥 하면 되는거 아님? git 훅경로도」 · — (done: worktrees recycled after the user killed two Codex brokers; hooksPath set relative).
-- Earlier S38 decisions (worker cap 2, chunked feedback, reduced reviews, keep TRD refs for now, Korean HTML reports stay) — see `history/20261118-155133-s38-merged-to-master.md`.
-
-Claude decisions: order = agent first, then transport, messaging, platform, protocol, command, cli, base (size × read frequency); skip files <15 comment lines; leave ts-rs/schema `///` docs; ★ not restored where already gone.
+User:
+- 다른 드라이브 이동 시 속성 복사·같은 이름 폴더 합치기(T-128, T-127) · 상황: USB·NAS로 옮기면 속성 설정 거부로 매번 실패, 원본은 남음 · A 내용만 옮기고 로그 ★ / B 지금처럼 실패 · 고른 것 「음? 뭔가 복잡하면 그냥 다 막아.」 · 갈림 · → kept strict/refused, archived.
+- 둘 다 유지 합치기로 참조 스킬이 사라질 때(T-125) · 상황: SKILL.md가 SKILL (2).md가 되어 프리셋 참조가 깨짐, 묻지 않음 · 묻기 ★ / 그대로 · 「어쨋든 이대로 진행하던지」 · 같음 · → ADR-0424.
+- 읽기전용 남은 항목 삭제(T-131) · 상황: Unix 쓰기금지 폴더·Windows 읽기전용 빈 폴더를 못 지움 · 지우게 고침 ★ / 그대로 · 「ㅇㅇ 읽기전용하고 관계없지. 그냥 지우면 될듯.」 · 같음 · → ADR-0425.
+- (묻지 않음) 진행 방식 · 「그럼 GUI 전까지는 자율모드로 쭉 진행해.」 · 조건: 「p4 p5 끝나고 다 테스트해보고 정리하면 될듯.」 · 「다 끝나면 핸드오프해. 막히면 그냥 이세션에서 하는게 좋겠지?」
+Main: P3b brief scope; hooks/list own 2 s cap (lead hold → main, ADR-0423); foreign = trusted AND enabled; one notice per why; P4+T-125+T-131 in one coder (shared ops.rs); lone hooks.json delete asks (held → T-137); "skill-unconfirmed wins" one code per call; detach filter judges where pairs put a folder; Unix chmod of unreadable folders via O_PATH + /proc on Linux, none elsewhere; shells in record-less bundles opened (single-row residue accepted); local commits with "GUI pending" instead of waiting (user's go-ahead); TRD Implemented held until GUI.
+Open: list above.
 
 ## References
-
-- `history/20261118-155133-s38-merged-to-master.md` (full S38 close-out).
-- wt2 `.s38-review/`: `prune-brief.md`, `light-review-brief.md`, `review-fix-brief.md`.
-- `docs/handbook/branch-commit.md`, `.claude/skill-bindings/qa.md`, `~/.claude/skills/engram-code-conventions/references/conventions.md` §주석.
+- TRD `docs/process/S25-preset-library/trd-hook-components.md`; ADR-0420…0425; tracking T-136, T-137.
+- Step notes `.review-s25-22/` (git-excluded): `agents.md` (all agents, trees, verdicts), unit/fix briefs, handovers `handover-p3a/p3b/p4/p5.md`, review and QA results.
+- Feedback filed this session: Engram `ad32101` (global: tracking items relayed in record terms), `92ae544` (engram-implement: tracking close rule).

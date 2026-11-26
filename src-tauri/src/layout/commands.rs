@@ -31,8 +31,8 @@ use engram_dashboard_command::{
 };
 
 use super::apply::{
-    self, DockOutcome, SpawnAtError, TabBarSpot, TargetDest, TargetDockError, TargetDockRequest,
-    TargetError, WindowPlace,
+    self, DockOutcome, SpawnAtError, SpawnRefusal, TabBarSpot, TargetDest, TargetDockError,
+    TargetDockRequest, TargetError, WindowPlace,
 };
 use super::dock;
 use super::manager::{DockError, DockMove, FocusPolicy, LayoutError};
@@ -60,13 +60,16 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 // `catalog_version` is bumped whenever the declarations change, including answer shapes and the vocabulary or summaries of a
 // field, not only when names grow (macro contract: the `CATALOG_VERSION` item of `declare_commands!`). Not branching material
 // for receivers (`CommandEnvelope::proto_ver`), and unrelated to `engram_dashboard_protocol::PROTOCOL_VERSION`.
+// Generation 22: the slot kind `PresetPalette` is gone (TRD S25-preset-library §5-2 1 · ADR-0314 decision 5); the `agent.spawnInto`
+//   answer gains `notices`, its refusals carry `args.reasons` / `args.agent_id` (TRD S25 step 20 · ADR-0348), and it is declared with
+//   the launch deadline class (ADR-0369).
 // ADR-0291
 // ADR-0227
 // ADR-0225
 // ADR-0276
 // ADR-0219 (TRD §6; TRD S21-storage §10 F7; TRD S28 §4 · §7; TRD S26-window-chrome §6-1 · §6-6; TRD S21-storage §6-5; TRD S21-storage §6-5 · §6-7; TRD S21-storage §6-7; TRD S21-storage §5-4; TRD S21 usage-limit-slot §1-7; TRD S26-window-chrome §3-2 · §4-5 · §5-3; TRD S21-storage §5-6 · §5-7)
 declare_commands! {
-    catalog_version: 21;
+    catalog_version: 22;
 
     /// One tab bar entry — `name` = the visible name · `named` = whether the name was set (if false, `name` changes following the focused area's content).
     struct TabRow {
@@ -90,7 +93,6 @@ declare_commands! {
         Empty,
         Agent,
         AgentList,
-        PresetPalette,
         Usage,
     }
 
@@ -165,7 +167,6 @@ declare_commands! {
         Empty,
         Agent,
         AgentList,
-        PresetPalette,
         Usage,
         Unknown,
     }
@@ -200,6 +201,19 @@ declare_commands! {
         tab: Option<String>,
         slot_id: Option<String>,
         agent_id: Option<String>,
+    }
+
+    /// A launch notice (`agent.spawnInto`) — something the launch left out, on purpose or because it was not found.
+    /// Not a refusal: the launch went ahead. The same row as the agent block's `agent.spawn` notices (ADR-0348).
+    struct LaunchNoticeRow {
+        /// Fixed notice code.
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        /// 1-based line in the file it names — `null` when it names none.
+        line: Option<u32>,
+        /// The notice as one readable line.
+        text: String,
     }
 
     /// Creates one more empty tab in the window and activates it. Without name it is an auto name — it changes following that tab's focused area (for an agent, its name)
@@ -611,6 +625,10 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
+    /// Spawns an agent and places it (no place = new tab). Answer: agent_id · layout · notices (agent.spawn rows).
+    /// Blocked: CONFLICT + args.reasons, nothing created. INTERNAL + args.agent_id (+ args.reasons): created asleep,
+    /// unplaced — fix reasons, agent.spawn --target it, then layout.setSlotContent --assign it; don't respawn.
+    /// Placement failed: CONFLICT + args.agent_id (running) + args.notices when any.
     /// Starts a new agent and places it there (spawn + a new tab if needed + slot assignment).
     /// Without view_id it creates a new tab and puts it there — in that case slot_id cannot be given. With at (spatial words top-left · top-right ·
     /// bottom-left · bottom-right · left · right · up · down) it goes into the empty area that word picks in window's visible tab —
@@ -619,9 +637,13 @@ declare_commands! {
     /// spawn, and if omitted the daemon refuses (there is no default backend).
     /// window = window_id or a label within the same run (numbers are not accepted) — if omitted, the window of that tab when view_id is given, otherwise main.
     /// If view_id is not a tab of window, CONFLICT before spawn.
-    /// Answer = agent_id · layout (the area rows of the tab it was placed in — layout.get rows shape · no ids).
+    /// Answer = agent_id · layout (the area rows of the tab it was placed in — layout.get rows shape · no ids) · notices (the same set comes
+    /// only once per agent · [] if none).
+    // ADR-0348
+    // ADR-0369
     #[effect(Write)]
     #[since(1)]
+    #[deadline(Launch)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {
         window: Option<String>,
         cwd: String,
@@ -632,6 +654,7 @@ declare_commands! {
     } -> ok AgentSpawnIntoOk {
         agent_id: String,
         layout: Vec<LayoutRow>,
+        notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
     /// Resolves a spatial/direction word (top-left · right · up …) into a slot id. Without view_id the target is that window's active tab,
@@ -863,8 +886,8 @@ declare_commands! {
     /// Reads the layout as one row per area — window number order → tab bar order → area order within the tab. With window (a window_id or a label within the same run ·
     /// numbers are not accepted) only that window, with agent (name or id) only the areas holding that agent (an empty list if in no area).
     /// Row = window · window_number · tab_index (position in that window's tab bar · from 0 — (window, tab_index) is the key grouping rows of the same
-    /// tab) · tab_name · tab_active (the tab visible in that window) · content (Empty · Agent · AgentList · PresetPalette · Usage ·
-    /// Unknown) · agent (display name — omitted if unknown) · focused (the focused area within that tab — not the window · OS focus) · x · y · w ·
+    /// tab) · tab_name · tab_active (the tab visible in that window) · content (Empty · Agent · AgentList · Usage · Unknown) ·
+    /// agent (display name — omitted if unknown) · focused (the focused area within that tab — not the window · OS focus) · x · y · w ·
     /// h (normalized coordinates within the tab 0~1 — top-left is 0,0).
     /// ids = true also includes window_id · tab (the tab id other commands call view_id) · slot_id · agent_id (omitted by default —
     /// areas are called by agent name · spatial word). NOT_FOUND if no agent has that name · CONFLICT if the name matches two or more (candidates at the end of the
@@ -1627,7 +1650,9 @@ fn settings_error(error: SettingsError) -> CommandError {
     }
 }
 
-/// The handler of `agent.spawnInto` — ★async, so [`blocking_handler`] cannot be used★. Answers JSON without `null` fields ([`without_nulls`]).
+/// The handler of `agent.spawnInto` — ★async, so [`blocking_handler`] cannot be used★. `layout` is JSON without `null` fields ([`without_nulls`] — the id fields of the layout rows).
+/// ★Only `layout` is stripped★ — the `notices` rows keep the bus `agent.spawn` row shape (`"line": null` when a
+/// notice names no line, and `args` as sent), so the two answers carry the same row.
 ///
 /// The body must run inside the future, not inside `call` (the deadline stands on that form, as in `blocking_handler`). ★Unlike [`targeted_handler`] the apply is not moved to the blocking pool★: it is async and waits for the daemon spawn midway. (TRD S28 §5-2 · §8)
 struct SpawnInto {
@@ -1641,9 +1666,13 @@ impl CommandHandler for SpawnInto {
             let args: AgentSpawnIntoArgs = serde_json::from_value(args)
                 .map_err(|e| CommandError::invalid_argument(e.to_string()))?;
             let ok = verb_spawn_into(&ports, args).await?;
-            serde_json::to_value(ok)
-                .map(without_nulls)
-                .map_err(|e| CommandError::internal(e.to_string()))
+            let mut answer =
+                serde_json::to_value(ok).map_err(|e| CommandError::internal(e.to_string()))?;
+            // ADR-0348
+            if let Some(layout) = answer.get_mut("layout") {
+                *layout = without_nulls(layout.take());
+            }
+            Ok(answer)
         })
     }
 }
@@ -1654,7 +1683,10 @@ async fn verb_spawn_into(
 ) -> Result<AgentSpawnIntoOk, CommandError> {
     // If omitted, the word version uses main and the id version uses view_id's window (the apply service picks before spawning).
     let window = optional_window_label(ports, "window", args.window.as_deref())?;
-    // ★Accepts **the same spelling rules** as `agent.new` · `agent.spawn --cwd`★: this door skips their common registry (`agent::commands::register`), so without calling it here the same word would read differently per door.
+    // ★The same spelling rule as `agent.new` · `agent.spawn --cwd`★ — the daemon's creation body settles it again
+    //   (WS `SpawnByCwd` → `commands::create_and_start` → `new_profile` → `normalize_spelling`). That pass is the one
+    //   the roster depends on; this one is idempotent and kept so the folder the shell sends is already
+    //   in the settled spelling, whichever entrance a person or an LLM typed it into.
     let cwd = normalize_spelling(text("cwd", &args.cwd)?);
     let tab = args
         .view_id
@@ -1710,9 +1742,25 @@ async fn verb_spawn_into(
         .map_err(spawn_not_applied)?,
     };
     Ok(AgentSpawnIntoOk {
-        agent_id: placed.out,
+        agent_id: placed.out.id,
         layout: layout_of(placed.rows),
+        notices: notice_rows(placed.out.notices),
     })
+}
+
+/// The daemon's notice rows as declared rows. A row that does not decode is dropped with a `warn` naming it — the
+/// rest of the answer still stands.
+// ADR-0348
+fn notice_rows(raw: Vec<serde_json::Value>) -> Vec<LaunchNoticeRow> {
+    raw.into_iter()
+        .filter_map(|row| match serde_json::from_value(row.clone()) {
+            Ok(decoded) => Some(decoded),
+            Err(error) => {
+                tracing::warn!(%row, %error, "agent.spawnInto: dropped a launch notice row that does not decode");
+                None
+            }
+        })
+        .collect()
 }
 
 /// The refusal of a word-version spawn → a bus error: [`locate_error`]'s code and text, with "nothing was started" appended if the word picked no area (including no window); other pre-spawn refusals (occupied) = CONFLICT; failures after spawn are as in the id version ([`spawn_not_applied`]).
@@ -2724,7 +2772,6 @@ fn row_of(row: rows::LayoutRow, ids: bool) -> LayoutRow {
             rows::SlotKind::Empty => SlotKind::Empty,
             rows::SlotKind::Agent => SlotKind::Agent,
             rows::SlotKind::AgentList => SlotKind::AgentList,
-            rows::SlotKind::PresetPalette => SlotKind::PresetPalette,
             rows::SlotKind::Usage => SlotKind::Usage,
             rows::SlotKind::Unknown => SlotKind::Unknown,
         },
@@ -2750,15 +2797,54 @@ fn not_applied(detail: String) -> CommandError {
 
 /// Failures of `agent.spawnInto`: a failure the daemon answered as `CODE: text` (store refusal = `CONFLICT` · store write failure = `INTERNAL` — `store_error_text` of daemon `connection_core`) uses that code as the outer code and the prefix is stripped; the retry directive is that code's default.
 /// ★Do not wrap `CONFLICT` around it again★: two codes (`CONFLICT: INTERNAL: …`) would make a write failure read as "a bounce where nothing was applied". Codes this command does not advertise or texts without a code prefix (placement failure · policy refusal …) are [`not_applied`].
-// ADR-0291 R17
-fn spawn_not_applied(detail: String) -> CommandError {
-    let advertised = AgentSpawnIntoArgs::SPEC.advertised_errors();
-    if let Some((prefix, message)) = detail.split_once(": ") {
-        if let Some(code) = ErrorCode::from_wire(prefix).filter(|code| advertised.contains(code)) {
-            return CommandError::of(code, message);
-        }
+///
+/// `args` = the refusal's structured part (ADR-0348): the daemon's launch-block object verbatim (`reasons`), plus
+/// `agent_id` — the agent the daemon created that did not start (the same shape as bus `agent.spawn`), or the running
+/// agent a placement failure left unplaced — plus `notices` when that spawn had any (M11), as the same declared rows
+/// as the success answer ([`notice_rows`]). None of them = no `args`.
+/// A created-asleep refusal also says in its text that the agent was not placed — the daemon's text is
+/// `agent.spawn`'s, which has no slot to speak of.
+// ADR-0291 R17 · ADR-0348
+fn spawn_not_applied(refusal: SpawnRefusal) -> CommandError {
+    let SpawnRefusal {
+        message: detail,
+        launch_blocked,
+        created_agent_id,
+        live_agent_id,
+        notices,
+    } = refusal;
+    let mut args = launch_blocked.unwrap_or_default();
+    let asleep = created_agent_id.map(|id| id.to_string());
+    if let Some(id) = asleep.clone().or(live_agent_id) {
+        args.insert("agent_id".to_string(), serde_json::Value::String(id));
     }
-    not_applied(detail)
+    let rows: Vec<serde_json::Value> = notice_rows(notices)
+        .into_iter()
+        .filter_map(|row| serde_json::to_value(row).ok())
+        .collect();
+    if !rows.is_empty() {
+        args.insert("notices".to_string(), serde_json::Value::Array(rows));
+    }
+    let advertised = AgentSpawnIntoArgs::SPEC.advertised_errors();
+    let (code, text) = match detail.split_once(": ").and_then(|(prefix, message)| {
+        ErrorCode::from_wire(prefix)
+            .filter(|code| advertised.contains(code))
+            .map(|code| (code, message))
+    }) {
+        Some((code, message)) => (Some(code), message.to_string()),
+        None => (None, detail),
+    };
+    let text = match asleep {
+        Some(id) => format!(
+            "{text} — it was not placed in a slot either: once it runs, place it with layout.setSlotContent <slot> --content Agent --assign {id}"
+        ),
+        None => text,
+    };
+    match code {
+        Some(code) => CommandError::of(code, text),
+        None => not_applied(text),
+    }
+    .with_args(args)
 }
 
 /// ★A whitespace-only value is bounced, not folded into absence★: an unset shell variable expanding to an empty argument (`--window "$UNSET"`) is realistic, and folding it into "not given" would let one typo touch another window (as `agent.*` does on the agent side).
@@ -2864,9 +2950,6 @@ fn slot_content(
         }
         (SlotContentKind::Empty, None) => SlotContentWrite::Replace(SlotContent::Empty),
         (SlotContentKind::AgentList, None) => SlotContentWrite::Replace(SlotContent::AgentList),
-        (SlotContentKind::PresetPalette, None) => {
-            SlotContentWrite::Replace(SlotContent::PresetPalette)
-        }
     };
     if shows {
         return Err(CommandError::invalid_argument(

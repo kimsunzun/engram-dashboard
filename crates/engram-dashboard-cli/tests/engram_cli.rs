@@ -455,6 +455,65 @@ fn engram_agent_rejections_from_the_daemon_exit_one_with_the_body_intact() {
     assert_eq!(v["code"], "AGENT_NOT_FOUND", "{stdout}");
 }
 
+/// A refusal that carries the code's `args` is still a refusal (exit 1), and the CLI prints the arguments
+/// as received — on the group verb and on the full-name surface alike.
+#[test]
+fn rejections_carrying_args_exit_one_and_print_the_args() {
+    const BODY: &str = r#"{"status":"error","code":"CONFLICT","hint":"launch blocked","args":{"reasons":[{"code":"missing","item":"a/b"}]}}"#;
+    let want: serde_json::Value = serde_json::from_str(BODY).expect("body json");
+
+    let (host, port, stub) = spawn_capturing_stub(ok_response(BODY));
+    let url = format!("http://{host}:{port}");
+    let (stdout, code) = run_cli(&url, &["agent", "spawn", "w"], None);
+    let _ = stub.join().expect("stub join");
+    assert_eq!(code, 1, "refusal → exit 1: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v, want, "{stdout}");
+
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), ok_response(BODY)]);
+    let url = format!("http://{host}:{port}");
+    let (stdout, code) = run_cli(&url, &["tab.create", "--title", "x"], None);
+    let requests = stub.join().expect("stub join");
+    assert_eq!(code, 1, "refusal → exit 1: {stdout}");
+    assert_eq!(requests.len(), 2, "the call went out: {requests:?}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v, want, "{stdout}");
+}
+
+/// `engram agent spawn` on the launch answers (TRD S25 step 16): a blocked launch (`CONFLICT` + `args.reasons`) and
+/// a launch refused after `--cwd` created the agent (`INTERNAL` + `args.agent_id`) exit 1; a success carrying
+/// `notices` exits 0. Each body is printed as received — the notice `text` included.
+#[test]
+fn engram_agent_spawn_prints_launch_blocks_and_notices_as_received() {
+    let cases: [(&[&str], &str, i32); 3] = [
+        (
+            &["agent", "spawn", "worker"],
+            r#"{"status":"error","code":"CONFLICT","hint":"could not start agent 'worker': its launch is blocked — 1 reason(s) in args.reasons (a broken or unreadable item, a conflict, or a library mount that cannot be read)","args":{"reasons":[{"kind":"broken","item":"folder:C:\\data\\shared","via":["team.yaml"],"code":"folder-unreadable","args":{"path":"C:\\data\\shared","why":"timeout"},"line":3}]}}"#,
+            1,
+        ),
+        (
+            &["agent", "spawn", "--cwd", "C:/work", "--name", "w"],
+            r#"{"status":"error","code":"INTERNAL","hint":"agent 'w' (i) was created but did not start: launch raced","args":{"agent_id":"i"}}"#,
+            1,
+        ),
+        (
+            &["agent", "spawn", "worker"],
+            r#"{"agent_id":"i","name":"worker","state":"live","created":false,"notices":[{"code":"omitted","args":{"names":["a.md"]},"line":null,"text":"Notice (omitted): intended behavior. Target — a.md"}]}"#,
+            0,
+        ),
+    ];
+    for (args, body, want_code) in cases {
+        let (host, port, stub) = spawn_capturing_stub(ok_response(body));
+        let url = format!("http://{host}:{port}");
+        let (stdout, code) = run_cli(&url, args, None);
+        let _ = stub.join().expect("stub join");
+        assert_eq!(code, want_code, "{args:?} ← {body}: {stdout}");
+        let printed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+        let sent: serde_json::Value = serde_json::from_str(body).expect("body json");
+        assert_eq!(printed, sent, "{args:?}: {stdout}");
+    }
+}
+
 /// ★A 2xx without evidence of the change is not success★: with the mail query decider even `{}` was exit 0 and the caller believed
 ///   something was created. Pins at the process level that it is a report target (2), not a retry target (1).
 #[test]
@@ -773,7 +832,7 @@ fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemo
 /// when the LLM typed what it learned.
 #[test]
 fn conventional_help_spellings_render_the_same_screens() {
-    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings` have no daemon-side `<family>
+    // ★Only the two the parser accepts as families have the `<family> --help` spelling★: `window`·`settings`·`library` have no daemon-side `<family>
     //   <verb>` entrance and are reached only through `engram help <word>`; the old word `theme` is carried as is (alias resolution is the
     //   daemon's).
     for (spellings, body) in [
@@ -802,6 +861,7 @@ fn conventional_help_spellings_render_the_same_screens() {
         ),
         (vec![vec!["help", "window"]], r#"{"topic":"window"}"#),
         (vec![vec!["help", "settings"]], r#"{"topic":"settings"}"#),
+        (vec![vec!["help", "library"]], r#"{"topic":"library"}"#),
         (vec![vec!["help", "theme"]], r#"{"topic":"theme"}"#),
     ] {
         for args in spellings {
@@ -1323,19 +1383,73 @@ fn a_call_for_a_name_whose_row_was_dropped_does_not_claim_the_name_is_absent() {
     );
     assert!(hint.contains("unreadable"), "must state the facts: {hint}");
 
-    // Control group — without dropped rows it asserts absence as is (proof that the wording above does not always come out).
-    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
+    // Control group — without dropped rows the name is not refused here: it is posted and the daemon's answer printed
+    //   (ADR-0419), so the wording above comes out only when rows were dropped.
+    let unknown = ok_response(
+        r#"{"status":"error","code":"UNKNOWN_COMMAND","hint":"unknown command 'nope.nope' — the daemon's words"}"#,
+    );
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), unknown]);
     let url = format!("http://{host}:{port}");
     let (stdout, code) = run_cli(&url, &["nope.nope", "--x", "1"], None);
-    let _ = stub.join().expect("stub join");
+    let requests = stub.join().expect("stub join");
     assert_eq!(code, 1);
+    assert_eq!(requests.len(), 2, "the call goes out: {requests:?}");
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
     assert!(
         v["hint"]
             .as_str()
             .unwrap_or_default()
-            .contains("does not list"),
+            .contains("the daemon's words"),
         "{stdout}"
+    );
+}
+
+/// ★O. A name the catalog does not list is posted, and the daemon's answer is the one printed★ (ADR-0419): the daemon decides
+///   what is reachable — a command it lists on no route (`library.emptyTrash`, shell only) answers its own `shell-only`
+///   refusal, which a local `UNKNOWN_COMMAND` would have hidden. With no schema the values go as strings. After the daemon's
+///   `UNKNOWN_COMMAND` (a typo) the CLI adds one stderr line naming `engram commands`; after any other answer it adds none.
+#[test]
+fn a_name_the_catalog_does_not_list_is_posted_and_the_daemons_answer_printed() {
+    let shell_only = r#"{"status":"error","code":"UNSUPPORTED","hint":"library.emptyTrash: emptying the trash and deleting for good are done by the user in the library screen","args":{"code":"shell-only","args":{}}}"#;
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), ok_response(shell_only)]);
+    let url = format!("http://{host}:{port}");
+    let (stdout, stderr, code) = run_cli_streams(&url, &["library.emptyTrash", "--rows", "x"]);
+    let requests = stub.join().expect("stub join");
+
+    assert_eq!(code, 1, "a refusal → exit 1: {stdout}");
+    assert_eq!(requests.len(), 2, "list, then the call: {requests:?}");
+    assert!(
+        requests[1].starts_with("POST /control/call HTTP/1.1"),
+        "{}",
+        requests[1]
+    );
+    let sent = request_body(&requests[1]);
+    assert_eq!(sent["name"], "library.emptyTrash", "{sent}");
+    assert_eq!(
+        sent["args"],
+        serde_json::json!({ "rows": "x" }),
+        "no schema, so the value goes as typed: {sent}"
+    );
+    assert_eq!(stdout.trim(), shell_only, "the daemon's answer as is");
+    let catalog_line = format!("{CLI_EXE_NAME} commands");
+    assert!(
+        !stderr.contains(&catalog_line),
+        "no catalog line after a refusal that is not an unknown name: {stderr}"
+    );
+
+    let unknown = ok_response(
+        r#"{"status":"error","code":"UNKNOWN_COMMAND","hint":"unknown command 'nope.nope'"}"#,
+    );
+    let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog(), unknown]);
+    let url = format!("http://{host}:{port}");
+    let (stdout, stderr, code) = run_cli_streams(&url, &["nope.nope"]);
+    let requests = stub.join().expect("stub join");
+    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    assert!(stdout.contains("UNKNOWN_COMMAND"), "{stdout}");
+    assert!(
+        stderr.contains(&catalog_line),
+        "the CLI names its own catalog verb: {stderr}"
     );
 }
 
@@ -1929,4 +2043,107 @@ fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {
             "the hint must state the typed route ({requested}) ({args:?}): {stdout}"
         );
     }
+}
+
+// ── launch waits (ADR-0369) ─────────────────────────────────────────────────────────────────
+
+/// A stub that answers requests in order, each after its own silence — for measuring the CLI's silence window.
+fn spawn_slow_stub(
+    script: Vec<(std::time::Duration, &'static str)>,
+) -> (String, u16, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (silence, response) in script {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            seen.push(read_request(&mut stream));
+            thread::sleep(silence);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+        seen
+    });
+    (addr.ip().to_string(), addr.port(), handle)
+}
+
+/// A catalog with one launch-class entry (`agent.spawnInto`, as the shell registers it) and one ordinary entry.
+fn launch_catalog() -> &'static str {
+    let args = serde_json::json!({
+        "type": "object",
+        "properties": { "cwd": { "type": "string" } },
+        "required": ["cwd"]
+    });
+    let ok = serde_json::json!({ "type": "object", "properties": {}, "required": [] });
+    let mut launch: serde_json::Value = serde_json::from_str(&schema_blob(
+        "agent.spawnInto",
+        "spawn and place",
+        args.clone(),
+        ok.clone(),
+    ))
+    .expect("blob");
+    launch["deadline"] = serde_json::json!("Launch");
+    catalog_response(vec![
+        catalog_row("agent.spawnInto", &launch.to_string(), true),
+        catalog_row(
+            "tab.create",
+            &schema_blob("tab.create", "open a tab", args, ok),
+            true,
+        ),
+    ])
+}
+
+/// The CLI waits past its shared 10 s silence window for a launch — `engram agent spawn`, and a call whose catalog entry
+/// states the launch class — while an ordinary call still gives up at 10 s. The three run side by side (the stub's
+/// silence is real time: 11 s).
+#[test]
+fn launch_verbs_wait_past_the_shared_silence_window_and_ordinary_calls_do_not() {
+    let silence = std::time::Duration::from_secs(11);
+    let run = |script: Vec<(std::time::Duration, &'static str)>, args: &'static [&'static str]| {
+        thread::spawn(move || {
+            let (host, port, stub) = spawn_slow_stub(script);
+            let url = format!("http://{host}:{port}");
+            let started = std::time::Instant::now();
+            let (stdout, code) = run_cli(&url, args, None);
+            let took = started.elapsed();
+            drop(stub);
+            (stdout, code, took)
+        })
+    };
+    let spawn = run(
+        vec![(
+            silence,
+            ok_response(r#"{"agent_id":"i","name":"w","state":"live","created":false}"#),
+        )],
+        &["agent", "spawn", "w"],
+    );
+    let launch_call = run(
+        vec![
+            (std::time::Duration::ZERO, launch_catalog()),
+            (silence, ok_response("{}")),
+        ],
+        &["agent.spawnInto", "--cwd", "C:/work"],
+    );
+    let ordinary_call = run(
+        vec![
+            (std::time::Duration::ZERO, launch_catalog()),
+            (silence, ok_response("{}")),
+        ],
+        &["tab.create", "--cwd", "C:/work"],
+    );
+
+    let (stdout, code, took) = spawn.join().expect("agent spawn");
+    assert_eq!(code, 0, "agent spawn waits past 10 s: {stdout}");
+    assert!(took >= silence, "{took:?}");
+    let (stdout, code, took) = launch_call.join().expect("launch call");
+    assert_eq!(code, 0, "a launch-class call waits past 10 s: {stdout}");
+    assert!(took >= silence, "{took:?}");
+    // Exit 1 shows the CLI did not wait for the reply (a CLI that waited would get `{}` and exit 0) — not by itself that
+    // the failure was the 10 s window; a wall-clock upper bound here would count process start-up too and flake.
+    let (stdout, code, _took) = ordinary_call.join().expect("ordinary call");
+    assert_eq!(code, 1, "an ordinary call gives up at its 10 s: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v["status"], "error", "{stdout}");
 }
