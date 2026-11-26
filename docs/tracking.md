@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-138 | asset-library test `a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` failed once under full workspace load (stat count 3, expected 4) | Bug | Not started · seen in local QA 2026-11-26 · passed on rerun and at the base |
 | T-137 | S25 step 22 P4 — a lone `hooks.json` delete now asks; a `SKILL.md` arriving in a referenced hook folder asks nothing | Main | Decision pending (user) — current: delete asks, arrival does not |
 | T-136 | S25 step 22 O7 — the post-open hook verdict of a boot-restored codex JSON agent (and of a Withheld caller) is only logged, at info | Main | Decision pending (user) — current: info |
 | T-135 | S25 client stage — a structure view of the whole reference graph (agents → presets → items), beside the existing screens | Main | Decided direction — first client-stage slot, read-only, plugin-shaped (T-109) |
@@ -378,6 +379,12 @@ Full text before the simplification (investigation records · reverted attempts 
 - **Reintroduction:** In the operation stage, decide the allowed cwd policy (e.g. only under the Engram workspace) and then validate in manager.spawn_agent or the command layer.
 
 ## Bug
+
+### T-138. asset-library test counts a stat that may not have happened yet
+- **Status:** not started — seen once in the local QA of the step-22 CI fix (2026-11-26, full `cargo test --workspace`); passed in two reruns on the same tree and once at the base `f7cbdac2`. Not caused by that fix (its change is in the platform crate's test module).
+- **Case:** `tests::a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` (asset-library `src/lib.rs`) asserts `ops.stats_of("/lib") == 4`; got 3: `panicked at crates\engram-dashboard-asset-library\src\lib.rs:5991:9: assertion left == right failed, left: 3, right: 4`. The stats run through `BoundedIo` on spawned threads (`ThreadSpawn`), so the count can be read before one of them has counted — timing-dependent (inferred from the test's own comment and setup, not traced). ADR-0038.
+- **Repro:** `cargo test -p engram-dashboard-asset-library -- --exact tests::a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one` — fails only sometimes, under load.
+- **Next:** make the test wait for the walk's stat threads (or count only what the resolve path awaits) instead of reading the counter at once.
 
 ### T-124. base `write_atomic` opens its temp with `File::create`
 - **Status:** not started — pre-existing; found by the S25 step 9b U2a review (Codex). 9b's exclude-line write uses its own create-new temp instead.
