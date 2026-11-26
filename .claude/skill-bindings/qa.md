@@ -39,9 +39,9 @@
 ## 전체 회귀 = 로컬
 
 - qa 는 작업 트리를 잰다 — 커밋 · push 를 기다리지 않는다. 메인은 qa 뒤에 커밋한다.
-- qa 는 시작할 때 잰 트리를 지문으로 적어 보고에 싣는다 — 인덱스 사본에 작업 트리를 통째로 올린 트리 id 와 HEAD 다(진짜 인덱스는 건드리지 않는다):
+- qa 는 시작할 때 잰 트리를 지문으로 적어 보고에 싣는다 — 인덱스 사본에 payload 의 변경 파일 목록만 올린 트리 id 와 HEAD 다(진짜 인덱스는 건드리지 않는다). 변경과 무관한 미추적 폴더가 섞이지 않게 목록만 올린다:
   ```bash
-  cp "$(git rev-parse --git-path index)" "$QA_TMP/fp.idx"; GIT_INDEX_FILE="$QA_TMP/fp.idx" git add -A 2>/dev/null
+  cp "$(git rev-parse --git-path index)" "$QA_TMP/fp.idx"; GIT_INDEX_FILE="$QA_TMP/fp.idx" git add -A -- <변경 파일 목록> 2>/dev/null
   echo "HEAD=$(git rev-parse HEAD) TREE=$(GIT_INDEX_FILE="$QA_TMP/fp.idx" git write-tree 2>/dev/null)"
   ```
 - 메인은 커밋할 것을 스테이징한 뒤 `git rev-parse HEAD` · `git write-tree` 를 그 두 값과 대조한다 — 다르면 qa 를 다시 돌리거나 잰 트리 그대로 커밋한다.
